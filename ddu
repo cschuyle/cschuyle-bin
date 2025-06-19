@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+set -e
+
+# This is for my Mac only at the moment
+a=( $(df -H|grep /System/Volumes/Data\$) )
+total=${a[1]}
+used=${a[2]}
+avail=${a[3]}
+percent_used=${a[4]}
+echo "Disk Avail $avail of $total, $percent_used used"
