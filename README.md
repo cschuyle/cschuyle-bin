@@ -1,0 +1,1 @@
+My $HOME/bin directory
