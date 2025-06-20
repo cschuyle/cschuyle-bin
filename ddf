@@ -29,5 +29,5 @@ for dir in ${dirs[@]}; do
     used=${a[2]}
     avail=${a[3]}
     percent_used=${a[4]}
-    echo "Disk Avail $avail of $total, $percent_used used"
+    echo "[$dir] Disk Avail $avail of $total, $percent_used used"
 done
