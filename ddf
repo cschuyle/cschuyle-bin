@@ -1,11 +1,33 @@
 #!/usr/bin/env bash
+set -o errexit # set -e
+set -o pipefail
+script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+script_file=$(basename "$0")
 
-set -e
+source "$script_dir/config.sh"
 
-# This is for my Mac only at the moment
-a=( $(df -H|grep /System/Volumes/Data\$) )
-total=${a[1]}
-used=${a[2]}
-avail=${a[3]}
-percent_used=${a[4]}
-echo "Disk Avail $avail of $total, $percent_used used"
+if [[ -z "$CS_DF_DATA_DIRS" ]] ; then
+    echo "ERROR: CS_DF_DATA_DIRS is not set."
+    exit 1
+fi
+
+# echo CS_DF_DATA_DIRS [$CS_DF_DATA_DIRS]
+dirs=($CS_DF_DATA_DIRS)
+# echo dirs ${dirs[@]}
+
+for dir in ${dirs[@]}; do
+    # echo DIR $dir
+    set +e
+    a=( $(df -H|grep "$dir"\$) )
+    set -e
+    # echo A [$a]
+    if [[ -z "$a" ]]; then
+        echo WARNING: No match for $dir 1>&2
+        continue
+    fi
+    total=${a[1]}
+    used=${a[2]}
+    avail=${a[3]}
+    percent_used=${a[4]}
+    echo "Disk Avail $avail of $total, $percent_used used"
+done
