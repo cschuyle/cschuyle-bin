@@ -12,8 +12,8 @@ if [[ -z "$CS_DF_DATA_DIRS" ]] ; then
 fi
 
 # Colors for terminals
-if [ -t 1 ]; then
-  # stdout is open to a terminal
+if [ -t 1 ] && command -v tput >/dev/null 2>&1; then 
+    # stdout is open to a terminal and tput is available
 
     txtblk=$(tput setaf 0) # Black - Regular
     txtred=$(tput setaf 1) # Red
@@ -23,7 +23,17 @@ if [ -t 1 ]; then
     txtpur=$(tput setaf 5) # Purple
     txtcyn=$(tput setaf 6) # Cyan
     txtwht=$(tput setaf 7) # White
-    txtreset=$(tput sgr0) # Reset to defaul
+    txtreset=$(tput sgr0) # Reset to default
+
+    # This doesn't work - TODO figure out how to do it without tput
+    # txtreset='\e[0;30m' # Black - Regular
+    # txtred='\e[0;31m' # Red
+    # txtgrn='\e[0;32m' # Green
+    # txtylw='\e[0;33m' # Yellow
+    # txtblu='\e[0;34m' # Blue
+    # txtpur='\e[0;35m' # Purple
+    # txtcyn='\e[0;36m' # Cyan
+    # txtwht='\e[0;37m' # White
 
 fi
 
