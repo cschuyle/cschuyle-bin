@@ -12,20 +12,31 @@ if [[ -z "$CS_DF_DATA_DIRS" ]] ; then
 fi
 
 # Colors for terminals
-if [ -t 1 ] && command -v tput >/dev/null 2>&1; then 
+#if [ -t 1 ] && command -v tput >/dev/null 2>&1; then 
+if [ -t 1 ]; then 
     # stdout is open to a terminal and tput is available
 
-    txtblk=$(tput setaf 0) # Black - Regular
-    txtred=$(tput setaf 1) # Red
-    txtgrn=$(tput setaf 2) # Green
-    txtylw=$(tput setaf 3) # Yellow
-    txtblu=$(tput setaf 4) # Blue
-    txtpur=$(tput setaf 5) # Purple
-    txtcyn=$(tput setaf 6) # Cyan
-    txtwht=$(tput setaf 7) # White
-    txtreset=$(tput sgr0) # Reset to default
+    # txtblk=$(tput setaf 0) # Black - Regular
+    # txtred=$(tput setaf 1) # Red
+    # txtgrn=$(tput setaf 2) # Green
+    # txtylw=$(tput setaf 3) # Yellow
+    # txtblu=$(tput setaf 4) # Blue
+    # txtpur=$(tput setaf 5) # Purple
+    # txtcyn=$(tput setaf 6) # Cyan
+    # txtwht=$(tput setaf 7) # White
+    # txtreset=$(tput sgr0) # Reset to default
 
-    # This doesn't work - TODO figure out how to do it without tput
+    # Do it without tput
+    txtreset="\033[0m"
+    txtblk='\e[0;30m' # Black - Regular
+    txtred='\e[0;31m' # Red
+    txtgrn='\e[0;32m' # Green
+    txtylw='\e[0;33m' # Yellow
+    txtblu='\e[0;34m' # Blue
+    txtpur='\e[0;35m' # Purple
+    txtcyn='\e[0;36m' # Cyan
+    txtwht='\e[0;37m' # White
+
     # txtreset='\e[0;30m' # Black - Regular
     # txtred='\e[0;31m' # Red
     # txtgrn='\e[0;32m' # Green
@@ -62,5 +73,5 @@ for dir in ${dirs[@]}; do
         color="$txtgrn"
     fi
     avail="$color$avail$txtreset"
-    echo "[$txtblu$dir$txtreset] Disk Avail $avail of $total, $percent_used used"
+    echo -e "[$txtblu$dir$txtreset] Disk Avail $avail of $total, $percent_used used"
 done
