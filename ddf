@@ -11,6 +11,22 @@ if [[ -z "$CS_DF_DATA_DIRS" ]] ; then
     exit 1
 fi
 
+# Colors for terminals
+if [ -t 1 ]; then
+  # stdout is open to a terminal
+
+    txtblk=$(tput setaf 0) # Black - Regular
+    txtred=$(tput setaf 1) # Red
+    txtgrn=$(tput setaf 2) # Green
+    txtylw=$(tput setaf 3) # Yellow
+    txtblu=$(tput setaf 4) # Blue
+    txtpur=$(tput setaf 5) # Purple
+    txtcyn=$(tput setaf 6) # Cyan
+    txtwht=$(tput setaf 7) # White
+    txtreset=$(tput sgr0) # Reset to defaul
+
+fi
+
 # echo CS_DF_DATA_DIRS [$CS_DF_DATA_DIRS]
 dirs=($CS_DF_DATA_DIRS)
 # echo dirs ${dirs[@]}
@@ -29,5 +45,12 @@ for dir in ${dirs[@]}; do
     used=${a[2]}
     avail=${a[3]}
     percent_used=${a[4]}
-    echo "[$dir] Disk Avail $avail of $total, $percent_used used"
+
+    if [[ "$avail" =~ ^\d\d?\d?M$ ]]; then
+        color="$txtgrn"
+    else
+        color="$txtgrn"
+    fi
+    avail="$color$avail$txtreset"
+    echo "[$txtblu$dir$txtreset] Disk Avail $avail of $total, $percent_used used"
 done
