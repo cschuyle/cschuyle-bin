@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -o errexit # set -e
+set -o pipefail
+script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+script_file=$(basename "$0")
+
+# Done, but only non-MP4 video files
+
+# Check if at least one directory was provided
+if [ $# -eq 0 ]; then
+  echo "Usage: $0 <dir1> [dir2 ... dirN]"
+  exit 1
+fi
+
+QB_TEMP_DIR=temp
+DONE_DIR=_DONE
+MP4_DIR=_MP4
+
+is_a_dest_dir() {
+    local dir="$1"
+    if [[ "$dir" == "@eaDir" || "$dir" == "$QB_TEMP_DIR" || "$dir" == "$DONE_DIR" || "$dir" == "$MP4_DIR" ]]; then
+		return 0  # true
+    else
+        return 1  # false
+    fi
+}
+
+# Loop through all provided directories
+
+for DIR in "$@"; do
+  # Check if it's a valid directory
+  if [ ! -d "$DIR" ]; then
+#    echo "Warning: '$DIR' is not a directory" >&2
+    continue
+  fi
+
+  if is_a_dest_dir "$DIR"; then continue; fi
+
+  if [[ ! -z "$(find "$DIR" -type f -iname '*.!qB' | grep -v '/._')" ]]; then
+	  continue
+  else
+    if [[ ! -z "$(find "$DIR" -type f \( -iname '*.mkv' -o -iname '*.avi' \) | grep -v '/._')" ]]; then
+      has_non_mp4=1
+    fi
+    if [[ ! -z "$(find "$DIR" -type f \( -iname '*.mp4' -o -iname '*.m4v' \) | grep -v '/._')" ]]; then
+      has_mp4=1
+    fi
+    if [[ ! -z "$has_non_mp4" && ! -z "$has_mp4" ]]; then
+      echo "$DIR # Has both MP4 and non-MP$ video files"
+    elif [[ -z "$has_non_mp4" && -z "$has_mp4" ]]; then
+      echo "# No video files in '$DIR'" >&2
+    fi
+  fi
+done

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -o errexit # set -e
+set -o pipefail
+script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+script_file=$(basename "$0")
+
+# Check if at least one directory was provided
+if [ $# -eq 0 ]; then
+  echo "Usage: $0 <dir1> [dir2 ... dirN]"
+  exit 1
+fi
+
+QB_TEMP_DIR=temp
+DONE_DIR=_DONE
+MP4_DIR=_MP4
+
+is_a_dest_dir() {
+    local dir="$1"
+    if [[ "$dir" == "@eaDir" || "$dir" == "$QB_TEMP_DIR" || "$dir" == "$DONE_DIR" || "$dir" == "$MP4_DIR" ]]; then
+		return 0  # true
+    else
+        return 1  # false
+    fi
+}
+
+# Remind the user the FIRST time
+echo "mkdir -p '$MP4_DIR'"
+
+# Loop through all provided directories
+
+for DIR in "$@"; do
+  # Check if it's a valid directory
+  if [ ! -d "$DIR" ]; then
+#    echo "Warning: '$DIR' is not a directory" >&2
+    continue
+  fi
+
+  if is_a_dest_dir "$DIR"; then continue; fi
+
+  # Search recursively for files ending in .mkv, .avi, or .!qB
+  if [[ ! -z "$(find "$DIR" -type f \( -iname '*.mkv' -o -iname '*.avi' -o -iname '*.!qB' \) | grep -v '/._')" ]]; then
+    # Found at least one such file — skip
+    continue
+  elif [[ ! -z "$(find "$DIR" -type f \( -iname '*.mp4' -o -iname '*.m4v' -o -iname '*.!qB' \) | grep -v '/._')" ]]; then
+    echo "[[ -d '$MP4_DIR' ]] && mv '$DIR' '$MP4_DIR'"
+  else
+    echo "# No video files in '$DIR'" >&2
+  fi
+done

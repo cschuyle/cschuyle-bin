@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -o errexit # set -e
+set -o pipefail
+script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+script_file=$(basename "$0")
+
+# Exit codes: 
+# 100 - clean, but not split
+# else - dirty or doesn't exist
+status() {
+  dir="$1"
+
+  if [[ -z "$dir" ]] ; then
+    echo USAGE: $script_file status [directory to check videos status]
+	exit 1
+  fi
+
+  if [[ ! -z "$(find "$dir" -name \*qB)" ]] ; then
+    echo "NOPE! Download Not Finished (found .!qB files)"
+    exit 2
+  fi
+
+  if [[ -z "$(find "$dir" -name \*mp4 -o -name \*m4v)" ]] ; then
+    echo "NOPE! No videos (mp4 or m4v) exist in that directory."
+    exit 3
+  fi
+
+  if [[ ! -z "$(find "$dir" -name \*mkv)" ]] ; then
+    echo "NOPE! .mkv files exist. split-vids.sh to split it up"
+    exit 100
+  fi
+
+  if [[ ! -z "$(find "$dir" -name \*avi)" ]] ; then
+    echo "NOPE! .avi files exist. split-vids.sh to split it up"
+    exit 100
+  fi
+
+
+  echo "That's a clean videos directory AFAIK"
+  exit 0
+}
+
+split() {
+
+  usage() {
+    echo "Usage:"
+    echo "  $script_file split [source directory] [mp4 dest dir] [optional: originals dest dir]"
+  }
+
+  if [[ -z "$1" || -z "$2" ]] ; then
+    usage
+    exit 1
+  fi
+
+  fromdir="$1"
+  todir="$2"
+  origsdir=/volume1/cschuyle/_Originals/
+
+  if [[ ! -d "$origsdir" ]]; then
+    echo "Directory '$origsdir' does not exist"
+	exit 1
+  fi
+
+  if [[ "$fromdir" =~ ^-?-?help ]]; then
+    usage
+    exit 0
+  fi
+
+  if [[ ! -d "$fromdir" ]]; then
+    echo "From-dir [$fromdir] does not exist"
+    exit 1
+  fi
+
+  if [[ ! -d "$todir" ]]; then
+    echo "Destination dir [$todir] does not exist"
+    exit 1
+  fi
+
+  if [[ ! -d "$origsdir" ]]; then
+    echo "Originals dest dir [$origsdir] does not exist"
+    exit 1
+  fi
+
+  set +e
+  vids status "$fromdir"
+  if [[ $? -ne 0 && $? -ne 100 ]]; then
+    exit $status
+  fi
+  set -e
+
+  newdir="$todir/$(basename "$fromdir")"
+  splittodir="$origsdir/$(basename "$fromdir")"
+
+  set -o noclobber
+  if [[ -d "$splittodir" ]]; then
+    echo "WARNING: [$splittodir] already exists. Prepare to Fail"
+  fi
+
+  echo @@@@
+
+  domove=
+  if [[ "$todir" == "." ]]; then
+    echo Will move $fromdir to  $todir and then move any non-MP4 video files to $origsdir
+  else
+    echo Will move any non-MP4 video files from [$fromdir] to [$origsdir]
+    set -x
+    mv "$fromdir" "$todir"
+  fi
+
+  echo
+
+  exists() {
+      [ -e "$1" ]
+  }
+
+  mkdir -p "$splittodir"
+  # Add any other extensions that are missing from the below
+  set -x
+  if exists "$todir"/"$(basename "$fromdir")"/*avi ; then \mv "$todir"/"$(basename "$fromdir")"/*avi "$splittodir"; fi
+  if exists "$todir"/"$(basename "$fromdir")"/*mkv ; then \mv "$todir"/"$(basename "$fromdir")"/*mkv "$splittodir"; fi
+  set +x
+}
+
+case "$1" in
+    status) "$@"; exit;;
+    split) "$@"; exit;;
+esac
+
+cat <<EOF
+USAGE:
+  $script_file status - check status of videos directory (downloaded? split?)
+EOF
+exit 1
