@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Copyright (C) 2006 Carlton Schuyler
+
+USAGE="Usage: tarsync [OPTIONS] SOURCE [SOURCE...]
+
+Synchronize files using tar with various options
+
+OPTIONS:
+  -n, --dry-run           Perform a trial run with no changes made
+  -p, --port PORT         Specify port number for connection
+  -U, --overwrite-newer   Use size-only comparison to overwrite newer files
+  ---z                    Enable compression (z flag)
+  -h, --help              Show this help message
+
+ARGUMENTS:
+  SOURCE                  One or more source paths to synchronize
+
+EXAMPLES:
+  tarsync /path/to/source
+  tarsync --dry-run --port 2222 /path/to/source1 /path/to/source2
+  tarsync -U ---z /path/to/source
+
+AUTHOR: Carlton Schuyler
+VERSION: Jan 10 2026
+"
+
+# Parse command line arguments
+DRY_RUN=false
+PORT_ARG=""
+SOURCES=()
+# Do not compress by default.
+Z=
+# Do not overwrite newer files by default. You might want to use --overwrite-newer if a previous attempt created a partial file at the destination.
+# You can alsop set the env var TARSYNC_OVERWRITE_NEWER
+UPDATE_PARAM=" --update"
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --dry-run|-n)
+            DRY_RUN=true
+            shift
+            ;;
+        --port|-p)
+            PORT=$1
+            PORT_ARG="-p $PORT"
+            shift
+            ;;
+        --overwrite-newer|-U)
+            UPDATE_PARAM=" --size-only"
+            shift
+            ;;
+        ---z)
+            Z="z"
+            shift
+            ;;
+        -*)
+            echo "Unknown option $1" >&2
+            exit 1
+            ;;
+        *)
+            SOURCES+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Check environment variable for overwrite-newer setting
+if [[ -n "${TARSYNC_OVERWRITE_NEWER:-}" ]]; then
+  UPDATE_PARAM=" --size-only"
+fi
+
+# Last argument is destination, rest are sources
+if [[ ${#SOURCES[@]} -lt 2 ]]; then
+    echo "$USAGE" >&2
+    exit 1
+fi
+echo SOURCES "${SOURCES[@]}"
+DESTINATION="${SOURCES[$((${#SOURCES[@]}-1))]}"
+unset "SOURCES[$((${#SOURCES[@]}-1))]"
+
+# Parse destination into host and directory
+if [[ "$DESTINATION" == *:* ]]; then
+    DEST_HOST="${DESTINATION%%:*}"
+    DEST_DIR="${DESTINATION#*:}"
+else
+    DEST_HOST=""
+    DEST_DIR="$DESTINATION"
+fi
+
+# Generate list of files that need to be copied using rsync
+# Create temporary file for file list
+if [[ "$DRY_RUN" == true ]]; then
+  TEMP_FILE="./tarsync_files_$$.txt"
+else
+  TEMP_FILE=$(mktemp)
+  trap "rm -f '$TEMP_FILE'" EXIT
+fi
+
+# Generate list of files that need to be copied using rsync
+if [[ -n "$DEST_HOST" ]]; then
+  set -x
+  rsync --dry-run --archive --verbose${UPDATE_PARAM} --out-format='%n' "${SOURCES[@]}" "$DEST_HOST:$DEST_DIR/" | \
+    # Filter out summary lines and directories
+    grep -v '^sen\|^total\|^$' | \
+    grep -v '/$' > "$TEMP_FILE"
+  set +x
+else
+  set -x
+  rsync --dry-run --archive --verbose${UPDATE_PARAM} --out-format='%n' "${SOURCES[@]}" "$DEST_DIR/" | \
+    # Filter out summary lines and directories
+    grep -v '^sen\|^total\|^$' | \
+    grep -v '/$' > "$TEMP_FILE"
+  set +x
+fi
+
+# If dry-run, output the temp file name and its contents
+if [[ "$DRY_RUN" == true ]]; then
+  echo "List of files to be transferred written to: $TEMP_FILE"
+fi
+
+# Create tar archive and pipe to destination
+if [[ -n "$DEST_HOST" ]]; then
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "tar -c${Z}vf - -T \"$TEMP_FILE\" | ssh $PORT_ARG \"$DEST_HOST\" \"cd \\\"$DEST_DIR\\\" && tar -x${Z}f -\""
+  else
+    set -x
+    tar -c${Z}vf - -T "$TEMP_FILE" | ssh $PORT_ARG "$DEST_HOST" "cd \"$DEST_DIR\" && tar -x${Z}f -"
+    set +x
+  fi
+else
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "tar -c${Z}vf - -T \"$TEMP_FILE\" | (cd \"$DEST_DIR\" && tar -x${Z}f -)"
+  else
+    set -x
+    tar -c${Z}vf - -T "$TEMP_FILE" | (cd "$DEST_DIR" && tar -x${Z}f -)
+    set +x
+  fi
+fi
