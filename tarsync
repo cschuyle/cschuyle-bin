@@ -11,7 +11,7 @@ OPTIONS:
   -p, --port PORT         Specify port number for connection
   -U, --overwrite-newer   Use size-only comparison to overwrite newer files
   ---z                    Enable compression (z flag)
-  -h, --help              Show this help message
+   -h, --help              Show this help message
 
 ARGUMENTS:
   SOURCE                  One or more source paths to synchronize

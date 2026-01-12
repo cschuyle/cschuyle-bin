@@ -46,6 +46,6 @@ for DIR in "$@"; do
   elif [[ ! -z "$(find "$DIR" -type f \( -iname '*.m4v' -o -iname '*.mp4' -o -iname '*.avi' -o -iname '*.mkv' \) | grep -v '/._')" ]]; then
     printf "[[ -d '$DONE_DIR' ]] && mv '$DIR' '$DONE_DIR'\n"
   else
-	echo "# No video files in '$DIR'" >&2
+	  [[ ! -z "$VERBOSE" ]] && echo "# No video files in '$DIR'" >&2
   fi
 done

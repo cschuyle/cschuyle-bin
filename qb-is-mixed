@@ -15,19 +15,26 @@ fi
 QB_TEMP_DIR=temp
 DONE_DIR=_DONE
 MP4_DIR=_MP4
+MIXED_DIR=_MIXED
 
 is_a_dest_dir() {
     local dir="$1"
-    if [[ "$dir" == "@eaDir" || "$dir" == "$QB_TEMP_DIR" || "$dir" == "$DONE_DIR" || "$dir" == "$MP4_DIR" ]]; then
+    if [[ "$dir" == "@eaDir" || "$dir" == "$QB_TEMP_DIR" || "$dir" == "$DONE_DIR" || "$dir" == "$MP4_DIR" || "$dir" == "$MIXED_DIR" ]]; then
 		return 0  # true
     else
         return 1  # false
     fi
 }
 
+# Remind the user the FIRST time
+echo "mkdir -p '$MIXED_DIR'"
+
 # Loop through all provided directories
 
 for DIR in "$@"; do
+  has_mp4=
+  has_non_mp4=
+
   # Check if it's a valid directory
   if [ ! -d "$DIR" ]; then
 #    echo "Warning: '$DIR' is not a directory" >&2
@@ -46,9 +53,9 @@ for DIR in "$@"; do
       has_mp4=1
     fi
     if [[ ! -z "$has_non_mp4" && ! -z "$has_mp4" ]]; then
-      echo "$DIR # Has both MP4 and non-MP$ video files"
+      echo "[[ -d $MIXED_DIR ]] && mv '$DIR' $MIXED_DIR"
     elif [[ -z "$has_non_mp4" && -z "$has_mp4" ]]; then
-      echo "# No video files in '$DIR'" >&2
+      [[ ! -z "$VERBOSE" ]] && echo "# No video files in '$DIR'" >&2
     fi
   fi
 done
