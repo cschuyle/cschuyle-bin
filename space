@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+#!/usr/bin/env bash
+
+# Parse command line arguments
+show_all=false
+human_readable=false
+all_files_param=
+
+while [[ $# -gt 0 ]]; do
+case $1 in
+    --help)
+    echo "Usage: space [-h] [-a] [files/directories...]"
+    echo "  -h: human readable size output"
+    echo "  -a: include hidden (dot) files"
+    echo "  files/directories: specific paths to analyze (default: current directory contents)"
+    return 0
+    ;;
+    -h)
+    human_readable=true
+    shift
+    ;;
+    -a)
+    all_files_param='-a'
+    shift
+    ;;
+    -ah|-ha)
+    human_readable=true
+    all_files_param='-a'
+    shift
+    ;;
+    -*)
+    echo "Unknown argument: $1" >&2
+    return 1
+    ;;
+    *)
+    break
+    ;;
+esac
+done
+
+output_line() {
+    local size=$1
+    local path=$2
+
+    local val=$size
+    local unit=
+    if [[ "$human_readable" != true ]]; then
+        printf "%8s\t%q\n" "$val" "$path"
+        return
+    fi
+    if [ "$val" -gt 0 ]; then unit=K; fi
+    if [ "$val" -ge 1024 ]; then val=$((val/1024)); unit=M; fi
+    if [ "$val" -ge 1024 ]; then val=$((val/1024)); unit=G; fi
+    printf "%8s%s\t%q\n" "$val" "$unit" "$path"
+}
+
+if [[ $# -gt 0 ]]
+then
+    du -sk "$@" |
+    sort -n |
+    awk -F '\t' '{ print $1 "\t" $2 }' |
+    while IFS=$'\t' read -r size path; do
+        output_line "$size" "$path"
+    done
+elif [[ "$all_files_param" == "-a" ]]
+then
+    du -sk * .??* |
+    sort -n |
+    awk -F '\t' '{ print $1 "\t" $2 }' |
+    while IFS=$'\t' read -r size path; do
+        output_line "$size" "$path"
+    done
+else
+    du -sk * |
+    sort -n |
+    awk -F '\t' '{ print $1 "\t" $2 }' |
+    while IFS=$'\t' read -r size path; do
+        output_line "$size" "$path"
+    done
+fi
