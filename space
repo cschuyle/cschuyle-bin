@@ -45,13 +45,13 @@ output_line() {
     local val=$size
     local unit=' '
     if [[ "$human_readable" != true ]]; then
-        printf "%6s  %q\n" "$val" "$path"
+        printf "%9s  %q\n" "$val" "$path"
         return
     fi
     if [ "$val" -gt 0 ]; then unit=K; fi
     if [ "$val" -ge 1024 ]; then val=$((val/1024)); unit=M; fi
     if [ "$val" -ge 1024 ]; then val=$((val/1024)); unit=G; fi
-    printf "%6s%s  %q\n" "$val" "$unit" "$path"
+    printf "%5s%s  %q\n" "$val" "$unit" "$path"
 }
 
 if [[ $# -gt 0 ]]
