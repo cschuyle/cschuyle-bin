@@ -40,8 +40,9 @@ set -x
 #   "$src"/ "$dst"/
 
 
-find . -type f \( -name '*.mkv' -o -name '*.MKV' -o -name '*.avi' -o -name '*.AVI' -o -name '*.mov' -o -name '*.MOV' \) -print0 |
+find "$src"/ -type f \( -name '*.mkv' -o -name '*.MKV' -o -name '*.avi' -o -name '*.AVI' -o -name '*.mov' -o -name '*.MOV' \) -print0 |
     while IFS= read -r -d '' f; do
-        mkdir -p "$dst/$(dirname "$f")"
-        mv "$f" "$dst/$f"
+        rel_path="${f#$src/}"
+        mkdir -p "$dst/$(dirname "$rel_path")"
+        mv "$f" "$dst/$rel_path"
     done
