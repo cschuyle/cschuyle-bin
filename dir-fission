@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+dry_run_flag=''
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run|-n)
+            dry_run_flag="--dry-run"
+            shift
+            ;;
+        -*)
+            echo "Usage: $0 [--dry-run|-n] <source> <destination>"
+            echo "  --dry-run|-n: show what would be done without actually doing it"
+            echo "  source: source directory to move video files from"
+            echo "  destination: destination directory (default: \$DRAGNON_MYDATA_ROOT/_Originals)"
+
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+src="$1"
+dst="${2:-$DRAGNON_MYDATA_ROOT/_Originals}"
+
+set -x
+
+# rsync $dry_run_flag -ar -vv \
+#   --include='*/' \
+#   --include='*.mkv' \
+#   --include='*.avi' \
+#   --include='*.mov' \
+#   --include='*.MKV' \
+#   --include='*.AVI' \
+#   --include='*.MOV' \
+#   --exclude='*' \
+#   --remove-source-files \
+#   "$src"/ "$dst"/
+
+
+find . -type f \( -name '*.mkv' -o -name '*.MKV' -o -name '*.avi' -o -name '*.AVI' -o -name '*.mov' -o -name '*.MOV' \) -print0 |
+    while IFS= read -r -d '' f; do
+        mkdir -p "$dst/$(dirname "$f")"
+        mv "$f" "$dst/$f"
+    done

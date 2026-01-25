@@ -1,0 +1,4 @@
+TargetDir
+SourceDir
+SourceDir/*
+SourceDir/**
