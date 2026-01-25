@@ -25,8 +25,7 @@ done
 src="$1"
 dst="${2:-$DRAGNON_MYDATA_ROOT/_Originals}"
 
-set -x
-
+# This is slow and uses lots of space, but necessary if you are crossing filesystems. Don't Cross Filesystems.
 # rsync $dry_run_flag -ar -vv \
 #   --include='*/' \
 #   --include='*.mkv' \
@@ -44,5 +43,7 @@ find "$src"/ -type f \( -name '*.mkv' -o -name '*.MKV' -o -name '*.avi' -o -name
     while IFS= read -r -d '' f; do
         rel_path="${f#$src/}"
         mkdir -p "$dst/$(dirname "$rel_path")"
+        set -x
         mv "$f" "$dst/$rel_path"
+        { set +x; } 2>/dev/null
     done

@@ -1,4 +1,2 @@
-TargetDir
-SourceDir
-SourceDir/*
-SourceDir/**
+test_source
+test_target
