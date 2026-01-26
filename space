@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-#!/usr/bin/env bash
 
 # Parse command line arguments
 show_all=false
@@ -13,7 +12,7 @@ case $1 in
     echo "  -h: human readable size output"
     echo "  -a: include hidden (dot) files"
     echo "  files/directories: specific paths to analyze (default: current directory contents)"
-    return 0
+    exit 0
     ;;
     -h)
     human_readable=true
@@ -30,7 +29,7 @@ case $1 in
     ;;
     -*)
     echo "Unknown argument: $1" >&2
-    return 1
+    exit 1
     ;;
     *)
     break
@@ -39,8 +38,8 @@ esac
 done
 
 output_line() {
-    local size=$1
-    local path=$2
+    local size="$1"
+    local path="$2"
 
     local val=$size
     local unit=' '
@@ -48,33 +47,37 @@ output_line() {
         printf "%9s  %q\n" "$val" "$path"
         return
     fi
-    if [ "$val" -gt 0 ]; then unit=K; fi
-    if [ "$val" -ge 1024 ]; then val=$((val/1024)); unit=M; fi
-    if [ "$val" -ge 1024 ]; then val=$((val/1024)); unit=G; fi
-    printf "%5s%s  %q\n" "$val" "$unit" "$path"
+    human=$(awk -v v="$val" 'BEGIN{
+        f=v; u="K";
+        if (f>=1024){f/=1024; u="M"}
+        if (f>=1024){f/=1024; u="G"}
+        if (f>=1024){f/=1024; u="T"}
+        printf "%.1f%s", f, u
+    }')
+    printf "%7s  %q\n" "$human" "$path"
 }
 
 if [[ $# -gt 0 ]]
 then
     du -sk "$@" |
     sort -n |
-    awk -F '\t' '{ print $1 "\t" $2 }' |
-    while IFS=$'\t' read -r size path; do
+    while IFS= read -r line; do
+        read -r size path <<< "$line"
         output_line "$size" "$path"
     done
 elif [[ "$all_files_param" == "-a" ]]
 then
     du -sk * .??* |
     sort -n |
-    awk -F '\t' '{ print $1 "\t" $2 }' |
-    while IFS=$'\t' read -r size path; do
+     while IFS= read -r line; do
+        read -r size path <<< "$line"
         output_line "$size" "$path"
     done
 else
     du -sk * |
     sort -n |
-    awk -F '\t' '{ print $1 "\t" $2 }' |
-    while IFS=$'\t' read -r size path; do
+    while IFS= read -r line; do
+        read -r size path <<< "$line"
         output_line "$size" "$path"
     done
 fi
