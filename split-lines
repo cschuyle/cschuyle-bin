@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+scriptname=$(basename "$0")
+
+if [[ "${1:-}" == '-h' || "${1:-}" == '--help' ]]
+then
+    echo "Usage: $scriptname [file ...]"
+    echo
+    echo "Splits the input file (or stdin) into two files: one with the odd-numbered lines"
+    echo "and one with the even-numbered lines."
+    echo
+    echo "If input file(s) provided, output files are <filename>-{even,odd}.txt in the same directory as input."
+    echo "If input is stdin, output files are ./<scriptname>-<timestamp>-{even,odd}.txt."
+    exit 0
+fi
+
+for file in "$@"; do
+    if [ ! -f "$file" ]; then
+        echo "Error: $file is not a valid file" >&2
+        continue
+    fi
+    filedir=$(dirname "$file")/$(basename "$file" | sed 's/\.[^.]*$//')
+    cat "$file" | awk "NR % 2 { print > \"$filedir-odd.txt\"; next } { print > \"$filedir-even.txt\" }"
+done
+exit 0
+
+file="/dev/stdin"
+timestamp=$(date +%Y-%m-%d,%H.%M.%S)
+filedir="./$scriptname-$timestamp"
+
+cat "$file" | awk "NR % 2 { print > \"$filedir-odd.txt\"; next } { print > \"$filedir-even.txt\" }"
