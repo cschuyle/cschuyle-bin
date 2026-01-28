@@ -47,3 +47,6 @@ find "$src"/ -type f \( -name '*.mkv' -o -name '*.MKV' -o -name '*.avi' -o -name
         mv "$f" "$dst/$rel_path"
         { set +x; } 2>/dev/null
     done
+
+echo ""
+echo "Moved all non-mp4 video files to $dst"
