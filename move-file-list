@@ -1,0 +1,3 @@
+file_containing_filenames="$1"
+target_dir="$2"
+cat "$1"|while IFS= read line; do   file=$(printf '%b' "$line");   mv -- "$file" "$target_dir"; done
