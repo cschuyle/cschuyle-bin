@@ -2,7 +2,7 @@
 set -euo pipefail
 # Copyright (C) 2006 Carlton Schuyler
 
-USAGE="Usage: tarsync [OPTIONS] SOURCE [SOURCE...]
+USAGE="Usage: tarsync [OPTIONS] SOURCE... DEST
 
 Synchronize files using tar with various options
 
@@ -10,16 +10,17 @@ OPTIONS:
   -n, --dry-run           Perform a trial run with no changes made
   -p, --port PORT         Specify port number for connection
   -U, --overwrite-newer   Use size-only comparison to overwrite newer files
-  ---z                    Enable compression (z flag)
-   -h, --help              Show this help message
+  -z                      Enable compression (z flag)
+  -h, --help              Show this help message
 
 ARGUMENTS:
-  SOURCE                  One or more source paths to synchronize
+  SOURCE                  One or more source fuiles/directories to synchronize (copy)
+  DEST                    Destination directory (can be local or remote in the form user@host:/path)
 
 EXAMPLES:
-  tarsync /path/to/source
-  tarsync --dry-run --port 2222 /path/to/source1 /path/to/source2
-  tarsync -U ---z /path/to/source
+  tarsync /path/to/source /dest-dir
+  tarsync --dry-run --port 2222 /path/to/source1 /path/to/source2 user@desthost:/path/to/destination
+  tarsync -U -z path/to/source dest/dir
 
 AUTHOR: Carlton Schuyler
 VERSION: Jan 10 2026
@@ -50,7 +51,7 @@ while [[ $# -gt 0 ]]; do
             UPDATE_PARAM=" --size-only"
             shift
             ;;
-        ---z)
+        -z)
             Z="z"
             shift
             ;;
@@ -119,13 +120,20 @@ if [[ "$DRY_RUN" == true ]]; then
   echo "List of files to be transferred written to: $TEMP_FILE"
 fi
 
+# tar flags:
+# -S maintain sparse files
+# -c create
+# -z compress
+# -v verbose
+# -f specify filename
+
 # Create tar archive and pipe to destination
 if [[ -n "$DEST_HOST" ]]; then
   if [[ "$DRY_RUN" == true ]]; then
     echo "tar -c${Z}vf - -T \"$TEMP_FILE\" | ssh $PORT_ARG \"$DEST_HOST\" \"cd \\\"$DEST_DIR\\\" && tar -x${Z}f -\""
   else
     set -x
-    tar -c${Z}vf - -T "$TEMP_FILE" | ssh $PORT_ARG "$DEST_HOST" "cd \"$DEST_DIR\" && tar -x${Z}f -"
+    tar -Sc${Z}vf - -T "$TEMP_FILE" | ssh $PORT_ARG "$DEST_HOST" "cd \"$DEST_DIR\" && tar -x${Z}f -"
     set +x
   fi
 else
@@ -133,7 +141,7 @@ else
     echo "tar -c${Z}vf - -T \"$TEMP_FILE\" | (cd \"$DEST_DIR\" && tar -x${Z}f -)"
   else
     set -x
-    tar -c${Z}vf - -T "$TEMP_FILE" | (cd "$DEST_DIR" && tar -x${Z}f -)
+    tar -Sc${Z}vf - -T "$TEMP_FILE" | (cd "$DEST_DIR" && tar -x${Z}f -)
     set +x
   fi
 fi
