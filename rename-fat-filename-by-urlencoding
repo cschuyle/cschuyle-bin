@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# urlencode-one.sh "filename"
+
+set -euo pipefail
+
+name="$1"
+
+new="$name"
+new="${new//\"/%22}"
+new="${new//\*/%2A}"
+new="${new//:/%3A}"
+new="${new//</%3C}"
+new="${new//>/%3E}"
+new="${new//\?/%3F}"
+new="${new//\\/%5C}"
+new="${new//|/%7C}"
+
+if [[ "$name" == "$new" ]]; then
+    echo "No forbidden characters found."
+else
+    echo "Renaming:"
+    echo "  $name"
+    echo "→ $new"
+    mv -- "$name" "$new"
+fi
