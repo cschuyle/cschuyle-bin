@@ -76,10 +76,10 @@ if [[ ${#SOURCES[@]} -lt 2 ]]; then
     echo "$USAGE" >&2
     exit 1
 fi
-echo SOURCES "${SOURCES[@]}"
 DESTINATION="${SOURCES[$((${#SOURCES[@]}-1))]}"
 unset "SOURCES[$((${#SOURCES[@]}-1))]"
-
+echo SOURCES: "${SOURCES[@]}"
+echo DESTINATION: $DESTINATION
 # Parse destination into host and directory
 if [[ "$DESTINATION" == *:* ]]; then
     DEST_HOST="${DESTINATION%%:*}"
@@ -100,25 +100,28 @@ fi
 
 # Generate list of files that need to be copied using rsync
 if [[ -n "$DEST_HOST" ]]; then
-  set -x
+  
   rsync --dry-run --archive --verbose${UPDATE_PARAM} --out-format='%n' "${SOURCES[@]}" "$DEST_HOST:$DEST_DIR/" | \
     # Filter out summary lines and directories
-    grep -v '^sen\|^total\|^$' | \
+    grep -v '^Transfer starting\|sen\|^total\|^$' | \
+    grep -v '\._' | \
     grep -v '/$' > "$TEMP_FILE"
-  set +x
+  
 else
-  set -x
+  
   rsync --dry-run --archive --verbose${UPDATE_PARAM} --out-format='%n' "${SOURCES[@]}" "$DEST_DIR/" | \
     # Filter out summary lines and directories
-    grep -v '^sen\|^total\|^$' | \
+    grep -v '^Transfer starting\|sen\|^total\|^$' | \
+    grep -v '\._' | \
     grep -v '/$' > "$TEMP_FILE"
-  set +x
+  
 fi
 
 # If dry-run, output the temp file name and its contents
 if [[ "$DRY_RUN" == true ]]; then
   echo "List of files to be transferred written to: $TEMP_FILE"
 fi
+cat "$TEMP_FILE"
 
 # tar flags:
 # -S maintain sparse files
@@ -130,7 +133,7 @@ fi
 # Create tar archive and pipe to destination
 if [[ -n "$DEST_HOST" ]]; then
   if [[ "$DRY_RUN" == true ]]; then
-    echo "tar -c${Z}vf - -T \"$TEMP_FILE\" | ssh $PORT_ARG \"$DEST_HOST\" \"cd \\\"$DEST_DIR\\\" && tar -x${Z}f -\""
+    echo "tar -Sc${Z}vf - -T \"$TEMP_FILE\" | ssh $PORT_ARG \"$DEST_HOST\" \"cd \\\"$DEST_DIR\\\" && tar -x${Z}f -\""
   else
     set -x
     tar -Sc${Z}vf - -T "$TEMP_FILE" | ssh $PORT_ARG "$DEST_HOST" "cd \"$DEST_DIR\" && tar -x${Z}f -"
@@ -138,7 +141,7 @@ if [[ -n "$DEST_HOST" ]]; then
   fi
 else
   if [[ "$DRY_RUN" == true ]]; then
-    echo "tar -c${Z}vf - -T \"$TEMP_FILE\" | (cd \"$DEST_DIR\" && tar -x${Z}f -)"
+    echo "tar -Sc${Z}vf - -T \"$TEMP_FILE\" | (cd \"$DEST_DIR\" && tar -x${Z}f -)"
   else
     set -x
     tar -Sc${Z}vf - -T "$TEMP_FILE" | (cd "$DEST_DIR" && tar -x${Z}f -)
