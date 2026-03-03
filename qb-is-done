@@ -40,7 +40,7 @@ for DIR in "$@"; do
   if is_a_dest_dir "$DIR"; then continue; fi
 
   # Search for .!qB files recursively
-  if [[ ! -z "$(find "$DIR" -type f -iname '*.!qB' | grep -v '/._')" ]]; then
+  if [[ ! -z "$(find "$DIR" -type f \( -iname '*.!qB' -o -iname '*.part' \) | grep -v '/._')" ]]; then
     # Found .!qB files — skip
     continue
   elif [[ ! -z "$(find "$DIR" -type f \( -iname '*.m4v' -o -iname '*.mp4' -o -iname '*.avi' -o -iname '*.mkv' \) | grep -v '/._')" ]]; then
