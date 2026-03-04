@@ -7,7 +7,7 @@ sub print_it {
   $pig =~ s/\s*$//;
   $pig =~ s/^\s*//;
   $pig =~ s/\s+(\d{4}-?({\d{4})?)/ ($1)/;
-  print("mv '$orig' '$pig'\n");
+  print("mv '$orig' '$pig'\n") if "$orig" ne "$pig";
 }
 
 while(<>) {
