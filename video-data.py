@@ -192,6 +192,12 @@ def _update_progress(stderr, current: int, total: int, filename: str, eta_str: s
 def main():
     parser = argparse.ArgumentParser(description="Video file report (JSON)")
     parser.add_argument("-p", "--pretty", action="store_true", help="pretty-print JSON")
+    parser.add_argument(
+        "-u",
+        "--update",
+        metavar="<existing-output-file.json>",
+        help="update from existing JSON output",
+    )
     parser.add_argument("paths", nargs="*", default=["."], help="files or directories")
     args = parser.parse_args()
 
@@ -202,6 +208,27 @@ def main():
             if cmd == "ffprobe":
                 sys.stderr.write("  (install ffmpeg to get ffprobe)\n")
                 sys.stderr.flush()
+            sys.exit(1)
+
+    # Load previous JSON (if any) when running in update mode.
+    previous_by_file = {}
+    if args.update:
+        update_path = Path(args.update).expanduser().resolve()
+        if update_path.exists():
+            try:
+                with open(update_path, "r", encoding="utf-8") as f:
+                    prev_data = json.load(f)
+                if isinstance(prev_data, list):
+                    for entry in prev_data:
+                        if isinstance(entry, dict) and "file" in entry:
+                            previous_by_file[entry["file"]] = entry
+            except Exception as exc:  # noqa: BLE001
+                sys.stderr.write("error: could not read update data from '{}': {}\n".format(update_path, exc))
+                sys.stderr.flush()
+                sys.exit(1)
+        else:
+            sys.stderr.write("error: update file '{}' not found\n".format(update_path))
+            sys.stderr.flush()
             sys.exit(1)
 
     indent = 2 if args.pretty else None
@@ -220,6 +247,9 @@ def main():
         sys.stderr.flush()
 
     last_pct = -1
+    new_files = 0
+    existing_reprocessed = 0
+    existing_unchanged = 0
     start_time = time.time()
     if args.pretty:
         print("[")
@@ -227,27 +257,47 @@ def main():
         print("[", end="")
     for i, filepath in enumerate(filepaths):
         size = get_size(filepath)
-        duration = get_duration(filepath)
-        resolution = get_resolution(filepath)
-        vcodec = get_vcodec(filepath)
-        audio_langs_str = get_stream_langs(filepath, "a")
-        sub_langs_str = get_stream_langs(filepath, "s")
         try:
             mtime = os.path.getmtime(filepath)
             last_modified = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(mtime))
         except OSError:
+            mtime = None
             last_modified = ""
 
-        record = {
-            "file": filepath,
-            "size_bytes": size,
-            "time_min": round(duration / 60),
-            "resolution": resolution,
-            "v_codec": vcodec,
-            "audio_langs": audio_langs_str.split(",") if audio_langs_str else [],
-            "sub_langs": sub_langs_str.split(",") if sub_langs_str else [],
-            "last_modified": last_modified,
-        }
+        previous_record = previous_by_file.get(filepath) if previous_by_file else None
+        use_previous = False
+        if previous_record is not None:
+            prev_size = previous_record.get("size_bytes")
+            prev_mtime = previous_record.get("last_modified")
+            if isinstance(prev_size, int) and isinstance(prev_mtime, str):
+                if prev_size == size and prev_mtime == last_modified:
+                    use_previous = True
+
+        if use_previous:
+            record = previous_record
+            if args.update:
+                existing_unchanged += 1
+        else:
+            duration = get_duration(filepath)
+            resolution = get_resolution(filepath)
+            vcodec = get_vcodec(filepath)
+            audio_langs_str = get_stream_langs(filepath, "a")
+            sub_langs_str = get_stream_langs(filepath, "s")
+            record = {
+                "file": filepath,
+                "size_bytes": size,
+                "time_min": round(duration / 60),
+                "resolution": resolution,
+                "v_codec": vcodec,
+                "audio_langs": audio_langs_str.split(",") if audio_langs_str else [],
+                "sub_langs": sub_langs_str.split(",") if sub_langs_str else [],
+                "last_modified": last_modified,
+            }
+            if args.update:
+                if previous_record is None:
+                    new_files += 1
+                else:
+                    existing_reprocessed += 1
         chunk = json.dumps(record, indent=indent)
         if args.pretty:
             chunk = "  " + "\n  ".join(chunk.split("\n"))
@@ -284,6 +334,19 @@ def main():
         print("\n]")
     else:
         print("]")
+
+    if args.update:
+        sys.stderr.write(
+            "Update summary:\n"
+            "  new files: {}\n"
+            "  existing re-processed: {}\n"
+            "  existing unchanged: {}\n".format(
+                new_files,
+                existing_reprocessed,
+                existing_unchanged,
+            )
+        )
+        sys.stderr.flush()
 
 
 if __name__ == "__main__":
