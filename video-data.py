@@ -10,11 +10,14 @@ Output: JSON array of video entries.
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import List
+
+REQUIRED_COMMANDS = ["ffprobe"]  # ffprobe is from the ffmpeg package
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm"}
 
@@ -172,6 +175,13 @@ def main():
     parser.add_argument("-p", "--pretty", action="store_true", help="pretty-print JSON")
     parser.add_argument("paths", nargs="*", default=["."], help="files or directories")
     args = parser.parse_args()
+
+    for cmd in REQUIRED_COMMANDS:
+        if not shutil.which(cmd):
+            sys.stderr.write("error: required command '{}' not found in PATH\n".format(cmd))
+            if cmd == "ffprobe":
+                sys.stderr.write("  (install ffmpeg to get ffprobe)\n")
+            sys.exit(1)
 
     indent = 2 if args.pretty else None
     filepaths = collect_video_paths(args.paths)
