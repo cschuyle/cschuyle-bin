@@ -130,14 +130,16 @@ def collect_video_paths(paths: List[str]) -> List[str]:
 
 
 def _progress_bar(current: int, total: int, width: int = 24) -> str:
-    """Return a single line progress bar string (e.g. '[=========>     ] 45/120')."""
+    """Return a single line progress bar string (e.g. '[=========>     ] 66% (2/3)')."""
     if total <= 0:
         filled = width
+        pct = 100
     else:
         filled = int(width * current / total)
+        pct = int(100 * current / total)
     bar = "=" * filled + ">" * (1 if filled < width and current < total else 0)
     bar = bar.ljust(width)
-    return "[{}] {}/{}".format(bar, current, total)
+    return "[{}] {}% ({}/{})".format(bar, pct, current, total)
 
 
 def _update_progress(stderr, current: int, total: int, filename: str) -> None:
