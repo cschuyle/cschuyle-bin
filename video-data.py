@@ -119,8 +119,10 @@ def find_videos(dirpath: Path):
                 yield os.path.join(root, name)
 
 
-def collect_video_paths(paths: List[str]) -> List[str]:
-    """Return sorted, deduplicated video paths from files and recursive dirs."""
+def collect_video_paths(paths: List[str], stream=None) -> List[str]:
+    """Return sorted, deduplicated video paths from files and recursive dirs.
+    If stream is provided (e.g. stderr), print 'Scanning <dir> ...' then ' Scanned <dir>. N files.\\n' for each directory.
+    """
     seen = set()
     for arg in paths:
         p = Path(arg).resolve()
@@ -128,8 +130,17 @@ def collect_video_paths(paths: List[str]) -> List[str]:
             if p.suffix.lower() in VIDEO_EXTENSIONS:
                 seen.add(str(p))
         elif p.is_dir():
+            label = p.name if p.name else str(p)
+            if stream is not None:
+                stream.write("Scanning {} ...".format(label))
+                stream.flush()
+            files_in_dir = []
             for fp in find_videos(p):
+                files_in_dir.append(fp)
                 seen.add(fp)
+            if stream is not None:
+                stream.write(" Scanned {}. {} files.\n".format(label, "{:,}".format(len(files_in_dir))))
+                stream.flush()
     return sorted(seen)
 
 
@@ -179,12 +190,14 @@ def main():
     for cmd in REQUIRED_COMMANDS:
         if not shutil.which(cmd):
             sys.stderr.write("error: required command '{}' not found in PATH\n".format(cmd))
+            sys.stderr.flush()
             if cmd == "ffprobe":
                 sys.stderr.write("  (install ffmpeg to get ffprobe)\n")
+                sys.stderr.flush()
             sys.exit(1)
 
     indent = 2 if args.pretty else None
-    filepaths = collect_video_paths(args.paths)
+    filepaths = collect_video_paths(args.paths, stream=sys.stderr)
     total = len(filepaths)
     # Fancy single-line bar only when stdout is redirected (e.g. to file) and stderr is a TTY
     show_fancy_progress = sys.stderr.isatty() and not sys.stdout.isatty()
