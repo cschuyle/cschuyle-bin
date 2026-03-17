@@ -129,14 +129,48 @@ def collect_video_paths(paths: List[str]) -> List[str]:
     return sorted(seen)
 
 
+def _progress_bar(current: int, total: int, width: int = 24) -> str:
+    """Return a single line progress bar string (e.g. '[=========>     ] 45/120')."""
+    if total <= 0:
+        filled = width
+    else:
+        filled = int(width * current / total)
+    bar = "=" * filled + ">" * (1 if filled < width and current < total else 0)
+    bar = bar.ljust(width)
+    return "[{}] {}/{}".format(bar, current, total)
+
+
+def _update_progress(stderr, current: int, total: int, filename: str) -> None:
+    """Overwrite the single-line progress display on stderr (no cursor-up to avoid scroll)."""
+    line = _progress_bar(current, total) + "  " + filename
+    stderr.write("\r" + line + "\033[K")
+    stderr.flush()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Video file report (JSON)")
     parser.add_argument("-p", "--pretty", action="store_true", help="pretty-print JSON")
     parser.add_argument("paths", nargs="*", default=["."], help="files or directories")
     args = parser.parse_args()
 
-    results = []
-    for filepath in collect_video_paths(args.paths):
+    indent = 2 if args.pretty else None
+    filepaths = collect_video_paths(args.paths)
+    total = len(filepaths)
+    # Fancy single-line bar only when stdout is redirected (e.g. to file) and stderr is a TTY
+    show_fancy_progress = sys.stderr.isatty() and not sys.stdout.isatty()
+    # Simple "PROGRESS: N%" when stdout is a TTY (interactive, no redirect)
+    show_simple_progress = sys.stdout.isatty()
+
+    if show_fancy_progress:
+        sys.stderr.write("\r" + _progress_bar(0, total) + "  " + "\033[K")
+        sys.stderr.flush()
+
+    last_pct = -1
+    if args.pretty:
+        print("[")
+    else:
+        print("[", end="")
+    for i, filepath in enumerate(filepaths):
         size = get_size(filepath)
         duration = get_duration(filepath)
         resolution = get_resolution(filepath)
@@ -144,7 +178,7 @@ def main():
         audio_langs_str = get_stream_langs(filepath, "a")
         sub_langs_str = get_stream_langs(filepath, "s")
 
-        results.append({
+        record = {
             "file": filepath,
             "size_kb": round(size / 1024),
             "time_min": round(duration / 60),
@@ -152,10 +186,36 @@ def main():
             "v_codec": vcodec,
             "audio_langs": audio_langs_str.split(",") if audio_langs_str else [],
             "sub_langs": sub_langs_str.split(",") if sub_langs_str else [],
-        })
+        }
+        chunk = json.dumps(record, indent=indent)
+        if args.pretty:
+            chunk = "  " + "\n  ".join(chunk.split("\n"))
+            if i > 0:
+                print(",")
+            print(chunk, end="")
+        else:
+            if i > 0:
+                print(",", end="")
+            print(chunk, end="")
+        sys.stdout.flush()
 
-    indent = 2 if args.pretty else None
-    print(json.dumps(results, indent=indent))
+        if show_fancy_progress:
+            _update_progress(sys.stderr, i + 1, total, os.path.basename(filepath))
+        elif show_simple_progress:
+            current = i + 1
+            pct = 100 if total == 0 else int(100 * current / total)
+            if total < 100 or pct > last_pct:
+                sys.stderr.write("\nPROGRESS: {}% ({}/{}) ...\n".format(pct, current, total))
+                sys.stderr.flush()
+                last_pct = pct
+
+    if show_fancy_progress:
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+    if args.pretty:
+        print("\n]")
+    else:
+        print("]")
 
 
 if __name__ == "__main__":
