@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import List
 
@@ -142,9 +143,26 @@ def _progress_bar(current: int, total: int, width: int = 24) -> str:
     return "[{}] {}% ({}/{})".format(bar, pct, current, total)
 
 
-def _update_progress(stderr, current: int, total: int, filename: str) -> None:
+def _format_eta(eta_seconds: float) -> str:
+    """Format seconds as 'ETA 0:00' or 'ETA 1:23:45'."""
+    if eta_seconds < 0 or not (eta_seconds < 86400):  # cap at 24h for display
+        return ""
+    s = int(round(eta_seconds))
+    if s < 60:
+        return "ETA 0:{:02d}".format(s)
+    m, s = divmod(s, 60)
+    if m < 60:
+        return "ETA {}:{:02d}".format(m, s)
+    h, m = divmod(m, 60)
+    return "ETA {}:{:02d}:{:02d}".format(h, m, s)
+
+
+def _update_progress(stderr, current: int, total: int, filename: str, eta_str: str = "") -> None:
     """Overwrite the single-line progress display on stderr (no cursor-up to avoid scroll)."""
-    line = _progress_bar(current, total) + "  " + filename
+    line = _progress_bar(current, total)
+    if eta_str:
+        line += "  " + eta_str
+    line += "  " + filename
     stderr.write("\r" + line + "\033[K")
     stderr.flush()
 
@@ -168,6 +186,7 @@ def main():
         sys.stderr.flush()
 
     last_pct = -1
+    start_time = time.time()
     if args.pretty:
         print("[")
     else:
@@ -201,13 +220,20 @@ def main():
             print(chunk, end="")
         sys.stdout.flush()
 
+        current = i + 1
+        elapsed = time.time() - start_time
+        eta_sec = (total - current) * (elapsed / current) if current > 0 else 0
+        eta_str = _format_eta(eta_sec)
+
         if show_fancy_progress:
-            _update_progress(sys.stderr, i + 1, total, os.path.basename(filepath))
+            _update_progress(sys.stderr, current, total, os.path.basename(filepath), eta_str)
         elif show_simple_progress:
-            current = i + 1
             pct = 100 if total == 0 else int(100 * current / total)
             if total < 100 or pct > last_pct:
-                sys.stderr.write("\nPROGRESS: {}% ({}/{}) ...\n".format(pct, current, total))
+                msg = "\nPROGRESS: {}% ({}/{}) ...".format(pct, current, total)
+                if eta_str:
+                    msg += " " + eta_str
+                sys.stderr.write(msg + "\n")
                 sys.stderr.flush()
                 last_pct = pct
 
