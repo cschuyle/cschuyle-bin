@@ -256,13 +256,11 @@ def main():
     else:
         print("[", end="")
     for i, filepath in enumerate(filepaths):
+        size = get_size(filepath)
         try:
-            st = os.stat(filepath)
-            size = st.st_size
-            mtime = st.st_mtime
+            mtime = os.path.getmtime(filepath)
             last_modified = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(mtime))
         except OSError:
-            size = 0
             mtime = None
             last_modified = ""
 
