@@ -232,15 +232,21 @@ def main():
         vcodec = get_vcodec(filepath)
         audio_langs_str = get_stream_langs(filepath, "a")
         sub_langs_str = get_stream_langs(filepath, "s")
+        try:
+            mtime = os.path.getmtime(filepath)
+            last_modified = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(mtime))
+        except OSError:
+            last_modified = ""
 
         record = {
             "file": filepath,
-            "size_kb": round(size / 1024),
+            "size_bytes": size,
             "time_min": round(duration / 60),
             "resolution": resolution,
             "v_codec": vcodec,
             "audio_langs": audio_langs_str.split(",") if audio_langs_str else [],
             "sub_langs": sub_langs_str.split(",") if sub_langs_str else [],
+            "last_modified": last_modified,
         }
         chunk = json.dumps(record, indent=indent)
         if args.pretty:
