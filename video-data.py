@@ -212,6 +212,9 @@ def main():
     # Simple "PROGRESS: N%" when stdout is a TTY (interactive, no redirect)
     show_simple_progress = sys.stdout.isatty()
 
+    sys.stderr.write("Proceeding to identify metadata in {} video files\n".format(total))
+    sys.stderr.flush()
+
     if show_fancy_progress:
         sys.stderr.write("\r" + _progress_bar(0, total) + "  " + "\033[K")
         sys.stderr.flush()
