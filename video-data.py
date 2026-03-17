@@ -278,4 +278,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.stderr.write("Process was interrupted and terminated before completion.\n")
+        sys.stderr.flush()
+        sys.exit(130)
