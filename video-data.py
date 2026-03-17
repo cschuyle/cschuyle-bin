@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 Video file report: list size, duration, resolution, codec, audio/subtitle languages.
-Usage: python3 video-data.py [path ...]
+Usage: python3 video-data.py [-p|--pretty] [path ...]
+  -p, --pretty  pretty-print JSON (default: compact)
   Each path may be a file or directory. Directories are recursed. Default: current dir.
 Output: JSON array of video entries.
 """
 
+import argparse
 import json
 import os
 import subprocess
@@ -127,10 +129,13 @@ def collect_video_paths(paths: list[str]) -> list[str]:
 
 
 def main():
-    paths = sys.argv[1:] if len(sys.argv) > 1 else ["."]
+    parser = argparse.ArgumentParser(description="Video file report (JSON)")
+    parser.add_argument("-p", "--pretty", action="store_true", help="pretty-print JSON")
+    parser.add_argument("paths", nargs="*", default=["."], help="files or directories")
+    args = parser.parse_args()
 
     results = []
-    for filepath in collect_video_paths(paths):
+    for filepath in collect_video_paths(args.paths):
         size = get_size(filepath)
         duration = get_duration(filepath)
         resolution = get_resolution(filepath)
@@ -148,7 +153,8 @@ def main():
             "sub_langs": sub_langs_str.split(",") if sub_langs_str else [],
         })
 
-    print(json.dumps(results, indent=2))
+    indent = 2 if args.pretty else None
+    print(json.dumps(results, indent=indent))
 
 
 if __name__ == "__main__":
