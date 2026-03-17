@@ -121,7 +121,8 @@ def find_videos(dirpath: Path):
 
 def collect_video_paths(paths: List[str], stream=None) -> List[str]:
     """Return sorted, deduplicated video paths from files and recursive dirs.
-    If stream is provided (e.g. stderr), print 'Scanning <dir> ...' then ' Files: N\\n' for each directory.
+    If stream is provided (e.g. stderr), print scan progress. When stream is a TTY,
+    overwrite 'Scanning <dir>...' with '<dir>: N'; otherwise append ' Files: N'.
     """
     seen = set()
     for arg in paths:
@@ -132,14 +133,21 @@ def collect_video_paths(paths: List[str], stream=None) -> List[str]:
         elif p.is_dir():
             label = p.name if p.name else str(p)
             if stream is not None:
-                stream.write("Scanning {} ...".format(label))
+                if getattr(stream, "isatty", lambda: False)():
+                    stream.write("Scanning {}...".format(label))
+                else:
+                    stream.write("Scanning {} ...".format(label))
                 stream.flush()
             files_in_dir = []
             for fp in find_videos(p):
                 files_in_dir.append(fp)
                 seen.add(fp)
+            count_str = "{:,}".format(len(files_in_dir))
             if stream is not None:
-                stream.write(" Files: {}\n".format("{:,}".format(len(files_in_dir))))
+                if getattr(stream, "isatty", lambda: False)():
+                    stream.write("\r{}: {}\033[K\n".format(label, count_str))
+                else:
+                    stream.write(" Files: {}\n".format(count_str))
                 stream.flush()
     return sorted(seen)
 
