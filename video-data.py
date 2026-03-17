@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Video file report: list size, duration, resolution, codec, audio/subtitle languages.
-Usage: python3 video-data.py [path/to/dir]
+Usage: python3 video-data.py [path ...]
+  Each path may be a file or directory. Directories are recursed. Default: current dir.
 Output: JSON array of video entries.
 """
 
@@ -111,15 +112,25 @@ def find_videos(dirpath: Path):
                 yield os.path.join(root, name)
 
 
+def collect_video_paths(paths: list[str]) -> list[str]:
+    """Return sorted, deduplicated video paths from files and recursive dirs."""
+    seen = set()
+    for arg in paths:
+        p = Path(arg).resolve()
+        if p.is_file():
+            if p.suffix.lower() in VIDEO_EXTENSIONS:
+                seen.add(str(p))
+        elif p.is_dir():
+            for fp in find_videos(p):
+                seen.add(fp)
+    return sorted(seen)
+
+
 def main():
-    dir_arg = sys.argv[1] if len(sys.argv) > 1 else "."
-    base = Path(dir_arg).resolve()
-    if not base.is_dir():
-        print(f"Not a directory: {base}", file=sys.stderr)
-        sys.exit(1)
+    paths = sys.argv[1:] if len(sys.argv) > 1 else ["."]
 
     results = []
-    for filepath in sorted(find_videos(base)):
+    for filepath in collect_video_paths(paths):
         size = get_size(filepath)
         duration = get_duration(filepath)
         resolution = get_resolution(filepath)
