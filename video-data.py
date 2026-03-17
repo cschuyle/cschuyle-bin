@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import List
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm"}
 
@@ -114,7 +115,7 @@ def find_videos(dirpath: Path):
                 yield os.path.join(root, name)
 
 
-def collect_video_paths(paths: list[str]) -> list[str]:
+def collect_video_paths(paths: List[str]) -> List[str]:
     """Return sorted, deduplicated video paths from files and recursive dirs."""
     seen = set()
     for arg in paths:
