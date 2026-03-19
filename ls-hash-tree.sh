@@ -9,10 +9,10 @@ ROOT="$(realpath "$ROOT")"
 FILES="$TMP/files"
 HASHES="$TMP/hashes"
 
-# 1. Collect files WITH size and mtime (null-safe)
+# 1. Collect files with size and mtime (null-safe)
 find "$ROOT" -type f -printf '%s\t%TY-%Tm-%TdT%TH:%TM:%TS\t%p\0' > "$FILES"
 
-# 2. Extract just paths for hashing (null-safe, parallel)
+# 2. Extract just paths for hashing (parallel)
 cut -z -f3- "$FILES" | xargs -0 -n 32 -P "$JOBS" sha256sum > "$HASHES"
 
 # 3. Load hashes into associative array
@@ -41,44 +41,43 @@ function json_tree() {
     echo "${indent}  \"type\": \"dir\","
     echo "${indent}  \"children\": ["
 
-    # Directories first (sorted)
-    for d in "$dir"/*/; do
-        [ -d "$d" ] || continue
-        if [ "$first" = true ]; then
-            first=false
-        else
-            echo ","
-        fi
+    # Directories first (from FILEINFO keys)
+    mapfile -t subdirs < <(
+        printf '%s\n' "${!FILEINFO[@]}" | grep "^$dir/" | sed -E 's@/[^/]+$@@' | sort -u
+    )
 
-        # Recurse
+    for d in "${subdirs[@]}"; do
+        # Skip if this is the current dir itself
+        [ "$d" != "$dir" ] || continue
+
+        if [ "$first" = true ]; then first=false; else echo ","; fi
+
         child_json="$(json_tree "$d" "  $indent")"
-
-        # Extract total_size from child JSON (last line)
         child_size="$(echo "$child_json" | grep '"total_size":' | tail -n1 | awk -F: '{gsub(/[, ]/,"",$2); print $2}')"
         dir_total=$((dir_total + child_size))
 
         echo "$child_json"
     done
 
-    # Files next (sorted)
-    for f in "$dir"/*; do
-        [ -f "$f" ] || continue
+    # Files in this directory
+    mapfile -t files < <(
+        printf '%s\n' "${!FILEINFO[@]}" | grep "^$dir/" | sort
+    )
 
-        IFS=$'\t' read -r size mtime <<< "${FILEINFO[$f]:-$'\t'}"
+    for f in "${files[@]}"; do
+        # Only immediate files
+        [[ "$(dirname "$f")" == "$dir" ]] || continue
+
+        IFS=$'\t' read -r size mtime <<< "${FILEINFO[$f]}"
         hash="${HASHES_MAP[$f]:-}"
 
-        # Escape quotes in filename
         esc_name="${f##*/}"
         esc_name="${esc_name//\"/\\\"}"
 
-        if [ "$first" = true ]; then
-            first=false
-        else
-            echo ","
-        fi
+        if [ "$first" = true ]; then first=false; else echo ","; fi
 
         printf '%s    { "name": "%s", "type": "file", "size": %s, "mtime": "%s", "sha256": "%s" }' \
-            "$indent" "$esc_name" "${size:-0}" "${mtime:-unknown}" "$hash"
+            "$indent" "$esc_name" "$size" "$mtime" "$hash"
 
         dir_total=$((dir_total + size))
     done
