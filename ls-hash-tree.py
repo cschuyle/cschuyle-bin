@@ -12,7 +12,7 @@ import signal
 # Onetime setup:
 
 # If you have a setup with multiple python version then maybe this or similar:
-alias python3=python3.9
+alias python3=python3.14
 # Assuming $DIR is where you write the Python venv definition, for example: 
 DIR="$HOME"
 source $DIR/LS-HASH-TREE-PY-VENV/bin/activate

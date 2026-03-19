@@ -234,17 +234,11 @@ def main():
     indent = 2 if args.pretty else None
     filepaths = collect_video_paths(args.paths, stream=sys.stderr)
     total = len(filepaths)
-    # Fancy single-line bar only when stdout is redirected (e.g. to file) and stderr is a TTY
-    show_fancy_progress = sys.stderr.isatty() and not sys.stdout.isatty()
-    # Simple "PROGRESS: N%" when stdout is a TTY (interactive, no redirect)
-    show_simple_progress = sys.stdout.isatty()
+    # Always use simple progress messages.
+    show_simple_progress = True
 
     sys.stderr.write("Proceeding to identify metadata in {} video files\n".format(total))
     sys.stderr.flush()
-
-    if show_fancy_progress:
-        sys.stderr.write("\r" + _progress_bar(0, total) + "  " + "\033[K")
-        sys.stderr.flush()
 
     last_pct = -1
     new_files = 0
@@ -315,9 +309,7 @@ def main():
         eta_sec = (total - current) * (elapsed / current) if current > 0 else 0
         eta_str = _format_eta(eta_sec)
 
-        if show_fancy_progress:
-            _update_progress(sys.stderr, current, total, os.path.basename(filepath), eta_str)
-        elif show_simple_progress:
+        if show_simple_progress:
             pct = 100 if total == 0 else int(100 * current / total)
             if total < 100 or pct > last_pct:
                 msg = "\nPROGRESS: {}% ({}/{}) ...".format(pct, current, total)
@@ -327,9 +319,6 @@ def main():
                 sys.stderr.flush()
                 last_pct = pct
 
-    if show_fancy_progress:
-        sys.stderr.write("\n")
-        sys.stderr.flush()
     if args.pretty:
         print("\n]")
     else:
