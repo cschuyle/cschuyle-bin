@@ -83,6 +83,28 @@ for dirpath, dirnames, filenames in os.walk(ROOT):
 
 print(f"[INFO] Found {len(all_files)} files to process under {ROOT}", file=sys.stderr)
 
+# ------------------ Interleave large/small files ------------------
+def safe_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+def interleave_large_small(files):
+    sized = sorted(((safe_size(p), p) for p in files), key=lambda x: x[0])
+    mixed = []
+    lo = 0
+    hi = len(sized) - 1
+    while lo <= hi:
+        mixed.append(sized[hi][1])  # large
+        hi -= 1
+        if lo <= hi:
+            mixed.append(sized[lo][1])  # small
+            lo += 1
+    return mixed
+
+all_files = interleave_large_small(all_files)
+
 # ------------------ File hashing function ------------------
 def file_info(path):
     try:
