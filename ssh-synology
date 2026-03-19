@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -e
+printf "\033]50;SetProfile=Caution\a"
+ssh -p 4546 $DRAGNON_SYNOLOGY_IP
+printf "\033]50;SetProfile=Default\a"
