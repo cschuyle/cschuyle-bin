@@ -4,7 +4,9 @@ import sys
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import time
+import signal
 
+# ------------------ Imports ------------------
 try:
     import blake3
 except ImportError:
@@ -23,6 +25,16 @@ IGNORE_FILE = sys.argv[2] if len(sys.argv) > 2 else ".myignore"
 JOBS = int(os.environ.get("JOBS", os.cpu_count()))
 CHUNK_SIZE = 16 * 1024 * 1024  # 16 MB read chunks
 EMA_ALPHA = 0.2  # smoothing factor for ETA
+
+# ------------------ Ctrl-C handling ------------------
+interrupted = False
+
+def signal_handler(sig, frame):
+    global interrupted
+    interrupted = True
+    print("\n[INFO] Ctrl-C detected, shutting down...", file=sys.stderr)
+
+signal.signal(signal.SIGINT, signal_handler)
 
 # ------------------ Load ignore file ------------------
 if os.path.exists(IGNORE_FILE):
@@ -72,33 +84,43 @@ last_progress_count = 0
 
 with ThreadPoolExecutor(max_workers=JOBS) as executor:
     futures = {executor.submit(file_info, path): path for path in all_files}
-    for i, fut in enumerate(as_completed(futures), 1):
-        path, size, mtime, blake3_hash = fut.result()
-        file_data[path] = {"size": size, "mtime": mtime, "blake3-hash": blake3_hash}
+    try:
+        for i, fut in enumerate(as_completed(futures), 1):
+            if interrupted:
+                for f in futures:
+                    f.cancel()
+                raise KeyboardInterrupt
 
-        # ETA calculation with EMA
-        elapsed = time() - start_time
-        per_file_time = elapsed / i
-        if ema_file_time is None:
-            ema_file_time = per_file_time
-        else:
-            ema_file_time = EMA_ALPHA * per_file_time + (1 - EMA_ALPHA) * ema_file_time
-        eta_seconds = ema_file_time * (len(all_files) - i)
+            path, size, mtime, blake3_hash = fut.result()
+            file_data[path] = {"size": size, "mtime": mtime, "blake3-hash": blake3_hash}
 
-        # Human-readable ETA
-        hrs = int(eta_seconds // 3600)
-        mins = int((eta_seconds % 3600) // 60)
-        secs = int(eta_seconds % 60)
+            # ETA calculation with EMA
+            elapsed = time() - start_time
+            per_file_time = elapsed / i
+            if ema_file_time is None:
+                ema_file_time = per_file_time
+            else:
+                ema_file_time = EMA_ALPHA * per_file_time + (1 - EMA_ALPHA) * ema_file_time
+            eta_seconds = ema_file_time * (len(all_files) - i)
 
-        # Progress logic: every 50 files or if 50 files took >5s, or last file
-        elapsed_since_last = time() - last_progress_time
-        files_since_last = i - last_progress_count
-        if files_since_last >= 50 or elapsed_since_last >= 5 or i == len(all_files):
-            print(f"[PROGRESS] {i}/{len(all_files)} files hashed "
-                  f"({elapsed:.1f}s elapsed, ETA ~{hrs}h {mins}m {secs}s)",
-                  file=sys.stderr)
-            last_progress_time = time()
-            last_progress_count = i
+            # Human-readable ETA
+            hrs = int(eta_seconds // 3600)
+            mins = int((eta_seconds % 3600) // 60)
+            secs = int(eta_seconds % 60)
+
+            # Progress logic: every 50 files or if 50 files took >5s, or last file
+            elapsed_since_last = time() - last_progress_time
+            files_since_last = i - last_progress_count
+            if files_since_last >= 50 or elapsed_since_last >= 5 or i == len(all_files):
+                print(f"[PROGRESS] {i}/{len(all_files)} files hashed "
+                      f"({elapsed:.1f}s elapsed, ETA ~{hrs}h {mins}m {secs}s)",
+                      file=sys.stderr)
+                last_progress_time = time()
+                last_progress_count = i
+
+    except KeyboardInterrupt:
+        print("[INFO] Aborted by user. Exiting...", file=sys.stderr)
+        sys.exit(1)
 
 # ------------------ Build hierarchical tree ------------------
 def build_tree(dir_path):
