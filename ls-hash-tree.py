@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import hashlib
+import blake3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import time
 
@@ -41,14 +42,14 @@ for dirpath, dirnames, filenames in os.walk(ROOT):
 
 print(f"[INFO] Found {len(all_files)} files to process under {ROOT}", file=sys.stderr)
 
-# 3️⃣ Compute SHA256 for a file
+
 def file_info(path):
     try:
         size = os.path.getsize(path)
         mtime = os.path.getmtime(path)
-        h = hashlib.sha256()
+        h = blake3.blake3()
         with open(path, "rb") as fd:
-            while chunk := fd.read(1024*1024):
+            while chunk := fd.read(16*1024*1024):  # 16 MB chunks
                 h.update(chunk)
         print(f"[HASHED] {path}", file=sys.stderr)
         return path, size, mtime, h.hexdigest()
