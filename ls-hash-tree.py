@@ -6,6 +6,29 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import time
 import signal
 
+''' Setup instructions:
+# bash:
+
+# Onetime setup:
+
+# If you have a setup with multiple python version then maybe this or similar:
+alias python3=python3.9
+# Assuming $DIR is where you write the Python venv definition, for example: 
+DIR="$HOME"
+source $DIR/LS-HASH-TREE-PY-VENV/bin/activate
+python3 -m venv $DIR/LS-HASH-TREE-PY-VENV
+python3 -m pip install blake3
+python3 -m pip install pathspec
+
+# After all the above once, this is all you need:
+
+source $DIR/LS-HASH-TREE-PY-VENV/bin/activate
+# If you have a setup with multiple python version then maybe this or similar:
+alias python=python3.9
+alias python3=python3.9
+
+# Now you should be able to run this script.
+'''
 # ------------------ Imports ------------------
 try:
     import blake3
