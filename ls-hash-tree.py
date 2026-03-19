@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import os
 import sys
 import json
@@ -31,20 +32,43 @@ alias python3=python3.9
 '''
 # ------------------ Imports ------------------
 try:
-    import blake3
-except ImportError:
-    print("Please install blake3: python3 -m pip install --user blake3", file=sys.stderr)
-    sys.exit(1)
-
-try:
     import pathspec
 except ImportError:
-    print("Please install pathspec: python3 -m pip install --user pathspec", file=sys.stderr)
+    print("Package pathspec not found. Install with: python3 -m pip install [--user] pathspec", file=sys.stderr)
     sys.exit(1)
 
+# ------------------ CLI ------------------
+_parser = argparse.ArgumentParser(
+    description="Walk a directory tree and emit JSON (stats by default; use --hash for BLAKE3)."
+)
+_parser.add_argument(
+    "--hash",
+    action="store_true",
+    help="Compute BLAKE3 hash for each file (requires blake3 package).",
+)
+_parser.add_argument("root", nargs="?", default=".", help="Root directory to scan")
+_parser.add_argument(
+    "ignore_file",
+    nargs="?",
+    default=".myignore",
+    help="Gitwildmatch ignore file (default: .myignore)",
+)
+_args = _parser.parse_args()
+
+DO_HASH = _args.hash
+blake3 = None
+if DO_HASH:
+    try:
+        import blake3 as _blake3_mod
+        blake3 = _blake3_mod
+    except ImportError:
+        print("Package blake3 not found. Install with: python3 -m pip install [--user] blake3", file=sys.stderr)
+        print("  Or run without --hash to skip computing hashes.", file=sys.stderr)
+        sys.exit(1)
+
 # ------------------ Configuration ------------------
-ROOT = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "."
-IGNORE_FILE = sys.argv[2] if len(sys.argv) > 2 else ".myignore"
+ROOT = os.path.abspath(_args.root)
+IGNORE_FILE = _args.ignore_file
 JOBS = int(os.environ.get("JOBS", os.cpu_count()))
 CHUNK_SIZE = 16 * 1024 * 1024  # 16 MB read chunks
 EMA_ALPHA = 0.2  # smoothing factor for ETA
@@ -83,17 +107,22 @@ for dirpath, dirnames, filenames in os.walk(ROOT):
 
 print(f"[INFO] Found {len(all_files)} files to process under {ROOT}", file=sys.stderr)
 
-# ------------------ File hashing function ------------------
+# ------------------ Per-file work (hash optional) ------------------
 def file_info(path):
     try:
         size = os.path.getsize(path)
         mtime = os.path.getmtime(path)
-        h = blake3.blake3()
-        with open(path, "rb") as fd:
-            while chunk := fd.read(CHUNK_SIZE):
-                h.update(chunk)
-        print(f"[HASHED] {path}", file=sys.stderr)
-        return path, size, mtime, h.hexdigest()
+        if DO_HASH:
+            h = blake3.blake3()
+            with open(path, "rb") as fd:
+                while chunk := fd.read(CHUNK_SIZE):
+                    h.update(chunk)
+            digest = h.hexdigest()
+            print(f"[HASHED] {path}", file=sys.stderr)
+        else:
+            digest = None
+            print(f"[STAT] {path}", file=sys.stderr)
+        return path, size, mtime, digest
     except Exception as e:
         print(f"[ERROR] {path}: {e}", file=sys.stderr)
         return path, 0, 0, None
@@ -135,7 +164,8 @@ with ThreadPoolExecutor(max_workers=JOBS) as executor:
             elapsed_since_last = time() - last_progress_time
             files_since_last = i - last_progress_count
             if files_since_last >= 50 or elapsed_since_last >= 5 or i == len(all_files):
-                print(f"[PROGRESS] {i}/{len(all_files)} files hashed "
+                verb = "hashed" if DO_HASH else "processed"
+                print(f"[PROGRESS] {i}/{len(all_files)} files {verb} "
                       f"({elapsed:.1f}s elapsed, ETA ~{hrs}h {mins}m {secs}s)",
                       file=sys.stderr)
                 last_progress_time = time()
