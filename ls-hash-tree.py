@@ -63,10 +63,12 @@ def file_info(path):
         print(f"[ERROR] {path}: {e}", file=sys.stderr)
         return path, 0, 0, None
 
-# ------------------ Parallel hashing with ETA ------------------
+# ------------------ Parallel hashing with smart ETA ------------------
 file_data = {}
 start_time = time()
 ema_file_time = None
+last_progress_time = start_time
+last_progress_count = 0
 
 with ThreadPoolExecutor(max_workers=JOBS) as executor:
     futures = {executor.submit(file_info, path): path for path in all_files}
@@ -88,10 +90,15 @@ with ThreadPoolExecutor(max_workers=JOBS) as executor:
         mins = int((eta_seconds % 3600) // 60)
         secs = int(eta_seconds % 60)
 
-        if i % 50 == 0 or i == len(all_files):
+        # Progress logic: every 50 files or if 50 files took >5s, or last file
+        elapsed_since_last = time() - last_progress_time
+        files_since_last = i - last_progress_count
+        if files_since_last >= 50 or elapsed_since_last >= 5 or i == len(all_files):
             print(f"[PROGRESS] {i}/{len(all_files)} files hashed "
                   f"({elapsed:.1f}s elapsed, ETA ~{hrs}h {mins}m {secs}s)",
                   file=sys.stderr)
+            last_progress_time = time()
+            last_progress_count = i
 
 # ------------------ Build hierarchical tree ------------------
 def build_tree(dir_path):
