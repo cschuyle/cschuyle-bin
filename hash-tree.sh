@@ -6,7 +6,6 @@ JOBS="${JOBS:-$(nproc)}"
 TMP="$(mktemp -d)"
 
 ROOT="$(realpath "$ROOT")"
-
 FILES="$TMP/files"
 HASHES="$TMP/hashes"
 
@@ -17,8 +16,7 @@ find "$ROOT" -type f -printf '%s\t%TY-%Tm-%TdT%TH:%TM:%TS\t%p\0' > "$FILES"
 # 2. Extract just paths for hashing
 cut -z -f3- "$FILES" | xargs -0 -n 32 -P "$JOBS" sha256sum > "$HASHES"
 
-# 3. Prepare JSON output
-# Read hashes into array
+# 3. Load hashes into associative array
 declare -A HASHES_MAP
 while IFS= read -r line; do
     hash="${line%% *}"
@@ -26,19 +24,21 @@ while IFS= read -r line; do
     HASHES_MAP["$path"]="$hash"
 done < "$HASHES"
 
-# Begin JSON
+# 4. Load size + mtime into associative array
+declare -A FILEINFO
+while IFS=$'\t' read -r size mtime path; do
+    FILEINFO["$path"]="$size"$'\t'"$mtime"
+done < <(tr '\0' '\n' < "$FILES")
+
+# 5. Begin JSON
 echo "{"
 echo "  \"root\": \"$ROOT\","
 echo "  \"files\": ["
 
-# Iterate over file list
 FIRST=true
-while IFS= read -r -d '' entry; do
-    size="${entry%%$'\t'*}"
-    rest="${entry#*$'\t'}"
-    mtime="${rest%%$'\t'*}"
-    path="${rest#*$'\t'}"
-    hash="${HASHES_MAP[$path]}"
+for path in "${!FILEINFO[@]}"; do
+    IFS=$'\t' read -r size mtime <<< "${FILEINFO[$path]}"
+    hash="${HASHES_MAP[$path]:-}"  # Safe default if missing
 
     # Escape quotes in path
     esc_path="${path//\"/\\\"}"
@@ -49,15 +49,13 @@ while IFS= read -r -d '' entry; do
         echo ","
     fi
 
-    printf "    {\"path\": \"%s\", \"size\": %s, \"mtime\": \"%s\", \"sha256\": \"%s\"}" \
+    printf '    { "path": "%s", "size": %s, "mtime": "%s", "sha256": "%s" }' \
         "$esc_path" "$size" "$mtime" "$hash"
+done
 
-done < "$FILES"
-
-# End JSON
 echo ""
 echo "  ]"
 echo "}"
 
-# Cleanup
+# 6. Cleanup
 rm -rf "$TMP"
