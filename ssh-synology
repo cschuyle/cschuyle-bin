@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 set -e
+
+reset_profile() {
+  printf "\033]50;SetProfile=Default\a"
+}
+# Ensure the terminal profile title is reset even if the script is interrupted.
+trap reset_profile EXIT INT TERM
+
 printf "\033]50;SetProfile=Caution\a"
 ssh -p 4546 cschuyle@$DRAGNON_SYNOLOGY_IP
-printf "\033]50;SetProfile=Default\a"
