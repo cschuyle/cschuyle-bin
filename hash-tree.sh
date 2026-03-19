@@ -10,50 +10,54 @@ ROOT="$(realpath "$ROOT")"
 FILES="$TMP/files"
 HASHES="$TMP/hashes"
 
-# 1. Collect files WITH size (null-safe)
-# Format: size<TAB>path\0
-find "$ROOT" -type f -printf '%s\t%p\0' > "$FILES"
+# 1. Collect files WITH size and mtime (null-safe)
+# Format: size<TAB>mtime<TAB>path\0
+find "$ROOT" -type f -printf '%s\t%TY-%Tm-%TdT%TH:%TM:%TS\t%p\0' > "$FILES"
 
 # 2. Extract just paths for hashing
-cut -z -f2- "$FILES" | \
-  xargs -0 -n 32 -P "$JOBS" sha256sum > "$HASHES"
+cut -z -f3- "$FILES" | xargs -0 -n 32 -P "$JOBS" sha256sum > "$HASHES"
 
-# 3. Join size + hash + path and emit JSON
-# Convert FILES to newline-delimited safely
-tr '\0' '\n' < "$FILES" | \
-awk -F'\t' '
-NR==FNR {
-  # Read hashes: "hash  path"
-  hash=$1
-  $1=""
-  sub(/^ +/, "", $0)
-  hashes[$0]=hash
-  next
-}
-{
-  size=$1
-  path=$2
+# 3. Prepare JSON output
+# Read hashes into array
+declare -A HASHES_MAP
+while IFS= read -r line; do
+    hash="${line%% *}"
+    path="${line#* }"
+    HASHES_MAP["$path"]="$hash"
+done < "$HASHES"
 
-  # escape quotes
-  gsub(/"/, "\\\"", path)
+# Begin JSON
+echo "{"
+echo "  \"root\": \"$ROOT\","
+echo "  \"files\": ["
 
-  printf "    {\"path\": \"%s\", \"size\": %s, \"sha256\": \"%s\"}", path, size, hashes[path]
+# Iterate over file list
+FIRST=true
+while IFS= read -r -d '' entry; do
+    size="${entry%%$'\t'*}"
+    rest="${entry#*$'\t'}"
+    mtime="${rest%%$'\t'*}"
+    path="${rest#*$'\t'}"
+    hash="${HASHES_MAP[$path]}"
 
-  if (NR != total + FNR_offset) print ","
-}
-END {}
-' "$HASHES" - | \
-awk -v root="$ROOT" '
-BEGIN {
-  print "{"
-  print "  \"root\": \"" root "\","
-  print "  \"files\": ["
-}
-{
-  print
-}
-END {
-  print ""
-  print "  ]"
-  print "}"
-}'
+    # Escape quotes in path
+    esc_path="${path//\"/\\\"}"
+
+    if [ "$FIRST" = true ]; then
+        FIRST=false
+    else
+        echo ","
+    fi
+
+    printf "    {\"path\": \"%s\", \"size\": %s, \"mtime\": \"%s\", \"sha256\": \"%s\"}" \
+        "$esc_path" "$size" "$mtime" "$hash"
+
+done < "$FILES"
+
+# End JSON
+echo ""
+echo "  ]"
+echo "}"
+
+# Cleanup
+rm -rf "$TMP"
