@@ -67,8 +67,8 @@ start_time = time()
 with ThreadPoolExecutor(max_workers=JOBS) as executor:
     futures = {executor.submit(file_info, path): path for path in all_files}
     for i, fut in enumerate(as_completed(futures), 1):
-        path, size, mtime, sha = fut.result()
-        file_data[path] = {"size": size, "mtime": mtime, "sha256": sha}
+        path, size, mtime, blake3_hash = fut.result()
+        file_data[path] = {"size": size, "mtime": mtime, "blake3-hash": blake3_hash}
         if i % 50 == 0 or i == len(all_files):
             print(f"[PROGRESS] {i}/{len(all_files)} files hashed ({time()-start_time:.1f}s elapsed)", file=sys.stderr)
 
@@ -89,13 +89,13 @@ def build_tree(dir_path):
                     if os.path.isfile(os.path.join(dir_path, f)) and not ignored(os.path.join(dir_path, f))])
     for f in files:
         full_path = os.path.join(dir_path, f)
-        info = file_data.get(full_path, {"size": 0, "mtime": 0, "sha256": None})
+        info = file_data.get(full_path, {"size": 0, "mtime": 0, "blake3-hash": None})
         children.append({
             "name": f,
             "type": "file",
             "size": info["size"],
             "mtime": info["mtime"],
-            "sha256": info["sha256"]
+            "blake3-hash": info["blake3-hash"]
         })
         total_size += info["size"]
 
