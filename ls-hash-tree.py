@@ -4,6 +4,7 @@ import datetime
 import os
 import sys
 import json
+from json.encoder import encode_basestring, encode_basestring_ascii
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import time
 import signal
@@ -74,6 +75,50 @@ JOBS = int(os.environ.get("JOBS", os.cpu_count()))
 CHUNK_SIZE = 16 * 1024 * 1024  # 16 MB read chunks
 EMA_ALPHA = 0.2  # smoothing factor for ETA
 TRACE_ENABLED = bool(os.environ.get("TRACE"))
+
+
+class AsciiEscapedStr(str):
+    """Marker type: encode this string with JSON ensure_ascii-style escapes."""
+
+
+def mixed_json_dumps(obj, indent: int = 2) -> str:
+    """Dump JSON where AsciiEscapedStr uses \uXXXX, but normal strings use Unicode."""
+    spaces = " " * indent
+
+    def _encode(v, level: int) -> str:
+        if v is None:
+            return "null"
+        if v is True:
+            return "true"
+        if v is False:
+            return "false"
+        if isinstance(v, AsciiEscapedStr):
+            return encode_basestring_ascii(str(v))
+        if isinstance(v, str):
+            return encode_basestring(v)
+        if isinstance(v, (int, float)):
+            return str(v)
+        if isinstance(v, list):
+            if not v:
+                return "[]"
+            inner = []
+            for item in v:
+                inner.append("\n" + spaces * (level + 1) + _encode(item, level + 1) + ",")
+            inner[-1] = inner[-1][:-1]  # remove trailing comma
+            return "[" + "".join(inner) + "\n" + spaces * level + "]"
+        if isinstance(v, dict):
+            if not v:
+                return "{}"
+            inner = []
+            for k, val in v.items():
+                key_enc = encode_basestring(str(k))
+                inner.append("\n" + spaces * (level + 1) + key_enc + ": " + _encode(val, level + 1) + ",")
+            inner[-1] = inner[-1][:-1]  # remove trailing comma
+            return "{" + "".join(inner) + "\n" + spaces * level + "}"
+        # Fallback: convert to string (shouldn't normally happen with our schema)
+        return encode_basestring(str(v))
+
+    return _encode(obj, 0)
 
 # ------------------ Ctrl-C handling ------------------
 interrupted = False
@@ -209,6 +254,7 @@ def build_tree(dir_path):
         "total_size": total_size,
     }
     if any(ord(ch) > 127 for ch in dir_name):
+        dir_node["name"] = AsciiEscapedStr(dir_name)
         dir_node["name-unicode"] = dir_name
 
     # Subdirectories
@@ -237,6 +283,7 @@ def build_tree(dir_path):
             "update-time": info["update-time"],
         }
         if any(ord(ch) > 127 for ch in f):
+            node["name"] = AsciiEscapedStr(f)
             node["name-unicode"] = f
         if DO_HASH:
             node["blake3-hash"] = info.get("blake3-hash")
@@ -250,4 +297,4 @@ def build_tree(dir_path):
 # ------------------ Output JSON ------------------
 tree = build_tree(ROOT)
 output = {"root": ROOT, "tree": tree}
-print(json.dumps(output, indent=2))
+print(mixed_json_dumps(output, indent=2))
