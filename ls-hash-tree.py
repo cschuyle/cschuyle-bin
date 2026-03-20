@@ -82,7 +82,7 @@ class AsciiEscapedStr(str):
 
 
 def mixed_json_dumps(obj, indent: int = 2) -> str:
-    """Dump JSON where AsciiEscapedStr uses \uXXXX, but normal strings use Unicode."""
+    '''Dump JSON where AsciiEscapedStr uses \uXXXX escapes, but normal strings use Unicode.'''
     spaces = " " * indent
 
     def _encode(v, level: int) -> str:
