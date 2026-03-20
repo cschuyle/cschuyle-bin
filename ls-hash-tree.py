@@ -144,7 +144,10 @@ with ThreadPoolExecutor(max_workers=JOBS) as executor:
                 raise KeyboardInterrupt
 
             path, size, mtime, blake3_hash = fut.result()
-            file_data[path] = {"size": size, "mtime": mtime, "blake3-hash": blake3_hash}
+            if DO_HASH:
+                file_data[path] = {"size": size, "mtime": mtime, "blake3-hash": blake3_hash}
+            else:
+                file_data[path] = {"size": size, "mtime": mtime}
 
             # ETA calculation with EMA
             elapsed = time() - start_time
@@ -194,14 +197,19 @@ def build_tree(dir_path):
                     if os.path.isfile(os.path.join(dir_path, f)) and not ignored(os.path.join(dir_path, f))])
     for f in files:
         full_path = os.path.join(dir_path, f)
-        info = file_data.get(full_path, {"size": 0, "mtime": 0, "blake3-hash": None})
-        children.append({
+        if DO_HASH:
+            info = file_data.get(full_path, {"size": 0, "mtime": 0, "blake3-hash": None})
+        else:
+            info = file_data.get(full_path, {"size": 0, "mtime": 0})
+        node = {
             "name": f,
             "type": "file",
             "size": info["size"],
             "mtime": info["mtime"],
-            "blake3-hash": info["blake3-hash"]
-        })
+        }
+        if DO_HASH:
+            node["blake3-hash"] = info.get("blake3-hash")
+        children.append(node)
         total_size += info["size"]
 
     return {
