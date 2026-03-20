@@ -73,6 +73,7 @@ IGNORE_FILE = _args.ignore_file
 JOBS = int(os.environ.get("JOBS", os.cpu_count()))
 CHUNK_SIZE = 16 * 1024 * 1024  # 16 MB read chunks
 EMA_ALPHA = 0.2  # smoothing factor for ETA
+TRACE_ENABLED = bool(os.environ.get("TRACE"))
 
 # ------------------ Ctrl-C handling ------------------
 interrupted = False
@@ -134,7 +135,8 @@ def file_info(path):
             print(f"[HASHED] {path}", file=sys.stderr)
         else:
             digest = None
-            print(f"[STAT] {path}", file=sys.stderr)
+            if TRACE_ENABLED:
+                print(f"[STAT] {path}", file=sys.stderr)
         return path, size, mtime, digest
     except Exception as e:
         print(f"[ERROR] {path}: {e}", file=sys.stderr)
@@ -195,7 +197,8 @@ with ThreadPoolExecutor(max_workers=JOBS) as executor:
 def build_tree(dir_path):
     children = []
     total_size = 0
-    print(f"[DIR] Processing directory {dir_path}", file=sys.stderr)
+    if TRACE_ENABLED:
+        print(f"[DIR] Processing directory {dir_path}", file=sys.stderr)
 
     # Subdirectories
     subdirs = sorted([d for d in os.listdir(dir_path) 
