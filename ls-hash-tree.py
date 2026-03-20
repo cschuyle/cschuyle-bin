@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import datetime
 import os
 import sys
 import json
@@ -107,11 +108,23 @@ for dirpath, dirnames, filenames in os.walk(ROOT):
 
 print(f"[INFO] Found {len(all_files)} files to process under {ROOT}", file=sys.stderr)
 
+
+def mtime_human(ts):
+    """Format file mtime as local wall-clock string for JSON output."""
+    try:
+        if ts == 0:
+            return ""
+        return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, OSError, OverflowError):
+        return ""
+
+
 # ------------------ Per-file work (hash optional) ------------------
 def file_info(path):
     try:
         size = os.path.getsize(path)
-        mtime = os.path.getmtime(path)
+        mtime_raw = os.path.getmtime(path)
+        mtime = mtime_human(mtime_raw)
         if DO_HASH:
             h = blake3.blake3()
             with open(path, "rb") as fd:
@@ -125,7 +138,7 @@ def file_info(path):
         return path, size, mtime, digest
     except Exception as e:
         print(f"[ERROR] {path}: {e}", file=sys.stderr)
-        return path, 0, 0, None
+        return path, 0, "", None
 
 # ------------------ Parallel hashing with smart ETA ------------------
 file_data = {}
@@ -198,9 +211,9 @@ def build_tree(dir_path):
     for f in files:
         full_path = os.path.join(dir_path, f)
         if DO_HASH:
-            info = file_data.get(full_path, {"size": 0, "mtime": 0, "blake3-hash": None})
+            info = file_data.get(full_path, {"size": 0, "mtime": "", "blake3-hash": None})
         else:
-            info = file_data.get(full_path, {"size": 0, "mtime": 0})
+            info = file_data.get(full_path, {"size": 0, "mtime": ""})
         node = {
             "name": f,
             "type": "file",
