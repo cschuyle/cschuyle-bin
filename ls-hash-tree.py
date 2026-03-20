@@ -110,7 +110,7 @@ print(f"[INFO] Found {len(all_files)} files to process under {ROOT}", file=sys.s
 
 
 def mtime_human(ts):
-    """Format file mtime as local wall-clock string for JSON output."""
+    """Format modification time as local wall-clock string for JSON \"update-time\" field."""
     try:
         if ts == 0:
             return ""
@@ -158,9 +158,9 @@ with ThreadPoolExecutor(max_workers=JOBS) as executor:
 
             path, size, mtime, blake3_hash = fut.result()
             if DO_HASH:
-                file_data[path] = {"size": size, "mtime": mtime, "blake3-hash": blake3_hash}
+                file_data[path] = {"size": size, "update-time": mtime, "blake3-hash": blake3_hash}
             else:
-                file_data[path] = {"size": size, "mtime": mtime}
+                file_data[path] = {"size": size, "update-time": mtime}
 
             # ETA calculation with EMA
             elapsed = time() - start_time
@@ -211,14 +211,14 @@ def build_tree(dir_path):
     for f in files:
         full_path = os.path.join(dir_path, f)
         if DO_HASH:
-            info = file_data.get(full_path, {"size": 0, "mtime": "", "blake3-hash": None})
+            info = file_data.get(full_path, {"size": 0, "update-time": "", "blake3-hash": None})
         else:
-            info = file_data.get(full_path, {"size": 0, "mtime": ""})
+            info = file_data.get(full_path, {"size": 0, "update-time": ""})
         node = {
             "name": f,
             "type": "file",
             "size": info["size"],
-            "mtime": info["mtime"],
+            "update-time": info["update-time"],
         }
         if DO_HASH:
             node["blake3-hash"] = info.get("blake3-hash")
