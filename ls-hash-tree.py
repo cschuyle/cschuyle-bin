@@ -178,10 +178,11 @@ with ThreadPoolExecutor(max_workers=JOBS) as executor:
             mins = int((eta_seconds % 3600) // 60)
             secs = int(eta_seconds % 60)
 
-            # Progress logic: every 50 files or if 50 files took >5s, or last file
+            # Progress logic: max one progress line every 3 seconds.
+            # Always print on the last file.
             elapsed_since_last = time() - last_progress_time
             files_since_last = i - last_progress_count
-            if files_since_last >= 50 or elapsed_since_last >= 5 or i == len(all_files):
+            if i == len(all_files) or elapsed_since_last >= 3:
                 verb = "hashed" if DO_HASH else "processed"
                 print(f"[PROGRESS] {i}/{len(all_files)} files {verb} "
                       f"({elapsed:.1f}s elapsed, ETA ~{hrs}h {mins}m {secs}s)",
