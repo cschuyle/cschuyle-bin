@@ -69,12 +69,18 @@ if DO_HASH:
         sys.exit(1)
 
 # ------------------ Configuration ------------------
+SCRIPT_FILE = os.path.basename(__file__)
 ROOT = os.path.abspath(_args.root)
 IGNORE_FILE = _args.ignore_file
 JOBS = int(os.environ.get("JOBS", os.cpu_count()))
 CHUNK_SIZE = 16 * 1024 * 1024  # 16 MB read chunks
 EMA_ALPHA = 0.2  # smoothing factor for ETA
 TRACE_ENABLED = bool(os.environ.get("TRACE"))
+
+def log_stderr(level: str, message: str, *, leading_newline: bool = False) -> None:
+    prefix = "\n" if leading_newline else ""
+    print(f"{SCRIPT_FILE} {prefix}[{level}] {message}", file=sys.stderr)
+
 
 
 class AsciiEscapedStr(str):
@@ -126,7 +132,7 @@ interrupted = False
 def signal_handler(sig, frame):
     global interrupted
     interrupted = True
-    print("\n[INFO] Ctrl-C detected, shutting down...", file=sys.stderr)
+    log_stderr("INFO", "Ctrl-C detected, shutting down...", leading_newline=True)
 
 signal.signal(signal.SIGINT, signal_handler)
 
@@ -134,7 +140,7 @@ signal.signal(signal.SIGINT, signal_handler)
 if os.path.exists(IGNORE_FILE):
     with open(IGNORE_FILE, "r") as f:
         spec = pathspec.PathSpec.from_lines("gitwildmatch", f)
-    print(f"[INFO] Loaded ignore file: {IGNORE_FILE}", file=sys.stderr)
+    log_stderr("INFO", f"Loaded ignore file: {IGNORE_FILE}")
 else:
     spec = pathspec.PathSpec([])
 
@@ -152,7 +158,7 @@ for dirpath, dirnames, filenames in os.walk(ROOT):
             continue
         all_files.append(full_path)
 
-print(f"[INFO] Found {len(all_files)} files to process under {ROOT}", file=sys.stderr)
+log_stderr("INFO", f"Found {len(all_files)} files to process under {ROOT}")
 
 
 def mtime_human(ts):
@@ -177,14 +183,14 @@ def file_info(path):
                 while chunk := fd.read(CHUNK_SIZE):
                     h.update(chunk)
             digest = h.hexdigest()
-            print(f"[HASHED] {path}", file=sys.stderr)
+            log_stderr("HASHED", str(path))
         else:
             digest = None
             if TRACE_ENABLED:
-                print(f"[STAT] {path}", file=sys.stderr)
+                log_stderr("STAT", str(path))
         return path, size, mtime, digest
     except Exception as e:
-        print(f"[ERROR] {path}: {e}", file=sys.stderr)
+        log_stderr("ERROR", f"{path}: {e}")
         return path, 0, "", None
 
 # ------------------ Parallel hashing with smart ETA ------------------
@@ -229,14 +235,16 @@ with ThreadPoolExecutor(max_workers=JOBS) as executor:
             files_since_last = i - last_progress_count
             if i == len(all_files) or elapsed_since_last >= 3:
                 verb = "hashed" if DO_HASH else "processed"
-                print(f"[PROGRESS] {i}/{len(all_files)} files {verb} "
-                      f"({elapsed:.1f}s elapsed, ETA ~{hrs}h {mins}m {secs}s)",
-                      file=sys.stderr)
+                log_stderr(
+                    "PROGRESS",
+                    f"{i}/{len(all_files)} files {verb} "
+                    f"({elapsed:.1f}s elapsed, ETA ~{hrs}h {mins}m {secs}s)",
+                )
                 last_progress_time = time()
                 last_progress_count = i
 
     except KeyboardInterrupt:
-        print("[INFO] Aborted by user. Exiting...", file=sys.stderr)
+        log_stderr("INFO", "Aborted by user. Exiting...")
         sys.exit(1)
 
 # ------------------ Build hierarchical tree ------------------
@@ -244,7 +252,7 @@ def build_tree(dir_path):
     children = []
     total_size = 0
     if TRACE_ENABLED:
-        print(f"[DIR] Processing directory {dir_path}", file=sys.stderr)
+        log_stderr("DIR", f"Processing directory {dir_path}")
 
     dir_name = os.path.basename(dir_path)
     dir_node = {
