@@ -158,9 +158,9 @@ with ThreadPoolExecutor(max_workers=JOBS) as executor:
 
             path, size, mtime, blake3_hash = fut.result()
             if DO_HASH:
-                file_data[path] = {"size": size, "update-time": mtime, "blake3-hash": blake3_hash}
+                file_data[path] = {"size-bytes": size, "update-time": mtime, "blake3-hash": blake3_hash}
             else:
-                file_data[path] = {"size": size, "update-time": mtime}
+                file_data[path] = {"size-bytes": size, "update-time": mtime}
 
             # ETA calculation with EMA
             elapsed = time() - start_time
@@ -211,19 +211,21 @@ def build_tree(dir_path):
     for f in files:
         full_path = os.path.join(dir_path, f)
         if DO_HASH:
-            info = file_data.get(full_path, {"size": 0, "update-time": "", "blake3-hash": None})
+            info = file_data.get(
+                full_path, {"size-bytes": 0, "update-time": "", "blake3-hash": None}
+            )
         else:
-            info = file_data.get(full_path, {"size": 0, "update-time": ""})
+            info = file_data.get(full_path, {"size-bytes": 0, "update-time": ""})
         node = {
             "name": f,
             "type": "file",
-            "size": info["size"],
+            "size-bytes": info["size-bytes"],
             "update-time": info["update-time"],
         }
         if DO_HASH:
             node["blake3-hash"] = info.get("blake3-hash")
         children.append(node)
-        total_size += info["size"]
+        total_size += info["size-bytes"]
 
     return {
         "name": os.path.basename(dir_path),
