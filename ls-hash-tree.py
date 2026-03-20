@@ -201,6 +201,16 @@ def build_tree(dir_path):
     if TRACE_ENABLED:
         print(f"[DIR] Processing directory {dir_path}", file=sys.stderr)
 
+    dir_name = os.path.basename(dir_path)
+    dir_node = {
+        "name": dir_name,
+        "type": "dir",
+        "children": children,
+        "total_size": total_size,
+    }
+    if any(ord(ch) > 127 for ch in dir_name):
+        dir_node["name-unicode"] = dir_name
+
     # Subdirectories
     subdirs = sorted([d for d in os.listdir(dir_path) 
                       if os.path.isdir(os.path.join(dir_path, d)) and not ignored(os.path.join(dir_path, d))])
@@ -226,17 +236,16 @@ def build_tree(dir_path):
             "size-bytes": info["size-bytes"],
             "update-time": info["update-time"],
         }
+        if any(ord(ch) > 127 for ch in f):
+            node["name-unicode"] = f
         if DO_HASH:
             node["blake3-hash"] = info.get("blake3-hash")
         children.append(node)
         total_size += info["size-bytes"]
 
-    return {
-        "name": os.path.basename(dir_path),
-        "type": "dir",
-        "children": children,
-        "total_size": total_size
-    }
+    dir_node["total_size"] = total_size
+    dir_node["children"] = children
+    return dir_node
 
 # ------------------ Output JSON ------------------
 tree = build_tree(ROOT)
