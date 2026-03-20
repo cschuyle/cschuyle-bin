@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 set -e
 
-reset_profile() {
-  printf "\033]50;SetProfile=Default\a"
+INITIAL_PROFILE="$ITERM_PROFILE"
+
+# SetProfile changes iTerm’s session profile but does not update $ITERM_PROFILE in the shell.
+iterm_set_profile() {
+  [[ "$TERM_PROGRAM" != "iTerm.app" ]] && return
+  printf '\033]50;SetProfile=%s\a' "$1"
+  export ITERM_PROFILE="$1"
 }
+
+reset_profile() {
+  iterm_set_profile "$INITIAL_PROFILE"
+}
+
 # Ensure the terminal profile title is reset even if the script is interrupted.
 trap reset_profile EXIT INT TERM
 
-printf "\033]50;SetProfile=Caution\a"
+iterm_set_profile "Caution"
 ssh -p 4546 cschuyle@$DRAGNON_SYNOLOGY_IP
