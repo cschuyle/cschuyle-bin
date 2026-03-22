@@ -5,15 +5,16 @@ scriptname=$(basename "$0")
 N=2
 
 usage() {
-    echo "Usage: $scriptname [-n N] [file ...]"
+    echo "Usage: $scriptname [-nth N] [file ...]"
     echo
-    echo "Split input into two files: -small.txt (~1/N of the lines) and -large.txt (the rest)."
-    echo "Default N is 2 (same idea as odd vs even lines when N=2)."
+    echo "Split input into two files: ~1/N of the lines (NR % N == 1) and the rest."
+    echo "Default N is 2 (odd vs even lines when N=2)."
     echo
-    echo "  -n N   Denominator N (integer >= 2). Small gets line numbers i where i mod N == 1."
+    echo "  -nth N   Denominator N (integer >= 2)."
     echo
-    echo "With file arguments, outputs are <stem>-{small,large}.txt next to each file."
-    echo "With no files, reads stdin; outputs are ./<scriptname>-<timestamp>-{small,large}.txt."
+    echo "Outputs: for N=2 (default), <stem>-{odd,even}.txt; for N>2, <stem>.1-of-N.txt and <stem>.(N-1)-of-N.txt."
+    echo "With file arguments, paths are next to each input file."
+    echo "With no files, reads stdin; same naming under ./<scriptname>-<timestamp>..."
     exit 0
 }
 
@@ -22,8 +23,8 @@ while [[ $# -gt 0 ]]; do
         -h | --help)
             usage
             ;;
-        -n)
-            N="${2:?missing value for -n}"
+        -nth)
+            N="${2:?missing value for -nth}"
             shift 2
             ;;
         --)
@@ -32,7 +33,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         -*)
             echo "Unknown option: $1" >&2
-            echo "Usage: $scriptname [-n N] [file ...]" >&2
+            echo "Usage: $scriptname [-nth N] [file ...]" >&2
             exit 1
             ;;
         *)
@@ -42,16 +43,26 @@ while [[ $# -gt 0 ]]; do
 done
 
 if ! [[ "$N" =~ ^[0-9]+$ ]] || [[ "$N" -lt 2 ]]; then
-    echo "Error: -n must be an integer >= 2 (got: $N)" >&2
+    echo "Error: -nth must be an integer >= 2 (got: $N)" >&2
     exit 1
 fi
 
 split_stream() {
     local input=$1
     local filedir=$2
+    local small large
+    
+    if [[ "$N" -eq 2 ]]; then
+        small="${filedir}-odd.txt"
+        large="${filedir}-even.txt"
+    else
+        small="${filedir}.1-of-${N}.txt"
+        therest=$((N - 1))
+        large="${filedir}.${therest}-of-${N}.txt"
+    fi
     awk -v n="$N" \
-        -v small="${filedir}-small.txt" \
-        -v large="${filedir}-large.txt" \
+        -v small="$small" \
+        -v large="$large" \
         'NR % n == 1 { print > small; next }
          { print > large }' "$input"
 }
