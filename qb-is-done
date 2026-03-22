@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-set -o errexit # set -e
+set -o errexit
 set -o pipefail
-script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-script_file=$(basename "$0")
 
-# Check if at least one directory was provided
 if [ $# -eq 0 ]; then
-  echo "Usage: $0 <dir1> [dir2 ... dirN]"
+  echo "Usage: $0 <dir1> [dir2 ... dirN]" >&2
+  echo "  Eligible dirs (no .!qB / .part in progress) are classified:" >&2
+  echo "  • _MP4 — has .mp4 or .m4v, and no .mkv or .avi (MP4 bucket wins over _DONE)." >&2
+  echo "  • _DONE — has .m4v, .mp4, .avi, or .mkv, but not eligible for _MP4." >&2
+  echo "  Prints mkdir/mv commands: _MP4 block first, then _DONE." >&2
   exit 1
 fi
 
@@ -15,37 +16,70 @@ DONE_DIR=_DONE
 MP4_DIR=_MP4
 
 is_a_dest_dir() {
-    local dir="$1"
-    if [[ "$dir" == "@eaDir" || "$dir" == "$QB_TEMP_DIR" || "$dir" == "$DONE_DIR" || "$dir" == "$MP4_DIR" ]]; then
-		return 0  # true
-    else
-        return 1  # false
-    fi
+  local dir="$1"
+  if [[ "$dir" == "@eaDir" || "$dir" == "$QB_TEMP_DIR" || "$dir" == "$DONE_DIR" || "$dir" == "$MP4_DIR" ]]; then
+    return 0
+  fi
+  return 1
 }
 
-#set -x
+# True if find prints any path (excluding Synology AppleDouble).
+has_match() {
+  local dir=$1
+  shift
+  [[ -n "$(find "$dir" -type f \( "$@" \) 2>/dev/null | grep -v '/._')" ]]
+}
 
-# Remind the user the FIRST time
-echo "mkdir -p '$DONE_DIR'"
-
-# Loop through all provided directories
+mp4_list=()
+done_list=()
 
 for DIR in "$@"; do
-  # Check if it's a valid directory
   if [ ! -d "$DIR" ]; then
-#    echo "Warning: '$DIR' is not a directory" >&2
+    continue
+  fi
+  if is_a_dest_dir "$DIR"; then
     continue
   fi
 
-  if is_a_dest_dir "$DIR"; then continue; fi
-
-  # Search for .!qB files recursively
-  if [[ ! -z "$(find "$DIR" -type f \( -iname '*.!qB' -o -iname '*.part' \) | grep -v '/._')" ]]; then
-    # Found .!qB files — skip
+  # In-progress downloads — skip entirely
+  if has_match "$DIR" -iname '*.!qB' -o -iname '*.part'; then
     continue
-  elif [[ ! -z "$(find "$DIR" -type f \( -iname '*.m4v' -o -iname '*.mp4' -o -iname '*.avi' -o -iname '*.mkv' \) | grep -v '/._')" ]]; then
-    printf "[[ -d '$DONE_DIR' ]] && mv '$DIR' '$DONE_DIR'\n"
+  fi
+
+  has_mkv_avi=false
+  if has_match "$DIR" -iname '*.mkv' -o -iname '*.avi'; then
+    has_mkv_avi=true
+  fi
+
+  has_mp4_m4v=false
+  if has_match "$DIR" -iname '*.mp4' -o -iname '*.m4v'; then
+    has_mp4_m4v=true
+  fi
+
+  has_any_video=false
+  if has_match "$DIR" -iname '*.m4v' -o -iname '*.mp4' -o -iname '*.avi' -o -iname '*.mkv'; then
+    has_any_video=true
+  fi
+
+  if [[ "$has_mp4_m4v" == true && "$has_mkv_avi" == false ]]; then
+    mp4_list+=("$DIR")
+  elif [[ "$has_any_video" == true ]]; then
+    done_list+=("$DIR")
   else
-	  [[ ! -z "$VERBOSE" ]] && echo "# No video files in '$DIR'" >&2
+    [[ -n "${VERBOSE:-}" ]] && echo "# No video files in '$DIR'" >&2
   fi
 done
+
+if ((${#mp4_list[@]} > 0)); then
+  echo "mkdir -p '$MP4_DIR'"
+  for d in "${mp4_list[@]}"; do
+    printf "[[ -d '%s' ]] && mv '%s' '%s'\n" "$MP4_DIR" "$d" "$MP4_DIR"
+  done
+fi
+
+if ((${#done_list[@]} > 0)); then
+  echo "mkdir -p '$DONE_DIR'"
+  for d in "${done_list[@]}"; do
+    printf "[[ -d '%s' ]] && mv '%s' '%s'\n" "$DONE_DIR" "$d" "$DONE_DIR"
+  done
+fi
