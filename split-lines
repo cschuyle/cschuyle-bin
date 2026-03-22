@@ -2,19 +2,34 @@
 set -euo pipefail
 
 scriptname=$(basename "$0")
+# Default -nth denominator is 2. N=2 outputs use FILE.odd / FILE.even (same partition as -n 2).
 N=2
+NWAY=
+nth_seen=0
+n_seen=0
 
 usage() {
     echo "Usage: $scriptname [-nth N] [file ...]"
+    echo "       $scriptname -n N [file ...]"
     echo
-    echo "Split input into two files: ~1/N of the lines (NR % N == 1) and the rest."
-    echo "Default N is 2 (odd vs even lines when N=2)."
+    echo "  (no args) Use N=2 (odd- vs even-numbered lines)."
     echo
-    echo "  -nth N   Denominator N (integer >= 2)."
+    echo "  -nth and -n are mutually exclusive."
     echo
-    echo "Outputs: for N=2 (default), <stem>-{odd,even}.txt; for N>2, <stem>.1-of-N.txt and <stem>.(N-1)-of-N.txt."
-    echo "With file arguments, paths are next to each input file."
-    echo "With no files, reads stdin; same naming under ./<scriptname>-<timestamp>..."
+    echo "  -nth N    Split into one file with 1/Nth of the lines and another with (N-1)/Nth of the lines."
+    echo
+    echo "  -n N      Split into N files with 1/N of the lines in each, as evenly as possible."
+    echo
+    echo "  Output file names:"
+    echo "    • If running on stdin, FILE is assigned the current timestamp."
+    echo "    • If running on files, FILE is the name of the input file."
+    echo
+    echo "  N=2 (default): FILE.even and FILE.odd"
+    echo
+    echo "  N>2:"
+    echo "    -nth N: FILE.one-Nth-of-N and FILE.rest-of-N"
+    echo "    -n N:   FILE.1-of-N ... FILE.N-of-N (N outputs)"
+    echo
     exit 0
 }
 
@@ -24,7 +39,13 @@ while [[ $# -gt 0 ]]; do
             usage
             ;;
         -nth)
+            nth_seen=1
             N="${2:?missing value for -nth}"
+            shift 2
+            ;;
+        -n)
+            n_seen=1
+            NWAY="${2:?missing value for -n}"
             shift 2
             ;;
         --)
@@ -33,7 +54,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         -*)
             echo "Unknown option: $1" >&2
-            echo "Usage: $scriptname [-nth N] [file ...]" >&2
+            echo "Usage: $scriptname [-nth N | -n N] [file ...]" >&2
             exit 1
             ;;
         *)
@@ -42,34 +63,79 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if ! [[ "$N" =~ ^[0-9]+$ ]] || [[ "$N" -lt 2 ]]; then
-    echo "Error: -nth must be an integer >= 2 (got: $N)" >&2
+if [[ "$nth_seen" -eq 1 && "$n_seen" -eq 1 ]]; then
+    echo "Error: -nth and -n cannot be used together" >&2
     exit 1
 fi
 
-split_stream() {
+if [[ "$n_seen" -eq 1 ]]; then
+    if ! [[ "$NWAY" =~ ^[0-9]+$ ]] || [[ "$NWAY" -lt 1 ]]; then
+        echo "Error: -n must be an integer >= 1 (got: $NWAY)" >&2
+        exit 1
+    fi
+else
+    if ! [[ "$N" =~ ^[0-9]+$ ]] || [[ "$N" -lt 2 ]]; then
+        echo "Error: -nth must be an integer >= 2 (got: $N)" >&2
+        exit 1
+    fi
+fi
+
+split_stream_nway() {
+    local input=$1
+    local filedir=$2
+    if [[ "$NWAY" -eq 2 ]]; then
+        awk -v stem="$filedir" -v n=2 '
+            {
+                m = (NR - 1) % n + 1
+                if (m == 1) out = stem ".odd"
+                else out = stem ".even"
+                print > out
+            }' "$input"
+    else
+        awk -v stem="$filedir" -v n="$NWAY" '
+            {
+                m = (NR - 1) % n + 1
+                out = stem "." m "-of-" n
+                print > out
+            }' "$input"
+    fi
+}
+
+split_stream_two() {
     local input=$1
     local filedir=$2
     local small large
-    
+
     if [[ "$N" -eq 2 ]]; then
-        small="${filedir}-odd.txt"
-        large="${filedir}-even.txt"
+        small="${filedir}.odd"
+        large="${filedir}.even"
     else
-        small="${filedir}.1-of-${N}.txt"
-        therest=$((N - 1))
-        large="${filedir}.${therest}-of-${N}.txt"
+        small="${filedir}.one-${N}th-of-${N}"
+        large="${filedir}.rest-of-${N}"
     fi
     awk -v n="$N" \
         -v small="$small" \
         -v large="$large" \
-        'NR % n == 1 { print > small; next }
-         { print > large }' "$input"
+        '{
+            m = (NR - 1) % n + 1
+            if (m == 1) print > small
+            else print > large
+        }' "$input"
+}
+
+split_stream() {
+    local input=$1
+    local filedir=$2
+    if [[ "$n_seen" -eq 1 ]]; then
+        split_stream_nway "$input" "$filedir"
+    else
+        split_stream_two "$input" "$filedir"
+    fi
 }
 
 if [[ $# -eq 0 ]]; then
     timestamp=$(date +%Y-%m-%d,%H.%M.%S)
-    filedir="./$scriptname-$timestamp"
+    filedir="./$timestamp"
     split_stream /dev/stdin "$filedir"
 else
     for file in "$@"; do
@@ -77,7 +143,7 @@ else
             echo "Error: $file is not a regular file" >&2
             continue
         fi
-        stem="$(dirname "$file")/$(basename "$file" | sed 's/\.[^.]*$//')"
+        stem="$(dirname "$file")/$(basename "$file")"
         split_stream "$file" "$stem"
     done
 fi
