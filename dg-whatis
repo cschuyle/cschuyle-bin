@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Classify paths as movie, series, album, or ebook using filesystem heuristics.
+
+Usage: dg-whatis [--json] <path> [path ...]
+
+Content types (one primary kind per path):
+  movie, series, album, ebook, unknown
+
+Media formats listed when present (by extension). Canonical labels include
+mp4, avi, flac, mp3, mobi, pdf; other extensions in the same families appear
+as their suffix (e.g. mkv, epub, m4a).
+
+Heuristics: video present -> movie vs series from filenames/paths (S01E02,
+season N, 1x02, etc.) and file counts; else audio -> album; else ebooks only
+-> ebook. Mixed ebook+audio/video is reported as unknown.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Set, Tuple
+
+VIDEO_EXTENSIONS = {
+    '.mp4', '.m4v', '.mkv', '.avi', '.mov', '.webm', '.wmv', '.mpg', '.mpeg',
+}
+AUDIO_EXTENSIONS = {
+    '.mp3', '.flac', '.wav', '.aac', '.m4a', '.ogg', '.opus', '.wma', '.alac',
+}
+EBOOK_EXTENSIONS = {
+    '.mobi', '.azw', '.azw3', '.epub', '.pdf', '.fb2', '.djvu',
+}
+
+CANONICAL_MEDIA_LABELS = {
+    '.mp4': 'mp4',
+    '.avi': 'avi',
+    '.flac': 'flac',
+    '.mp3': 'mp3',
+    '.mobi': 'mobi',
+    '.pdf': 'pdf',
+}
+
+_EPISODE_RE = re.compile(
+    r'(?i)(\bs\d{1,2}\s*e\d{1,3}\b|\bseason\s*\d{1,2}\b|\bep(?:isode)?\s*\d{1,3}\b|\b\d{1,2}x\d{1,3}\b)'
+)
+
+
+def iter_files(root: Path) -> Iterable[Path]:
+    if root.is_file():
+        yield root
+        return
+    if not root.is_dir():
+        return
+    for p in root.rglob('*'):
+        try:
+            if p.is_file():
+                yield p
+        except OSError:
+            continue
+
+
+def looks_like_episode(name: str) -> bool:
+    return bool(_EPISODE_RE.search(name))
+
+
+def names_from_file_up_to_root(f: Path, root: Path) -> List[str]:
+    out = [f.name]
+    root_r = root.resolve()
+    cur = f.parent.resolve()
+    while cur != root_r and cur != cur.parent:
+        out.append(cur.name)
+        cur = cur.parent
+    return out
+
+
+def gather_media(root: Path) -> Tuple[Set[str], List[Path], List[Path], List[Path]]:
+    exts: Set[str] = set()
+    video_files: List[Path] = []
+    audio_files: List[Path] = []
+    ebook_files: List[Path] = []
+    for f in iter_files(root):
+        suf = f.suffix.lower()
+        if suf in VIDEO_EXTENSIONS:
+            video_files.append(f)
+            exts.add(suf)
+        elif suf in AUDIO_EXTENSIONS:
+            audio_files.append(f)
+            exts.add(suf)
+        elif suf in EBOOK_EXTENSIONS:
+            ebook_files.append(f)
+            exts.add(suf)
+    return exts, video_files, audio_files, ebook_files
+
+
+def formats_for_output(exts: Set[str]) -> List[str]:
+    return [CANONICAL_MEDIA_LABELS.get(s, s.lstrip('.')) for s in sorted(exts)]
+
+
+def video_file_looks_episodic(f: Path, root: Path) -> bool:
+    return any(looks_like_episode(n) for n in names_from_file_up_to_root(f, root))
+
+
+def classify(
+    root: Path,
+    video_files: List[Path],
+    audio_files: List[Path],
+    ebook_files: List[Path],
+) -> Tuple[str, str]:
+    n_v, n_a, n_e = len(video_files), len(audio_files), len(ebook_files)
+
+    if n_v:
+        if root.is_file():
+            if looks_like_episode(root.name):
+                return 'series', 'episode pattern in video filename'
+            return 'movie', 'single video file'
+
+        episodic = sum(1 for f in video_files if video_file_looks_episodic(f, root))
+        if n_v >= 2 and (episodic >= 1 or n_v >= 3):
+            return 'series', f'{n_v} video files ({episodic} with episode/season naming)'
+        if n_v >= 2:
+            return 'movie', f'{n_v} video files, no episode/season naming'
+        if episodic:
+            return 'series', 'episode pattern in path'
+        return 'movie', 'single video file in directory'
+
+    if n_a and not n_v:
+        return 'album', f'{n_a} audio file(s)'
+
+    if n_e and not n_v and not n_a:
+        return 'ebook', f'{n_e} ebook file(s)'
+
+    if n_e and (n_a or n_v):
+        return 'unknown', 'mixed ebook with video/audio'
+    if n_a and n_e:
+        return 'unknown', 'mixed audio and ebook'
+
+    return 'unknown', 'no recognized media files'
+
+
+def analyze_path(path: Path) -> Dict[str, object]:
+    path = path.expanduser()
+    if not path.exists():
+        return {
+            'path': str(path),
+            'kind': 'unknown',
+            'detail': 'does not exist',
+            'media_types': [],
+        }
+
+    exts, v, a, e = gather_media(path)
+    kind, detail = classify(path, v, a, e)
+    return {
+        'path': str(path.resolve()),
+        'kind': kind,
+        'detail': detail,
+        'media_types': formats_for_output(exts),
+    }
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    p = argparse.ArgumentParser(description='Classify media paths (movie/series/album/ebook).')
+    p.add_argument('paths', nargs='+', help='Files or directories')
+    p.add_argument('--json', action='store_true', help='NDJSON output')
+    args = p.parse_args(argv)
+
+    rows = [analyze_path(Path(x)) for x in args.paths]
+    if args.json:
+        for row in rows:
+            print(json.dumps(row, ensure_ascii=False))
+        return 0
+
+    for row in rows:
+        media = ', '.join(row['media_types']) if row['media_types'] else '—'
+        print(row['path'])
+        print(f"  type: {row['kind']} — {row['detail']}")
+        print(f"  media: {media}")
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
