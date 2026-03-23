@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Classify paths as movie, series, album, or ebook using filesystem heuristics.
 
-Usage: dg-whatis [--json] <path> [path ...]
+Usage: dg-whatis [--json] [-media|--media] <path> [path ...]
+
+  -media / --media  Only print paths that have at least one identified
+                     video, audio, or ebook extension (under scan rules).
 
 Content types (one primary kind per path):
   movie, series, album, ebook, unknown
@@ -290,10 +293,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description='Classify media paths (movie/series/album/ebook).')
     p.add_argument('paths', nargs='+', help='Files or directories')
     p.add_argument('--json', action='store_true', help='NDJSON output')
+    p.add_argument(
+        '-media',
+        '--media',
+        dest='media_only',
+        action='store_true',
+        help='Only output paths with at least one identified video/audio/ebook file',
+    )
     args = p.parse_args(argv)
 
     for x in args.paths:
         row = analyze_path(Path(x))
+        if args.media_only and not row['media_types']:
+            continue
         if args.json:
             print(json.dumps(row, ensure_ascii=False), flush=True)
             continue
