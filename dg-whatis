@@ -10,6 +10,10 @@ Media formats listed when present (by extension). Canonical labels include
 mp4, avi, flac, mp3, mobi, pdf; other extensions in the same families appear
 as their suffix (e.g. mkv, epub, m4a).
 
+Non-media / download state (other_types when present):
+  qb-partial — qBittorrent incomplete file (.!qB suffix, e.g. video.mkv.!qB)
+  part — generic partial download (.part suffix)
+
 Heuristics: video present -> movie vs series from filenames/paths (S01E02,
 season N, 1x02, etc.) and file counts; else audio -> album; else ebooks only
 -> ebook. Mixed ebook+audio/video is reported as unknown.
@@ -47,6 +51,20 @@ _EPISODE_RE = re.compile(
     r'(?i)(\bs\d{1,2}\s*e\d{1,3}\b|\bseason\s*\d{1,2}\b|\bep(?:isode)?\s*\d{1,3}\b|\b\d{1,2}x\d{1,3}\b)'
 )
 
+# qBittorrent uses a trailing ".!qB" on the incomplete file (suffix may be ".!qB").
+_QB_PARTIAL_SUFFIX = '.!qb'  # lowercase for comparison
+
+
+def other_file_tags(f: Path) -> Set[str]:
+    """Tags for partial / downloader artifacts (not primary media kind)."""
+    tags: Set[str] = set()
+    suf = f.suffix.lower()
+    if suf == _QB_PARTIAL_SUFFIX or f.name.lower().endswith('.!qb'):
+        tags.add('qb-partial')
+    if suf == '.part':
+        tags.add('part')
+    return tags
+
 
 def iter_files(root: Path) -> Iterable[Path]:
     if root.is_file():
@@ -76,13 +94,18 @@ def names_from_file_up_to_root(f: Path, root: Path) -> List[str]:
     return out
 
 
-def gather_media(root: Path) -> Tuple[Set[str], List[Path], List[Path], List[Path]]:
+def gather_media(root: Path) -> Tuple[Set[str], List[Path], List[Path], List[Path], List[str]]:
     exts: Set[str] = set()
     video_files: List[Path] = []
     audio_files: List[Path] = []
     ebook_files: List[Path] = []
+    other_types: Set[str] = set()
     for f in iter_files(root):
+        other_types |= other_file_tags(f)
         suf = f.suffix.lower()
+        # Skip qB partial / .part for media buckets (not finished media)
+        if suf == _QB_PARTIAL_SUFFIX or f.name.lower().endswith('.!qb') or suf == '.part':
+            continue
         if suf in VIDEO_EXTENSIONS:
             video_files.append(f)
             exts.add(suf)
@@ -92,7 +115,7 @@ def gather_media(root: Path) -> Tuple[Set[str], List[Path], List[Path], List[Pat
         elif suf in EBOOK_EXTENSIONS:
             ebook_files.append(f)
             exts.add(suf)
-    return exts, video_files, audio_files, ebook_files
+    return exts, video_files, audio_files, ebook_files, sorted(other_types)
 
 
 def formats_for_output(exts: Set[str]) -> List[str]:
@@ -148,15 +171,17 @@ def analyze_path(path: Path) -> Dict[str, object]:
             'kind': 'unknown',
             'detail': 'does not exist',
             'media_types': [],
+            'other_types': [],
         }
 
-    exts, v, a, e = gather_media(path)
+    exts, v, a, e, other = gather_media(path)
     kind, detail = classify(path, v, a, e)
     return {
         'path': str(path.resolve()),
         'kind': kind,
         'detail': detail,
         'media_types': formats_for_output(exts),
+        'other_types': other,
     }
 
 
@@ -174,9 +199,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     for row in rows:
         media = ', '.join(row['media_types']) if row['media_types'] else '—'
+        other = ', '.join(row['other_types']) if row['other_types'] else '—'
         print(row['path'])
         print(f"  type: {row['kind']} — {row['detail']}")
         print(f"  media: {media}")
+        print(f"  other: {other}")
     return 0
 
 
