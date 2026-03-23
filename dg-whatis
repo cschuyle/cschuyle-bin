@@ -17,12 +17,19 @@ Non-media / download state (other_types when present):
 Heuristics: video present -> movie vs series from filenames/paths (S01E02,
 season N, 1x02, etc.) and file counts; else audio -> album; else ebooks only
 -> ebook. Mixed ebook+audio/video is reported as unknown.
+
+Each path also has type: file | directory | symlink to directory (or missing
+if the path does not exist).
+
+Directory scans recurse at most SCAN_MAX_DEPTH path components below the root
+(e.g. depth 3: root/a/b/file.ext — not root/a/b/c/file.ext).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -54,6 +61,26 @@ _EPISODE_RE = re.compile(
 # qBittorrent uses a trailing ".!qB" on the incomplete file (suffix may be ".!qB").
 _QB_PARTIAL_SUFFIX = '.!qb'  # lowercase for comparison
 
+# Max path segments under a directory root (including filename) when scanning.
+SCAN_MAX_DEPTH = 3
+
+
+def path_entry_type(p: Path) -> str:
+    """How the path exists on disk: file, directory, or symlink to directory."""
+    if p.is_symlink():
+        try:
+            target = p.resolve()
+        except OSError:
+            return 'file'
+        if target.is_dir():
+            return 'symlink to directory'
+        return 'file'
+    if p.is_dir():
+        return 'directory'
+    if p.is_file():
+        return 'file'
+    return 'file'
+
 
 def other_file_tags(f: Path) -> Set[str]:
     """Tags for partial / downloader artifacts (not primary media kind)."""
@@ -72,12 +99,32 @@ def iter_files(root: Path) -> Iterable[Path]:
         return
     if not root.is_dir():
         return
-    for p in root.rglob('*'):
+    try:
+        root_r = root.resolve()
+    except OSError:
+        return
+    for dirpath, dirnames, filenames in os.walk(root_r, topdown=True, followlinks=False):
+        cur = Path(dirpath)
         try:
-            if p.is_file():
-                yield p
-        except OSError:
+            rel = cur.relative_to(root_r)
+        except ValueError:
+            dirnames[:] = []
             continue
+        if len(rel.parts) >= SCAN_MAX_DEPTH:
+            dirnames[:] = []
+        for name in filenames:
+            fp = cur / name
+            try:
+                frel = fp.relative_to(root_r)
+            except ValueError:
+                continue
+            if len(frel.parts) > SCAN_MAX_DEPTH:
+                continue
+            try:
+                if fp.is_file():
+                    yield fp
+            except OSError:
+                continue
 
 
 def looks_like_episode(name: str) -> bool:
@@ -168,6 +215,7 @@ def analyze_path(path: Path) -> Dict[str, object]:
     if not path.exists():
         return {
             'path': str(path),
+            'type': 'missing',
             'kind': 'unknown',
             'detail': 'does not exist',
             'media_types': [],
@@ -178,6 +226,7 @@ def analyze_path(path: Path) -> Dict[str, object]:
     kind, detail = classify(path, v, a, e)
     return {
         'path': str(path.resolve()),
+        'type': path_entry_type(path),
         'kind': kind,
         'detail': detail,
         'media_types': formats_for_output(exts),
@@ -191,19 +240,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument('--json', action='store_true', help='NDJSON output')
     args = p.parse_args(argv)
 
-    rows = [analyze_path(Path(x)) for x in args.paths]
-    if args.json:
-        for row in rows:
-            print(json.dumps(row, ensure_ascii=False))
-        return 0
-
-    for row in rows:
+    for x in args.paths:
+        row = analyze_path(Path(x))
+        if args.json:
+            print(json.dumps(row, ensure_ascii=False), flush=True)
+            continue
         media = ', '.join(row['media_types']) if row['media_types'] else '—'
-        other = ', '.join(row['other_types']) if row['other_types'] else '—'
-        print(row['path'])
-        print(f"  type: {row['kind']} — {row['detail']}")
-        print(f"  media: {media}")
-        print(f"  other: {other}")
+        print(row['path'], flush=True)
+        print(f"  type: {row['type']}", flush=True)
+        print(f"  classification: {row['kind']} — {row['detail']}", flush=True)
+        print(f"  media: {media}", flush=True)
+        if row['other_types']:
+            print(f"  other: {', '.join(row['other_types'])}", flush=True)
     return 0
 
 
