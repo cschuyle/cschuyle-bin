@@ -1,0 +1,72 @@
+#!/bin/env bash
+set -euo pipefail
+
+scriptname=$(basename "$0")
+N=2
+
+usage() {
+    echo "Usage: $scriptname [-n N] [file ...]"
+    echo
+    echo "Split input into two files: -small.txt (~1/N of the lines) and -large.txt (the rest)."
+    echo "Default N is 2 (same idea as odd vs even lines when N=2)."
+    echo
+    echo "  -n N   Denominator N (integer >= 2). Small gets line numbers i where i mod N == 1."
+    echo
+    echo "With file arguments, outputs are <stem>-{small,large}.txt next to each file."
+    echo "With no files, reads stdin; outputs are ./<scriptname>-<timestamp>-{small,large}.txt."
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h | --help)
+            usage
+            ;;
+        -n)
+            N="${2:?missing value for -n}"
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            echo "Usage: $scriptname [-n N] [file ...]" >&2
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if ! [[ "$N" =~ ^[0-9]+$ ]] || [[ "$N" -lt 2 ]]; then
+    echo "Error: -n must be an integer >= 2 (got: $N)" >&2
+    exit 1
+fi
+
+split_stream() {
+    local input=$1
+    local filedir=$2
+    awk -v n="$N" \
+        -v small="${filedir}-small.txt" \
+        -v large="${filedir}-large.txt" \
+        'NR % n == 1 { print > small; next }
+         { print > large }' "$input"
+}
+
+if [[ $# -eq 0 ]]; then
+    timestamp=$(date +%Y-%m-%d,%H.%M.%S)
+    filedir="./$scriptname-$timestamp"
+    split_stream /dev/stdin "$filedir"
+else
+    for file in "$@"; do
+        if [[ ! -f "$file" ]]; then
+            echo "Error: $file is not a regular file" >&2
+            continue
+        fi
+        stem="$(dirname "$file")/$(basename "$file" | sed 's/\.[^.]*$//')"
+        split_stream "$file" "$stem"
+    done
+fi
