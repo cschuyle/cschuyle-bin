@@ -21,6 +21,9 @@ season N, 1x02, etc.) and file counts; else audio -> album; else ebooks only
 Each path also has type: file | directory | symlink to directory (or missing
 if the path does not exist).
 
+Detected media file sizes (video / audio / ebook buckets and total) are reported
+in human-readable binary units (K, M, G, T from 1024).
+
 Directory scans recurse at most SCAN_MAX_DEPTH path components below the root
 (e.g. depth 3: root/a/b/file.ext — not root/a/b/c/file.ext).
 """
@@ -63,6 +66,33 @@ _QB_PARTIAL_SUFFIX = '.!qb'  # lowercase for comparison
 
 # Max path segments under a directory root (including filename) when scanning.
 SCAN_MAX_DEPTH = 3
+
+
+def human_size(n: int) -> str:
+    """Format byte count using binary K/M/G/T (1024-based)."""
+    if n < 0:
+        n = 0
+    if n < 1024:
+        return f'{n} B'
+    labels = ('K', 'M', 'G', 'T', 'P')
+    v = float(n)
+    i = -1
+    while v >= 1024 and i + 1 < len(labels):
+        v /= 1024
+        i += 1
+    s = f'{v:.1f}'.rstrip('0').rstrip('.')
+    return f'{s}{labels[i]}'
+
+
+def file_size_bytes(p: Path) -> int:
+    try:
+        return int(p.stat().st_size)
+    except OSError:
+        return 0
+
+
+def sum_file_sizes(files: List[Path]) -> int:
+    return sum(file_size_bytes(f) for f in files)
 
 
 def path_entry_type(p: Path) -> str:
@@ -220,10 +250,22 @@ def analyze_path(path: Path) -> Dict[str, object]:
             'detail': 'does not exist',
             'media_types': [],
             'other_types': [],
+            'sizes': {
+                'video_bytes': 0,
+                'audio_bytes': 0,
+                'ebook_bytes': 0,
+                'total_bytes': 0,
+                'video_human': '0 B',
+                'audio_human': '0 B',
+                'ebook_human': '0 B',
+                'total_human': '0 B',
+            },
         }
 
     exts, v, a, e, other = gather_media(path)
     kind, detail = classify(path, v, a, e)
+    sv, sa, se = sum_file_sizes(v), sum_file_sizes(a), sum_file_sizes(e)
+    st = sv + sa + se
     return {
         'path': str(path.resolve()),
         'type': path_entry_type(path),
@@ -231,6 +273,16 @@ def analyze_path(path: Path) -> Dict[str, object]:
         'detail': detail,
         'media_types': formats_for_output(exts),
         'other_types': other,
+        'sizes': {
+            'video_bytes': sv,
+            'audio_bytes': sa,
+            'ebook_bytes': se,
+            'total_bytes': st,
+            'video_human': human_size(sv),
+            'audio_human': human_size(sa),
+            'ebook_human': human_size(se),
+            'total_human': human_size(st),
+        },
     }
 
 
@@ -246,10 +298,25 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(json.dumps(row, ensure_ascii=False), flush=True)
             continue
         media = ', '.join(row['media_types']) if row['media_types'] else '—'
+        sz = row['sizes']
         print(row['path'], flush=True)
         print(f"  type: {row['type']}", flush=True)
         print(f"  classification: {row['kind']} — {row['detail']}", flush=True)
         print(f"  media: {media}", flush=True)
+        size_parts: List[str] = []
+        if sz['video_bytes']:
+            size_parts.append(f"{sz['video_human']} video")
+        if sz['audio_bytes']:
+            size_parts.append(f"{sz['audio_human']} audio")
+        if sz['ebook_bytes']:
+            size_parts.append(f"{sz['ebook_human']} ebook")
+        if size_parts:
+            print(
+                f"  sizes: {', '.join(size_parts)} ({sz['total_human']} total)",
+                flush=True,
+            )
+        else:
+            print('  sizes: —', flush=True)
         if row['other_types']:
             print(f"  other: {', '.join(row['other_types'])}", flush=True)
     return 0
