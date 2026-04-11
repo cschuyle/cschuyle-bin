@@ -29,6 +29,11 @@ in human-readable binary units (K, M, G, T from 1024).
 
 Directory scans recurse at most SCAN_MAX_DEPTH path components below the root
 (e.g. depth 3: root/a/b/file.ext — not root/a/b/c/file.ext).
+
+Video and image files under the same scan rules get optional stream metadata
+(resolution, duration, codec; embedded subtitle tracks with language and codec)
+via ffprobe when it is on PATH; see visual_metadata in JSON output and the
+visual: section in plain text.
 """
 
 from __future__ import annotations
@@ -37,9 +42,12 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 VIDEO_EXTENSIONS = {
     '.mp4', '.m4v', '.mkv', '.avi', '.mov', '.webm', '.wmv', '.mpg', '.mpeg',
@@ -49,6 +57,10 @@ AUDIO_EXTENSIONS = {
 }
 EBOOK_EXTENSIONS = {
     '.mobi', '.azw', '.azw3', '.epub', '.pdf', '.fb2', '.djvu',
+}
+IMAGE_EXTENSIONS = {
+    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff',
+    '.heic', '.heif', '.avif', '.jxl', '.ico',
 }
 
 CANONICAL_MEDIA_LABELS = {
@@ -92,6 +104,191 @@ def file_size_bytes(p: Path) -> int:
         return int(p.stat().st_size)
     except OSError:
         return 0
+
+def file_timestamp(p: Path) -> int:
+    try:
+        return int(p.stat().st_mtime)
+    except OSError:
+        return -1
+
+
+def human_date(ts: int) -> str:
+    """Format Unix mtime as YYYY-MM-DD (local time)."""
+    if ts < 0:
+        return '—'
+    return datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
+
+
+def human_duration(seconds: Optional[float]) -> str:
+    """Format duration for display; empty input -> em dash."""
+    if seconds is None:
+        return '—'
+    try:
+        sec_f = float(seconds)
+    except (TypeError, ValueError):
+        return '—'
+    if sec_f < 0 or sec_f != sec_f:  # NaN
+        return '—'
+    s = int(round(sec_f))
+    h, r = divmod(s, 3600)
+    m, sec = divmod(r, 60)
+    if h:
+        return f'{h}:{m:02d}:{sec:02d}'
+    return f'{m}:{sec:02d}'
+
+
+def subtitle_tracks_from_probe(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Embedded subtitle streams from ffprobe -show_streams JSON."""
+    out: List[Dict[str, Any]] = []
+    for st in data.get('streams') or []:
+        if st.get('codec_type') != 'subtitle':
+            continue
+        tags = st.get('tags') or {}
+        raw = tags.get('language') or tags.get('LANG')
+        lang: Optional[str] = None
+        if isinstance(raw, str):
+            lang = raw.strip() or None
+        codec = st.get('codec_name')
+        title_raw = tags.get('title')
+        entry: Dict[str, Any] = {'codec': codec, 'language': lang}
+        if isinstance(title_raw, str) and title_raw.strip() and len(title_raw) <= 120:
+            entry['title'] = title_raw.strip()
+        out.append(entry)
+    return out
+
+
+def format_subtitles_brief(subs: List[Dict[str, Any]], max_tracks: int = 6) -> str:
+    """Compact text for subtitle track list."""
+    if not subs:
+        return '—'
+    parts: List[str] = []
+    for s in subs[:max_tracks]:
+        lang = s.get('language') or 'und'
+        c = s.get('codec') or '?'
+        parts.append(f'{lang}/{c}')
+    extra = len(subs) - max_tracks
+    tail = f' (+{extra})' if extra > 0 else ''
+    return ', '.join(parts) + tail
+
+
+def probe_visual_file(path: Path) -> Dict[str, Any]:
+    """Width, height, duration (seconds), codec via ffprobe; values may be null."""
+    base: Dict[str, Any] = {
+        'path': str(path),
+        'width': None,
+        'height': None,
+        'duration': None,
+        'codec': None,
+        'subtitles': [],
+    }
+    ffprobe = shutil.which('ffprobe')
+    if not ffprobe:
+        base['probe_error'] = 'ffprobe not in PATH'
+        return base
+    try:
+        out = subprocess.run(
+            [
+                ffprobe,
+                '-v',
+                'error',
+                '-print_format',
+                'json',
+                '-show_format',
+                '-show_streams',
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if out.returncode != 0:
+            err = (out.stderr or out.stdout or 'ffprobe failed').strip()
+            base['probe_error'] = err[:240] if err else 'ffprobe failed'
+            return base
+        data = json.loads(out.stdout)
+    except subprocess.TimeoutExpired:
+        base['probe_error'] = 'ffprobe timeout'
+        return base
+    except (json.JSONDecodeError, OSError) as e:
+        base['probe_error'] = str(e)[:240]
+        return base
+
+    width: Optional[int] = None
+    height: Optional[int] = None
+    codec: Optional[str] = None
+    duration: Optional[float] = None
+
+    for st in data.get('streams') or []:
+        if st.get('codec_type') != 'video':
+            continue
+        w, h = st.get('width'), st.get('height')
+        if w is not None and h is not None:
+            try:
+                width, height = int(w), int(h)
+            except (TypeError, ValueError):
+                pass
+        codec = st.get('codec_name') or codec
+        if duration is None and st.get('duration') is not None:
+            try:
+                duration = float(st['duration'])
+            except (TypeError, ValueError):
+                pass
+        if width is not None:
+            break
+
+    if duration is None:
+        d = (data.get('format') or {}).get('duration')
+        if d is not None:
+            try:
+                duration = float(d)
+            except (TypeError, ValueError):
+                pass
+
+    base['width'] = width
+    base['height'] = height
+    base['duration'] = duration
+    base['codec'] = codec
+    base['subtitles'] = subtitle_tracks_from_probe(data)
+    return base
+
+
+def visual_metadata_for_paths(
+    video_files: List[Path],
+    image_files: List[Path],
+) -> List[Dict[str, Any]]:
+    """Probe each path (videos first, then images); skips duplicates."""
+    seen: Set[str] = set()
+    out: List[Dict[str, Any]] = []
+    for label, paths in (('video', video_files), ('image', image_files)):
+        for p in paths:
+            try:
+                key = str(p.resolve())
+            except OSError:
+                key = str(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            meta = probe_visual_file(p)
+            meta['media'] = label
+            out.append(meta)
+    return out
+
+
+def format_visual_line(meta: Dict[str, Any]) -> str:
+    """One-line summary for text mode."""
+    label = meta.get('media', '?')
+    w, h = meta.get('width'), meta.get('height')
+    res = f'{w}×{h}' if w is not None and h is not None else '—'
+    dur = human_duration(meta.get('duration'))
+    codec = meta.get('codec') or '—'
+    rel = Path(str(meta['path'])).name
+    err = meta.get('probe_error')
+    if err:
+        return f'{rel} ({label}): {err}'
+    if label == 'video':
+        sub_brief = format_subtitles_brief(meta.get('subtitles') or [])
+        return f'{rel} ({label}): {res}, {dur}, {codec}; subs {sub_brief}'
+    return f'{rel} ({label}): {res}, {dur}, {codec}'
 
 
 def sum_file_sizes(files: List[Path]) -> int:
@@ -174,11 +371,14 @@ def names_from_file_up_to_root(f: Path, root: Path) -> List[str]:
     return out
 
 
-def gather_media(root: Path) -> Tuple[Set[str], List[Path], List[Path], List[Path], List[str]]:
+def gather_media(
+    root: Path,
+) -> Tuple[Set[str], List[Path], List[Path], List[Path], List[Path], List[str]]:
     exts: Set[str] = set()
     video_files: List[Path] = []
     audio_files: List[Path] = []
     ebook_files: List[Path] = []
+    image_files: List[Path] = []
     other_types: Set[str] = set()
     for f in iter_files(root):
         other_types |= other_file_tags(f)
@@ -195,7 +395,10 @@ def gather_media(root: Path) -> Tuple[Set[str], List[Path], List[Path], List[Pat
         elif suf in EBOOK_EXTENSIONS:
             ebook_files.append(f)
             exts.add(suf)
-    return exts, video_files, audio_files, ebook_files, sorted(other_types)
+        elif suf in IMAGE_EXTENSIONS:
+            image_files.append(f)
+            exts.add(suf)
+    return exts, video_files, audio_files, ebook_files, image_files, sorted(other_types)
 
 
 def formats_for_output(exts: Set[str]) -> List[str]:
@@ -211,8 +414,9 @@ def classify(
     video_files: List[Path],
     audio_files: List[Path],
     ebook_files: List[Path],
+    image_files: List[Path],
 ) -> Tuple[str, str]:
-    n_v, n_a, n_e = len(video_files), len(audio_files), len(ebook_files)
+    n_v, n_a, n_e, n_i = len(video_files), len(audio_files), len(ebook_files), len(image_files)
 
     if n_v:
         if root.is_file():
@@ -235,10 +439,15 @@ def classify(
     if n_e and not n_v and not n_a:
         return 'ebook', f'{n_e} ebook file(s)'
 
+    if n_i and not n_v and not n_a and not n_e:
+        return 'unknown', f'{n_i} image file(s) only'
+
     if n_e and (n_a or n_v):
         return 'unknown', 'mixed ebook with video/audio'
     if n_a and n_e:
         return 'unknown', 'mixed audio and ebook'
+    if n_i and (n_v or n_a or n_e):
+        return 'unknown', 'images mixed with other media'
 
     return 'unknown', 'no recognized media files'
 
@@ -257,18 +466,22 @@ def analyze_path(path: Path) -> Dict[str, object]:
                 'video_bytes': 0,
                 'audio_bytes': 0,
                 'ebook_bytes': 0,
+                'image_bytes': 0,
                 'total_bytes': 0,
                 'video_human': '0 B',
                 'audio_human': '0 B',
                 'ebook_human': '0 B',
+                'image_human': '0 B',
                 'total_human': '0 B',
             },
+            'visual_metadata': [],
         }
 
-    exts, v, a, e, other = gather_media(path)
-    kind, detail = classify(path, v, a, e)
-    sv, sa, se = sum_file_sizes(v), sum_file_sizes(a), sum_file_sizes(e)
-    st = sv + sa + se
+    exts, v, a, e, imgs, other = gather_media(path)
+    kind, detail = classify(path, v, a, e, imgs)
+    sv, sa, se, si = sum_file_sizes(v), sum_file_sizes(a), sum_file_sizes(e), sum_file_sizes(imgs)
+    st = sv + sa + se + si
+    vis = visual_metadata_for_paths(v, imgs)
     return {
         'path': str(path.resolve()),
         'type': path_entry_type(path),
@@ -280,12 +493,15 @@ def analyze_path(path: Path) -> Dict[str, object]:
             'video_bytes': sv,
             'audio_bytes': sa,
             'ebook_bytes': se,
+            'image_bytes': si,
             'total_bytes': st,
             'video_human': human_size(sv),
             'audio_human': human_size(sa),
             'ebook_human': human_size(se),
+            'image_human': human_size(si),
             'total_human': human_size(st),
         },
+        'visual_metadata': vis,
     }
 
 
@@ -322,6 +538,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             size_parts.append(f"{sz['audio_human']} audio")
         if sz['ebook_bytes']:
             size_parts.append(f"{sz['ebook_human']} ebook")
+        if sz.get('image_bytes'):
+            size_parts.append(f"{sz['image_human']} image")
         if size_parts:
             print(
                 f"  sizes: {', '.join(size_parts)} ({sz['total_human']} total)",
@@ -331,6 +549,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             print('  sizes: —', flush=True)
         if row['other_types']:
             print(f"  other: {', '.join(row['other_types'])}", flush=True)
+        ts = file_timestamp(Path(row['path']))
+        print(f"  timestamp: {human_date(ts)}", flush=True)
+        vis = row.get('visual_metadata') or []
+        if vis:
+            cap = 20
+            for meta in vis[:cap]:
+                print(f"  visual: {format_visual_line(meta)}", flush=True)
+            rest = len(vis) - cap
+            if rest > 0:
+                print(f"  visual: … and {rest} more file(s) (use --json for full list)", flush=True)
     return 0
 
 
