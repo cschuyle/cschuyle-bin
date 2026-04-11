@@ -118,7 +118,6 @@ def human_date(ts: int) -> str:
         return '—'
     return datetime.fromtimestamp(ts).strftime('%Y-%m-%d')
 
-<<<<<<< HEAD
 
 def human_duration(seconds: Optional[float]) -> str:
     """Format duration for display; empty input -> em dash."""
