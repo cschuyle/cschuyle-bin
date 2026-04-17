@@ -9,10 +9,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -*)
-            echo "Usage: $0 [--dry-run|-n] <source> <destination>"
+            echo "Usage: $0 [--dry-run|-n] <source> [source ...]"
             echo "  --dry-run|-n: show what would be done without actually doing it"
             echo "  source: source directory to move video files from"
-            echo "  destination: destination directory (default: \$DRAGNON_MYDATA_ROOT/_Originals)"
+            echo "  destination is always: \$DRAGNON_MYDATA_ROOT/_Originals"
 
             exit 1
             ;;
@@ -22,8 +22,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-src="$1"
-dst="${2:-$DRAGNON_MYDATA_ROOT/_Originals}"
+aparams=("$@")
+if [[ ${#aparams[@]} -eq 0 ]]; then
+    echo "Usage: $0 [--dry-run|-n] <source> [source ...]"
+    exit 1
+fi
+
+dst="$DRAGNON_MYDATA_ROOT/_Originals"
 
 # This is slow and uses lots of space, but necessary if you are crossing filesystems. Don't Cross Filesystems.
 # rsync $dry_run_flag -ar -vv \
@@ -39,14 +44,16 @@ dst="${2:-$DRAGNON_MYDATA_ROOT/_Originals}"
 #   "$src"/ "$dst"/
 
 
-find "$src"/ -type f \( -name '*.mkv' -o -name '*.MKV' -o -name '*.avi' -o -name '*.AVI' -o -name '*.mov' -o -name '*.MOV' \) -print0 |
-    while IFS= read -r -d '' f; do
-        rel_path="${f#$src/}"
-        mkdir -p "$dst/$(dirname "$rel_path")"
-        set -x
-        mv "$f" "$dst/$rel_path"
-        { set +x; } 2>/dev/null
-    done
+for src in "${aparams[@]}"; do
+    find "$src"/ -type f \( -name '*.mkv' -o -name '*.MKV' -o -name '*.avi' -o -name '*.AVI' -o -name '*.mov' -o -name '*.MOV' \) -print0 |
+        while IFS= read -r -d '' f; do
+            rel_path="${f#$src/}"
+            mkdir -p "$dst/$(dirname "$rel_path")"
+            set -x
+            mv "$f" "$dst/$rel_path"
+            { set +x; } 2>/dev/null
+        done
+done
 
 echo ""
 echo "Moved all non-mp4 video files to $dst"
