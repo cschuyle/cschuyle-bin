@@ -40,7 +40,10 @@ extension and, when two or more extensions are present, reports whether
 cross-type equivalence was verified (same count per pair and a perfect
 duration+title matching between buckets) or NOT verified; see
 video_cross_type_equivalence in JSON and plain-text lines under video by
-extension.
+extension. When equivalence is not verified, plain text includes a mismatch
+table: for each extension, a file column and a separate duration column, one
+inferred equivalence group per row (NONE / — when no file in that column); that
+table is omitted from --json output.
 """
 
 from __future__ import annotations
@@ -480,6 +483,35 @@ def best_title_for_compare(path: Path, meta: Optional[Dict[str, Any]]) -> str:
     return max(labels, key=len) if labels else ''
 
 
+def meta_for_path(path_to_meta: Dict[str, Dict[str, Any]], p: Path) -> Dict[str, Any]:
+    for k in (str(p),):
+        m = path_to_meta.get(k)
+        if m:
+            return m
+    try:
+        m = path_to_meta.get(str(p.resolve()))
+    except OSError:
+        m = None
+    return m if m else {}
+
+
+def paths_match_cross_type_equivalence(
+    p: Path,
+    q: Path,
+    path_to_meta: Dict[str, Dict[str, Any]],
+    title_min: float = 0.72,
+) -> bool:
+    mp, mq = meta_for_path(path_to_meta, p), meta_for_path(path_to_meta, q)
+    da, db = mp.get('duration'), mq.get('duration')
+    ta = best_title_for_compare(p, mp or None)
+    tb = best_title_for_compare(q, mq or None)
+    return duration_close_enough(da, db) and title_similarity(ta, tb) >= title_min
+
+
+def ext_column_label(ext: str) -> str:
+    return ext.lstrip('.') or ext
+
+
 def group_videos_by_extension(video_files: List[Path]) -> Dict[str, List[Path]]:
     groups: Dict[str, List[Path]] = {}
     for f in video_files:
@@ -502,30 +534,19 @@ def _try_match_extension_pair(
     if not paths_a or not paths_b:
         return False, f'count mismatch ({len(paths_a)} vs {len(paths_b)})'
 
-    def meta_for(p: Path) -> Dict[str, Any]:
-        for k in (str(p),):
-            m = path_to_meta.get(k)
-            if m:
-                return m
-        try:
-            m = path_to_meta.get(str(p.resolve()))
-        except OSError:
-            m = None
-        return m if m else {}
-
     items_a = [
         (
             p,
-            meta_for(p).get('duration'),
-            best_title_for_compare(p, meta_for(p) or None),
+            meta_for_path(path_to_meta, p).get('duration'),
+            best_title_for_compare(p, meta_for_path(path_to_meta, p) or None),
         )
         for p in paths_a
     ]
     items_b = [
         (
             p,
-            meta_for(p).get('duration'),
-            best_title_for_compare(p, meta_for(p) or None),
+            meta_for_path(path_to_meta, p).get('duration'),
+            best_title_for_compare(p, meta_for_path(path_to_meta, p) or None),
         )
         for p in paths_b
     ]
@@ -569,6 +590,127 @@ def _try_match_extension_pair(
     )
 
 
+_EQUIV_TITLE_MIN = 0.72
+
+
+def mismatch_duration_header(file_label: str) -> str:
+    """Second column header for a file-type column (paired name + duration)."""
+    return f'{file_label} time'
+
+
+def mismatch_table_duration_cell(p: Path, path_to_meta: Dict[str, Dict[str, Any]]) -> str:
+    return human_duration(meta_for_path(path_to_meta, p).get('duration'))
+
+
+def _blank_mismatch_row(labels: List[str]) -> Dict[str, str]:
+    row: Dict[str, str] = {}
+    for lab in labels:
+        row[lab] = 'NONE'
+        row[mismatch_duration_header(lab)] = '—'
+    return row
+
+
+def _set_mismatch_file_cell(
+    row: Dict[str, str],
+    lab: str,
+    path: Path,
+    path_to_meta: Dict[str, Dict[str, Any]],
+) -> None:
+    row[lab] = path.name
+    row[mismatch_duration_header(lab)] = mismatch_table_duration_cell(path, path_to_meta)
+
+
+def build_equivalence_mismatch_table(
+    groups: Dict[str, List[Path]],
+    path_to_meta: Dict[str, Dict[str, Any]],
+    title_min: float = _EQUIV_TITLE_MIN,
+) -> Dict[str, Any]:
+    """Rows = equivalence groups; per extension: basename column + duration column (NONE / — if empty)."""
+    column_exts = sorted(groups.keys())
+    labels = [ext_column_label(e) for e in column_exts]
+    flat_columns: List[str] = []
+    for lab in labels:
+        flat_columns.append(lab)
+        flat_columns.append(mismatch_duration_header(lab))
+    used: Dict[str, Set[Path]] = {e: set() for e in column_exts}
+    rows_out: List[Dict[str, str]] = []
+
+    def pick_best_match(seed: Path, col: str) -> Optional[Path]:
+        mp = meta_for_path(path_to_meta, seed)
+        ta = best_title_for_compare(seed, mp or None)
+        best: Optional[Path] = None
+        best_sc = -1.0
+        for cand in sorted(groups[col], key=lambda x: x.name.lower()):
+            if cand in used[col]:
+                continue
+            if not paths_match_cross_type_equivalence(seed, cand, path_to_meta, title_min):
+                continue
+            mq = meta_for_path(path_to_meta, cand)
+            tb = best_title_for_compare(cand, mq or None)
+            sc = title_similarity(ta, tb)
+            if sc > best_sc:
+                best_sc, best = sc, cand
+        return best
+
+    anchor = max(column_exts, key=lambda e: (len(groups[e]), e))
+    for p in sorted(groups[anchor], key=lambda x: x.name.lower()):
+        row = _blank_mismatch_row(labels)
+        _set_mismatch_file_cell(row, ext_column_label(anchor), p, path_to_meta)
+        used[anchor].add(p)
+        for col in column_exts:
+            if col == anchor:
+                continue
+            lab = ext_column_label(col)
+            best = pick_best_match(p, col)
+            if best is not None:
+                _set_mismatch_file_cell(row, lab, best, path_to_meta)
+                used[col].add(best)
+        rows_out.append(row)
+
+    while True:
+        seed_col: Optional[str] = None
+        seed_path: Optional[Path] = None
+        for col in column_exts:
+            for cand in sorted(groups[col], key=lambda x: x.name.lower()):
+                if cand not in used[col]:
+                    seed_col, seed_path = col, cand
+                    break
+            if seed_path is not None:
+                break
+        if seed_path is None:
+            break
+        row = _blank_mismatch_row(labels)
+        assert seed_col is not None
+        _set_mismatch_file_cell(row, ext_column_label(seed_col), seed_path, path_to_meta)
+        used[seed_col].add(seed_path)
+        for col in column_exts:
+            if col == seed_col:
+                continue
+            lab = ext_column_label(col)
+            best = pick_best_match(seed_path, col)
+            if best is not None:
+                _set_mismatch_file_cell(row, lab, best, path_to_meta)
+                used[col].add(best)
+        rows_out.append(row)
+
+    return {'columns': flat_columns, 'rows': rows_out}
+
+
+def format_equivalence_mismatch_table_plain(columns: List[str], rows: List[Dict[str, str]]) -> List[str]:
+    """Aligned plain-text table lines (no leading path indent)."""
+    if not columns or not rows:
+        return []
+    widths = [
+        max(len(c), max(len(r.get(c, '')) for r in rows)) for c in columns
+    ]
+    lines: List[str] = []
+    lines.append(' | '.join(columns[i].ljust(widths[i]) for i in range(len(columns))))
+    lines.append('-+-'.join('-' * widths[i] for i in range(len(columns))))
+    for r in rows:
+        lines.append(' | '.join(r.get(c, '').ljust(widths[i]) for i, c in enumerate(columns)))
+    return lines
+
+
 def video_cross_type_equivalence_report(
     video_files: List[Path],
     visual_rows: List[Dict[str, Any]],
@@ -599,6 +741,7 @@ def video_cross_type_equivalence_report(
             'message': 'Cross-type equivalence: not applicable (not a directory or no video files).',
             'groups_by_extension': summary_groups,
             'pairs': [],
+            'mismatch_table': None,
         }
 
     if len(exts) < 2:
@@ -609,6 +752,7 @@ def video_cross_type_equivalence_report(
             'message': f'Cross-type equivalence: not applicable (single video extension: {only}).',
             'groups_by_extension': summary_groups,
             'pairs': [],
+            'mismatch_table': None,
         }
 
     pairs_out: List[Dict[str, Any]] = []
@@ -646,12 +790,17 @@ def video_cross_type_equivalence_report(
             f'failed ({bad_txt}).{tail}'
         )
 
+    mismatch_table: Optional[Dict[str, Any]] = None
+    if not all_ok:
+        mismatch_table = build_equivalence_mismatch_table(groups, path_to_meta)
+
     return {
         'applicable': True,
         'verified': all_ok,
         'message': msg,
         'groups_by_extension': summary_groups,
         'pairs': pairs_out,
+        'mismatch_table': mismatch_table,
     }
 
 
@@ -774,7 +923,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.media_only and not row['media_types']:
             continue
         if args.json:
-            print(json.dumps(row, ensure_ascii=False), flush=True)
+            row_out = dict(row)
+            veq = row_out.get('video_cross_type_equivalence')
+            if isinstance(veq, dict):
+                row_out['video_cross_type_equivalence'] = {
+                    k: v for k, v in veq.items() if k != 'mismatch_table'
+                }
+            print(json.dumps(row_out, ensure_ascii=False), flush=True)
             continue
         media = ', '.join(row['media_types']) if row['media_types'] else '—'
         sz = row['sizes']
@@ -803,7 +958,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         ts = file_timestamp(Path(row['path']))
         print(f"  timestamp: {human_date(ts)}", flush=True)
         eq = row.get('video_cross_type_equivalence')
-        if eq and (row.get('sizes') or {}).get('video_bytes'):
+        if eq and (eq.get('groups_by_extension') or {}):
             g = eq.get('groups_by_extension') or {}
             if g:
                 print('  video by extension:', flush=True)
@@ -819,6 +974,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                         flush=True,
                     )
             print(f"  {eq.get('message', '')}", flush=True)
+            mt = eq.get('mismatch_table')
+            if (
+                eq.get('applicable')
+                and eq.get('verified') is False
+                and isinstance(mt, dict)
+                and mt.get('rows')
+            ):
+                print('  cross-type mismatch table:', flush=True)
+                cols = mt.get('columns') or []
+                for ln in format_equivalence_mismatch_table_plain(cols, mt['rows']):
+                    print(f'    {ln}', flush=True)
         vis = row.get('visual_metadata') or []
         if vis:
             cap = 20
