@@ -34,6 +34,13 @@ Video and image files under the same scan rules get optional stream metadata
 (resolution, duration, codec; embedded subtitle tracks with language and codec)
 via ffprobe when it is on PATH; see visual_metadata in JSON output and the
 visual: section in plain text.
+
+For directories that contain video files, output also groups videos by file
+extension and, when two or more extensions are present, reports whether
+cross-type equivalence was verified (same count per pair and a perfect
+duration+title matching between buckets) or NOT verified; see
+video_cross_type_equivalence in JSON and plain-text lines under video by
+extension.
 """
 
 from __future__ import annotations
@@ -47,6 +54,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from difflib import SequenceMatcher
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 VIDEO_EXTENSIONS = {
@@ -180,6 +188,7 @@ def probe_visual_file(path: Path) -> Dict[str, Any]:
         'duration': None,
         'codec': None,
         'subtitles': [],
+        'format_title': None,
     }
     ffprobe = shutil.which('ffprobe')
     if not ffprobe:
@@ -243,6 +252,12 @@ def probe_visual_file(path: Path) -> Dict[str, Any]:
                 duration = float(d)
             except (TypeError, ValueError):
                 pass
+
+    fmt_tags = (data.get('format') or {}).get('tags') or {}
+    raw_title = fmt_tags.get('title') or fmt_tags.get('TITLE')
+    if isinstance(raw_title, str) and raw_title.strip():
+        t = raw_title.strip()
+        base['format_title'] = t[:200] if len(t) > 200 else t
 
     base['width'] = width
     base['height'] = height
@@ -409,6 +424,237 @@ def video_file_looks_episodic(f: Path, root: Path) -> bool:
     return any(looks_like_episode(n) for n in names_from_file_up_to_root(f, root))
 
 
+_TITLE_JUNK_RE = re.compile(
+    r'(?i)\b('
+    r'720p|1080p|1440p|2160p|4320p|4k|uhd|hdr|hdtv|webrip|web[- ]?dl|bluray|bdrip|'
+    r'dvdrip|brrip|remux|x264|x265|h\.?264|h\.?265|hevc|av1|vp9|'
+    r'aac\d*|ac3|eac3|dts|truehd|atmos|flac|opus|'
+    r'repack|proper|internal|limited|extended|unrated|directors?\s*cut'
+    r')\b'
+)
+
+
+def normalize_video_title_label(stem: str) -> str:
+    """Strip release noise so two encodes of the same content compare similarly."""
+    s = stem.lower()
+    s = re.sub(r'\[[^\]]*\]', ' ', s)
+    s = re.sub(r'\([^)]*\)', ' ', s)
+    s = _TITLE_JUNK_RE.sub(' ', s)
+    s = re.sub(r'[._-]+', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def title_similarity(a: str, b: str) -> float:
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def duration_close_enough(sec_a: Optional[float], sec_b: Optional[float]) -> bool:
+    if sec_a is None or sec_b is None:
+        return False
+    try:
+        da, db = float(sec_a), float(sec_b)
+    except (TypeError, ValueError):
+        return False
+    if da < 0 or db < 0 or da != da or db != db:
+        return False
+    diff = abs(da - db)
+    tol = max(5.0, 0.005 * max(da, db))
+    return diff <= tol
+
+
+def best_title_for_compare(path: Path, meta: Optional[Dict[str, Any]]) -> str:
+    stem = path.stem
+    labels: List[str] = [normalize_video_title_label(stem)]
+    if meta and meta.get('format_title'):
+        ft = meta.get('format_title')
+        if isinstance(ft, str) and ft.strip():
+            labels.append(normalize_video_title_label(ft.strip()))
+    # Prefer the longest normalized label (often more specific than a short stem).
+    return max(labels, key=len) if labels else ''
+
+
+def group_videos_by_extension(video_files: List[Path]) -> Dict[str, List[Path]]:
+    groups: Dict[str, List[Path]] = {}
+    for f in video_files:
+        ext = f.suffix.lower() or '(no extension)'
+        groups.setdefault(ext, []).append(f)
+    for ext in groups:
+        groups[ext].sort(key=lambda p: p.name.lower())
+    return dict(sorted(groups.items(), key=lambda kv: kv[0]))
+
+
+def _try_match_extension_pair(
+    paths_a: List[Path],
+    paths_b: List[Path],
+    path_to_meta: Dict[str, Dict[str, Any]],
+    title_min: float = 0.72,
+) -> Tuple[bool, str]:
+    """One-to-one match by duration + title between two extension buckets."""
+    if not paths_a and not paths_b:
+        return True, 'both empty'
+    if not paths_a or not paths_b:
+        return False, f'count mismatch ({len(paths_a)} vs {len(paths_b)})'
+
+    def meta_for(p: Path) -> Dict[str, Any]:
+        for k in (str(p),):
+            m = path_to_meta.get(k)
+            if m:
+                return m
+        try:
+            m = path_to_meta.get(str(p.resolve()))
+        except OSError:
+            m = None
+        return m if m else {}
+
+    items_a = [
+        (
+            p,
+            meta_for(p).get('duration'),
+            best_title_for_compare(p, meta_for(p) or None),
+        )
+        for p in paths_a
+    ]
+    items_b = [
+        (
+            p,
+            meta_for(p).get('duration'),
+            best_title_for_compare(p, meta_for(p) or None),
+        )
+        for p in paths_b
+    ]
+
+    if len(items_a) != len(items_b):
+        return False, f'count mismatch ({len(items_a)} vs {len(items_b)})'
+
+    n = len(items_a)
+    adj: List[List[int]] = [[] for _ in range(n)]
+    for i, (_pa, da, ta) in enumerate(items_a):
+        for j, (_pb, db, tb) in enumerate(items_b):
+            if duration_close_enough(da, db) and title_similarity(ta, tb) >= title_min:
+                adj[i].append(j)
+
+    # Kuhn augmenting-path bipartite matching (left size n, right size n).
+    match_r = [-1] * n
+
+    def aug(u: int, seen: List[bool]) -> bool:
+        for v in adj[u]:
+            if seen[v]:
+                continue
+            seen[v] = True
+            pu = match_r[v]
+            if pu < 0 or aug(pu, seen):
+                match_r[v] = u
+                return True
+        return False
+
+    for u in range(n):
+        seen = [False] * n
+        aug(u, seen)
+
+    pair_count = sum(1 for v in range(n) if match_r[v] >= 0)
+    ok = pair_count == n
+    if ok:
+        return True, f'matched {n} file(s) by duration and title'
+    return (
+        False,
+        f'no perfect matching ({pair_count}/{n} pairs): duration and/or title mismatch '
+        f'(title similarity ≥ {title_min:.2f}, duration tolerance max(5s, 0.5% of longer))',
+    )
+
+
+def video_cross_type_equivalence_report(
+    video_files: List[Path],
+    visual_rows: List[Dict[str, Any]],
+    root_is_dir: bool,
+) -> Dict[str, Any]:
+    """Group videos by extension; pairwise verify equivalent content across types."""
+    groups = group_videos_by_extension(video_files)
+    path_to_meta: Dict[str, Dict[str, Any]] = {}
+    for row in visual_rows:
+        if row.get('media') != 'video':
+            continue
+        p = row.get('path')
+        if not isinstance(p, str):
+            continue
+        path_to_meta[p] = row
+        try:
+            path_to_meta[str(Path(p).resolve())] = row
+        except OSError:
+            pass
+
+    exts = list(groups.keys())
+    summary_groups = {ext.lstrip('.') or ext: [str(p) for p in paths] for ext, paths in groups.items()}
+
+    if not root_is_dir or not video_files:
+        return {
+            'applicable': False,
+            'verified': None,
+            'message': 'Cross-type equivalence: not applicable (not a directory or no video files).',
+            'groups_by_extension': summary_groups,
+            'pairs': [],
+        }
+
+    if len(exts) < 2:
+        only = exts[0].lstrip('.') if exts else '?'
+        return {
+            'applicable': False,
+            'verified': None,
+            'message': f'Cross-type equivalence: not applicable (single video extension: {only}).',
+            'groups_by_extension': summary_groups,
+            'pairs': [],
+        }
+
+    pairs_out: List[Dict[str, Any]] = []
+    all_ok = True
+    for i in range(len(exts)):
+        for j in range(i + 1, len(exts)):
+            e1, e2 = exts[i], exts[j]
+            ok, reason = _try_match_extension_pair(groups[e1], groups[e2], path_to_meta)
+            all_ok = all_ok and ok
+            pairs_out.append(
+                {
+                    'a': e1.lstrip('.'),
+                    'b': e2.lstrip('.'),
+                    'verified': ok,
+                    'detail': reason,
+                }
+            )
+
+    if all_ok:
+        msg = (
+            'Cross-type equivalence: verified — for every distinct extension pair, '
+            'file counts match and files pair one-to-one by duration and title '
+            '(filename or embedded format title).'
+        )
+    else:
+        bad = [f"{p['a']}↔{p['b']}" for p in pairs_out if not p['verified']]
+        if len(bad) <= 6:
+            bad_txt = ', '.join(bad)
+            tail = ' See pair details in JSON (--json).'
+        else:
+            bad_txt = f'{len(bad)} extension pair(s)'
+            tail = ' Per-pair reasons are in video_cross_type_equivalence.pairs (--json).'
+        msg = (
+            'Cross-type equivalence: NOT verified — one or more extension pairs '
+            f'failed ({bad_txt}).{tail}'
+        )
+
+    return {
+        'applicable': True,
+        'verified': all_ok,
+        'message': msg,
+        'groups_by_extension': summary_groups,
+        'pairs': pairs_out,
+    }
+
+
 def classify(
     root: Path,
     video_files: List[Path],
@@ -475,6 +721,9 @@ def analyze_path(path: Path) -> Dict[str, object]:
                 'total_human': '0 B',
             },
             'visual_metadata': [],
+            'video_cross_type_equivalence': video_cross_type_equivalence_report(
+                [], [], False
+            ),
         }
 
     exts, v, a, e, imgs, other = gather_media(path)
@@ -482,6 +731,7 @@ def analyze_path(path: Path) -> Dict[str, object]:
     sv, sa, se, si = sum_file_sizes(v), sum_file_sizes(a), sum_file_sizes(e), sum_file_sizes(imgs)
     st = sv + sa + se + si
     vis = visual_metadata_for_paths(v, imgs)
+    v_equiv = video_cross_type_equivalence_report(v, vis, path.is_dir())
     return {
         'path': str(path.resolve()),
         'type': path_entry_type(path),
@@ -502,6 +752,7 @@ def analyze_path(path: Path) -> Dict[str, object]:
             'total_human': human_size(st),
         },
         'visual_metadata': vis,
+        'video_cross_type_equivalence': v_equiv,
     }
 
 
@@ -551,6 +802,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"  other: {', '.join(row['other_types'])}", flush=True)
         ts = file_timestamp(Path(row['path']))
         print(f"  timestamp: {human_date(ts)}", flush=True)
+        eq = row.get('video_cross_type_equivalence')
+        if eq and (row.get('sizes') or {}).get('video_bytes'):
+            g = eq.get('groups_by_extension') or {}
+            if g:
+                print('  video by extension:', flush=True)
+                for ext_label in sorted(g.keys()):
+                    plist = g[ext_label] or []
+                    names = [Path(s).name for s in plist]
+                    cap = 8
+                    shown = ', '.join(names[:cap])
+                    extra = len(names) - cap
+                    tail = f', … (+{extra} more)' if extra > 0 else ''
+                    print(
+                        f'    {ext_label} ({len(names)}): {shown}{tail}',
+                        flush=True,
+                    )
+            print(f"  {eq.get('message', '')}", flush=True)
         vis = row.get('visual_metadata') or []
         if vis:
             cap = 20
