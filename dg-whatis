@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """Classify paths as movie, series, album, or ebook using filesystem heuristics.
 
-Usage: dg-whatis [--json] [-media|--media] [-c CLASS|--classification CLASS] <path> [path ...]
+Usage: dg-whatis [--json] [-media|--media] [-e|--equivalence]
+                                 [-c CLASS|--classification CLASS] <path> [path ...]
 
-  -media / --media  Only print paths that have at least one identified
-                     video, audio, or ebook extension (under scan rules).
-
-    -c / --classification  Only paths classified as CLASS.
-                                                    Valid CLASS values: movie, series, album, ebook,
-                                                    unknown. Plain output: one resolved path per
-                                                    matching line. With --json: only matching NDJSON
-                                                    rows.
+    -media / --media  Only print paths that have at least one identified video, audio, or ebook extension (under scan rules).
+    -e / --equivalence  Print one line per input path using verified status: for every distinct extension pair, file counts match and files pair one-to-one by duration and title (filename or embedded format title).
+    -c / --classification  Only paths classified as CLASS. Valid CLASS values: movie, series, album, ebook, unknown. Plain output: one resolved path per matching line. With --json: only matching NDJSON rows.
 
 Content types (one primary kind per path):
   movie, series, album, ebook, unknown
@@ -778,23 +774,9 @@ def video_cross_type_equivalence_report(
             )
 
     if all_ok:
-        msg = (
-            'Cross-type equivalence: verified — for every distinct extension pair, '
-            'file counts match and files pair one-to-one by duration and title '
-            '(filename or embedded format title).'
-        )
+        msg = 'Cross-type equivalence: verified'
     else:
-        bad = [f"{p['a']}↔{p['b']}" for p in pairs_out if not p['verified']]
-        if len(bad) <= 6:
-            bad_txt = ', '.join(bad)
-            tail = ' See pair details in JSON (--json).'
-        else:
-            bad_txt = f'{len(bad)} extension pair(s)'
-            tail = ' Per-pair reasons are in video_cross_type_equivalence.pairs (--json).'
-        msg = (
-            'Cross-type equivalence: NOT verified — one or more extension pairs '
-            f'failed ({bad_txt}).{tail}'
-        )
+        msg = 'Cross-type equivalence: NOT verified'
 
     mismatch_table: Optional[Dict[str, Any]] = None
     if not all_ok:
@@ -923,13 +905,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         help='Only output paths with at least one identified video/audio/ebook file',
     )
     p.add_argument(
+        '-e',
+        '--equivalence',
+        dest='equivalence_only',
+        action='store_true',
+        help=(
+            'One line per input path: verified/NOT verified. Verified means: '
+            'for every distinct extension pair, file counts match and files pair '
+            'one-to-one by duration and title (filename or embedded format title). '
+            'With -c/--classification, only matching classifications are processed.'
+        ),
+    )
+    p.add_argument(
         '-c',
         '--classification',
         dest='kind_filter',
         choices=['movie', 'series', 'album', 'ebook', 'unknown'],
+        metavar='CLASS',
         help=(
-            'Only emit paths classified as CLASS '
-            '(movie|series|album|ebook|unknown). Plain text: one path per line. '
+            'Only emit paths classified as CLASS. '
+            'Valid CLASS values: movie|series|album|ebook|unknown. Plain text: one path per line. '
             'With --json: only matching rows (NDJSON).'
         ),
     )
@@ -937,9 +932,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     for x in args.paths:
         row = analyze_path(Path(x))
-        if args.media_only and not row['media_types']:
-            continue
         if args.kind_filter and row['kind'] != args.kind_filter:
+            continue
+        if args.equivalence_only:
+            eq = row.get('video_cross_type_equivalence')
+            verified = bool(isinstance(eq, dict) and eq.get('verified') is True)
+            verdict = 'verified' if verified else 'NOT verified'
+            print(f"{verdict.ljust(len('NOT verified'))}  {x}", flush=True)
+            continue
+        if args.media_only and not row['media_types']:
             continue
         if args.json:
             row_out = dict(row)
