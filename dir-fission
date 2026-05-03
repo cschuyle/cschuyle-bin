@@ -13,6 +13,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --dry-run|-n: show what would be done without actually doing it"
             echo "  source: source directory to move video files from"
             echo "  destination is always: \$DRAGNON_MYDATA_ROOT/_Originals"
+            echo "  moved: .mkv .avi .mov .webm (and uppercase variants)"
+            echo "  left alone: .mp4 .m4v and all other file types"
 
             exit 1
             ;;
@@ -25,6 +27,8 @@ done
 aparams=("$@")
 if [[ ${#aparams[@]} -eq 0 ]]; then
     echo "Usage: $0 [--dry-run|-n] <source> [source ...]"
+    echo "  moved: .mkv .avi .mov .webm (and uppercase variants)"
+    echo "  left alone: .mp4 .m4v and all other file types"
     exit 1
 fi
 
@@ -45,7 +49,7 @@ dst="$DRAGNON_MYDATA_ROOT/_Originals"
 
 
 for src in "${aparams[@]}"; do
-    find "$src"/ -type f \( -name '*.mkv' -o -name '*.MKV' -o -name '*.avi' -o -name '*.AVI' -o -name '*.mov' -o -name '*.MOV' \) -print0 |
+    find "$src"/ -type f \( -name '*.mkv' -o -name '*.MKV' -o -name '*.avi' -o -name '*.AVI' -o -name '*.mov' -o -name '*.MOV' -o -name '*.webm' -o -name '*.WEBM' \) -print0 |
         while IFS= read -r -d '' f; do
             rel_path="${f#$src/}"
             mkdir -p "$dst/$(dirname "$rel_path")"
@@ -56,4 +60,4 @@ for src in "${aparams[@]}"; do
 done
 
 echo ""
-echo "Moved all non-mp4 video files to $dst"
+echo "Moved all non-mp4/non-m4v video files to $dst"
