@@ -6,10 +6,11 @@ Usage: dg-whatis [--json] [-media|--media] [-c CLASS|--classification CLASS] <pa
   -media / --media  Only print paths that have at least one identified
                      video, audio, or ebook extension (under scan rules).
 
-  -c / --classification  Only paths classified as CLASS (movie, series,
-                          album, ebook, unknown). Plain output: one resolved
-                          path per matching line. With --json: only matching
-                          NDJSON rows.
+    -c / --classification  Only paths classified as CLASS.
+                                                    Valid CLASS values: movie, series, album, ebook,
+                                                    unknown. Plain output: one resolved path per
+                                                    matching line. With --json: only matching NDJSON
+                                                    rows.
 
 Content types (one primary kind per path):
   movie, series, album, ebook, unknown
@@ -926,9 +927,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         '--classification',
         dest='kind_filter',
         choices=['movie', 'series', 'album', 'ebook', 'unknown'],
-        metavar='CLASS',
         help=(
-            'Only emit paths classified as CLASS. Plain text: one path per line. '
+            'Only emit paths classified as CLASS '
+            '(movie|series|album|ebook|unknown). Plain text: one path per line. '
             'With --json: only matching rows (NDJSON).'
         ),
     )
