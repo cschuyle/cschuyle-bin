@@ -930,17 +930,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     args = p.parse_args(argv)
 
-    for x in args.paths:
-        if args.media_only:
+    if args.media_only:
+        rows_m: List[Tuple[str, str]] = []
+        for x in args.paths:
             path = Path(x).expanduser()
             if path.exists():
                 exts, _v, _a, _e, _imgs, _other = gather_media(path)
                 media = ', '.join(formats_for_output(exts)) if exts else '—'
             else:
                 media = '—'
-            print(x, flush=True)
-            print(f'  media: {media}', flush=True)
-            continue
+            rows_m.append((media, x))
+        col_w = max(len(m) for m, _ in rows_m)
+        for media, x in rows_m:
+            print(f'{media.ljust(col_w)}  {x}', flush=True)
+        return 0
+
+    for x in args.paths:
         row = analyze_path(Path(x))
         if args.kind_filter and row['kind'] != args.kind_filter:
             continue
