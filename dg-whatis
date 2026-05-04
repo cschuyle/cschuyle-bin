@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Classify paths as movie, series, album, or ebook using filesystem heuristics.
 
-Usage: dg-whatis [--json] [-media|--media] [-e|--equivalence]
+Usage: dg-whatis [--json] [-m|--media] [-e|--equivalence]
                                  [-c CLASS|--classification CLASS] <path> [path ...]
 
-    -media / --media  Only print paths that have at least one identified video, audio, or ebook extension (under scan rules).
+    -m / --media  Output only the media: line per path (no ffprobe, no equivalence analysis).
     -e / --equivalence  Print one line per input path using verified status: for every distinct extension pair, file counts match and files pair one-to-one by duration and title (filename or embedded format title).
     -c / --classification  Only paths classified as CLASS. Valid CLASS values: movie, series, album, ebook, unknown. Plain output: one resolved path per matching line. With --json: only matching NDJSON rows.
 
@@ -898,11 +898,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument('paths', nargs='+', help='Files or directories')
     p.add_argument('--json', action='store_true', help='NDJSON output')
     p.add_argument(
-        '-media',
+        '-m',
         '--media',
         dest='media_only',
         action='store_true',
-        help='Only output paths with at least one identified video/audio/ebook file',
+        help='Output only the media: line per path; skips ffprobe and equivalence analysis',
     )
     p.add_argument(
         '-e',
@@ -931,6 +931,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = p.parse_args(argv)
 
     for x in args.paths:
+        if args.media_only:
+            path = Path(x).expanduser()
+            if path.exists():
+                exts, _v, _a, _e, _imgs, _other = gather_media(path)
+                media = ', '.join(formats_for_output(exts)) if exts else '—'
+            else:
+                media = '—'
+            print(x, flush=True)
+            print(f'  media: {media}', flush=True)
+            continue
         row = analyze_path(Path(x))
         if args.kind_filter and row['kind'] != args.kind_filter:
             continue
@@ -939,8 +949,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             verified = bool(isinstance(eq, dict) and eq.get('verified') is True)
             verdict = 'verified' if verified else 'NOT verified'
             print(f"{verdict.ljust(len('NOT verified'))}  {x}", flush=True)
-            continue
-        if args.media_only and not row['media_types']:
             continue
         if args.json:
             row_out = dict(row)
