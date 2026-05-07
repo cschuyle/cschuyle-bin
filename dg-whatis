@@ -56,6 +56,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -941,7 +942,18 @@ def format_diff_value(v: Any) -> str:
     return str(v)
 
 
+def maybe_quote_path_for_display(path_text: str) -> str:
+    """Quote path text only when needed for clear terminal display."""
+    if not path_text:
+        return "''"
+    if re.search(r"[\s\"'\\$`!&|;<>()[\]{}]", path_text):
+        return shlex.quote(path_text)
+    return path_text
+
+
 def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dict[str, Any], as_json: bool) -> None:
+    shown_a = maybe_quote_path_for_display(path_a)
+    shown_b = maybe_quote_path_for_display(path_b)
     proj_a = diff_projection(row_a)
     proj_b = diff_projection(row_b)
     fields = list(proj_a.keys())
@@ -971,9 +983,10 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
         print(json.dumps(out, ensure_ascii=False), flush=True)
         return
 
-    print(f'compare: {path_a} <> {path_b}', flush=True)
-    print(f'  --- {path_a}', flush=True)
-    print(f'  +++ {path_b}', flush=True)
+    print(f'compare: {shown_a} <> {shown_b}', flush=True)
+    print(f'  < {shown_a}', flush=True)
+    print(f'  > {shown_b}', flush=True)
+    print('  ------------------------------------------------------------', flush=True)
     equal_fields = []
     different_fields = []
     for field in fields:
@@ -990,6 +1003,7 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
         print(f'  ! {field}', flush=True)
         print(f'    < {format_diff_value(va)}', flush=True)
         print(f'    > {format_diff_value(vb)}', flush=True)
+    print('  ------------------------------------------------------------', flush=True)
     print(
         f'  summary: {len(diffs)} different field(s), {len(fields) - len(diffs)} equal field(s)',
         flush=True,
@@ -1051,8 +1065,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.paths:
             p.error('positional paths are not allowed with --diff; pass exactly two paths to --diff')
         left, right = args.diff_paths
-        row_left = analyze_path(Path(left))
-        row_right = analyze_path(Path(right))
+        left_path = Path(left).expanduser()
+        right_path = Path(right).expanduser()
+        missing = []
+        if not left_path.exists():
+            missing.append(left)
+        if not right_path.exists():
+            missing.append(right)
+        if missing:
+            shown_missing = [maybe_quote_path_for_display(m) for m in missing]
+            print(
+                'dg-whatis: error: --diff path does not exist: ' + ', '.join(shown_missing),
+                file=sys.stderr,
+                flush=True,
+            )
+            return 2
+        row_left = analyze_path(left_path)
+        row_right = analyze_path(right_path)
         emit_diff_output(left, right, row_left, row_right, args.json)
         return 0
 
