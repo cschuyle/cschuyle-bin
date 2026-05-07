@@ -2,11 +2,13 @@
 """Classify paths as movie, series, album, or ebook using filesystem heuristics.
 
 Usage: dg-whatis [--json] [-m|--media] [-e|--equivalence]
-                                 [-c CLASS|--classification CLASS] <path> [path ...]
+                     [-c CLASS|--classification CLASS] <path> [path ...]
+    dg-whatis [--json] -d|--diff <path_a> <path_b>
 
     -m / --media  Output only the media: line per path (no ffprobe, no equivalence analysis).
     -e / --equivalence  Print one line per input path using verified status: for every distinct extension pair, file counts match and files pair one-to-one by duration and title (filename or embedded format title).
     -c / --classification  Only paths classified as CLASS. Valid CLASS values: movie, series, album, ebook, unknown. Plain output: one resolved path per matching line. With --json: only matching NDJSON rows.
+    -d / --diff  Compare two paths and report which analysis fields are equal vs different.
 
 Content types (one primary kind per path):
   movie, series, album, ebook, unknown
@@ -893,9 +895,110 @@ def analyze_path(path: Path) -> Dict[str, object]:
     }
 
 
+def diff_projection(row: Dict[str, Any]) -> Dict[str, Any]:
+    eq = row.get('video_cross_type_equivalence')
+    eq_applicable = None
+    eq_verified = None
+    eq_message = None
+    if isinstance(eq, dict):
+        eq_applicable = eq.get('applicable')
+        eq_verified = eq.get('verified')
+        eq_message = eq.get('message')
+    sizes = row.get('sizes') if isinstance(row.get('sizes'), dict) else {}
+    return {
+        'type': row.get('type'),
+        'kind': row.get('kind'),
+        'detail': row.get('detail'),
+        'media_types': row.get('media_types') or [],
+        'other_types': row.get('other_types') or [],
+        'video_bytes': sizes.get('video_bytes', 0),
+        'audio_bytes': sizes.get('audio_bytes', 0),
+        'ebook_bytes': sizes.get('ebook_bytes', 0),
+        'image_bytes': sizes.get('image_bytes', 0),
+        'total_bytes': sizes.get('total_bytes', 0),
+        'visual_metadata_count': len(row.get('visual_metadata') or []),
+        'video_cross_type_equivalence_applicable': eq_applicable,
+        'video_cross_type_equivalence_verified': eq_verified,
+        'video_cross_type_equivalence_message': eq_message,
+    }
+
+
+def jsonable_value(v: Any) -> Any:
+    if isinstance(v, Path):
+        return str(v)
+    if isinstance(v, list):
+        return [jsonable_value(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): jsonable_value(x) for k, x in v.items()}
+    return v
+
+
+def format_diff_value(v: Any) -> str:
+    if isinstance(v, list):
+        return ', '.join(str(x) for x in v) if v else '—'
+    if v in (None, ''):
+        return '—'
+    return str(v)
+
+
+def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dict[str, Any], as_json: bool) -> None:
+    proj_a = diff_projection(row_a)
+    proj_b = diff_projection(row_b)
+    fields = list(proj_a.keys())
+    diffs: Dict[str, Dict[str, Any]] = {}
+    equals: Dict[str, Any] = {}
+    for field in fields:
+        va = proj_a.get(field)
+        vb = proj_b.get(field)
+        if va == vb:
+            equals[field] = jsonable_value(va)
+        else:
+            diffs[field] = {
+                'left': jsonable_value(va),
+                'right': jsonable_value(vb),
+            }
+
+    if as_json:
+        out = {
+            'left_path': str(Path(path_a).expanduser()),
+            'right_path': str(Path(path_b).expanduser()),
+            'same': len(diffs) == 0,
+            'different_field_count': len(diffs),
+            'total_compared_fields': len(fields),
+            'differences': diffs,
+            'equal_fields': equals,
+        }
+        print(json.dumps(out, ensure_ascii=False), flush=True)
+        return
+
+    print(f'compare: {path_a} <> {path_b}', flush=True)
+    print(f'  --- {path_a}', flush=True)
+    print(f'  +++ {path_b}', flush=True)
+    equal_fields = []
+    different_fields = []
+    for field in fields:
+        va = proj_a.get(field)
+        vb = proj_b.get(field)
+        if va == vb:
+            equal_fields.append((field, va))
+        else:
+            different_fields.append((field, va, vb))
+
+    for field, va in equal_fields:
+        print(f'  = {field}: {format_diff_value(va)}', flush=True)
+    for field, va, vb in different_fields:
+        print(f'  ! {field}', flush=True)
+        print(f'    < {format_diff_value(va)}', flush=True)
+        print(f'    > {format_diff_value(vb)}', flush=True)
+    print(
+        f'  summary: {len(diffs)} different field(s), {len(fields) - len(diffs)} equal field(s)',
+        flush=True,
+    )
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description='Classify media paths (movie/series/album/ebook).')
-    p.add_argument('paths', nargs='+', help='Files or directories')
+    p.add_argument('paths', nargs='*', help='Files or directories')
     p.add_argument('--json', action='store_true', help='NDJSON output')
     p.add_argument(
         '-m',
@@ -928,7 +1031,33 @@ def main(argv: Optional[List[str]] = None) -> int:
             'With --json: only matching rows (NDJSON).'
         ),
     )
+    p.add_argument(
+        '-d',
+        '--diff',
+        dest='diff_paths',
+        nargs=2,
+        metavar=('PATH_A', 'PATH_B'),
+        help='Compare two paths and report equal/different analysis fields.',
+    )
     args = p.parse_args(argv)
+
+    if args.diff_paths:
+        if args.media_only:
+            p.error('--diff cannot be combined with --media')
+        if args.equivalence_only:
+            p.error('--diff cannot be combined with --equivalence')
+        if args.kind_filter:
+            p.error('--diff cannot be combined with --classification')
+        if args.paths:
+            p.error('positional paths are not allowed with --diff; pass exactly two paths to --diff')
+        left, right = args.diff_paths
+        row_left = analyze_path(Path(left))
+        row_right = analyze_path(Path(right))
+        emit_diff_output(left, right, row_left, row_right, args.json)
+        return 0
+
+    if not args.paths:
+        p.error('at least one path is required')
 
     if args.media_only:
         rows_m: List[Tuple[str, str]] = []
