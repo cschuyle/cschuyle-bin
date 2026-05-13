@@ -6,7 +6,9 @@ Usage: dg-whatis [--json] [-m|--media] [-e|--equivalence]
     dg-whatis [--json] -d|--diff <path_a> <path_b>
 
     -m / --media  Output only the media: line per path (no ffprobe, no equivalence analysis).
-    -e / --equivalence  Print one line per input path using verified status: for every distinct extension pair, file counts match and files pair one-to-one by duration and title (filename or embedded format title).
+    -e / --equivalence  Print only each path and cross-type equivalence as one of:
+                         verified, N/A, or not equivalent (tab-separated plain text;
+                         with --json: {"path", "equivalence"} per line).
     -c / --classification  Only paths classified as CLASS. Valid CLASS values: movie, series, album, ebook, unknown. Plain output: one resolved path per matching line. With --json: only matching NDJSON rows.
     -d / --diff  Compare two paths and report which analysis fields are equal vs different.
 
@@ -777,9 +779,23 @@ def video_cross_type_equivalence_report(
             )
 
     if all_ok:
-        msg = 'Cross-type equivalence: verified'
+        msg = (
+            'Cross-type equivalence: verified — for every distinct extension pair, '
+            'file counts match and files pair one-to-one by duration and title '
+            '(filename or embedded format title).'
+        )
     else:
-        msg = 'Cross-type equivalence: NOT verified'
+        bad = [f"{p['a']}↔{p['b']}" for p in pairs_out if not p['verified']]
+        if len(bad) <= 6:
+            bad_txt = ', '.join(bad)
+            tail = ' See pair details in JSON (--json).'
+        else:
+            bad_txt = f'{len(bad)} extension pair(s)'
+            tail = ' Per-pair reasons are in video_cross_type_equivalence.pairs (--json).'
+        msg = (
+            'Cross-type equivalence: NOT verified — one or more extension pairs '
+            f'failed ({bad_txt}).{tail}'
+        )
 
     mismatch_table: Optional[Dict[str, Any]] = None
     if not all_ok:
@@ -1010,6 +1026,17 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
     )
 
 
+def equivalence_status_label(eq: Optional[Dict[str, Any]]) -> str:
+    """Short label for video_cross_type_equivalence: verified | N/A | not equivalent."""
+    if not eq:
+        return 'N/A'
+    if not eq.get('applicable'):
+        return 'N/A'
+    if eq.get('verified') is True:
+        return 'verified'
+    return 'not equivalent'
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description='Classify media paths (movie/series/album/ebook).')
     p.add_argument('paths', nargs='*', help='Files or directories')
@@ -1027,9 +1054,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         dest='equivalence_only',
         action='store_true',
         help=(
-            'One line per input path: verified/NOT verified. Verified means: '
-            'for every distinct extension pair, file counts match and files pair '
-            'one-to-one by duration and title (filename or embedded format title). '
+            'One line per path: equivalence is verified, N/A, or not equivalent (tab-separated). '
+            'With --json: {"path", "equivalence"} per line. '
             'With -c/--classification, only matching classifications are processed.'
         ),
     )
@@ -1108,10 +1134,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.kind_filter and row['kind'] != args.kind_filter:
             continue
         if args.equivalence_only:
-            eq = row.get('video_cross_type_equivalence')
-            verified = bool(isinstance(eq, dict) and eq.get('verified') is True)
-            verdict = 'verified' if verified else 'NOT verified'
-            print(f"{verdict.ljust(len('NOT verified'))}  {x}", flush=True)
+            lab = equivalence_status_label(row.get('video_cross_type_equivalence'))
+            if args.json:
+                print(
+                    json.dumps(
+                        {'path': row['path'], 'equivalence': lab},
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+            else:
+                w = len('not equivalent')
+                print(f'{lab.ljust(w)}\t{row["path"]}', flush=True)
             continue
         if args.json:
             row_out = dict(row)
