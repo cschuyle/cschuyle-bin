@@ -1,0 +1,14 @@
+---
+description: Git — do not commit unless the user asks
+alwaysApply: true
+---
+
+# Git commits
+
+Do **not** run `git commit` unless the user explicitly asks you to commit (e.g. they say “commit”, “git commit”, or clearly instruct you to create a commit).
+
+It is fine to make file edits, run tests, and use read-only git commands (`git status`, `git diff`, `git log`, etc.). Only create commits when the user has said to.
+
+If the user wants changes saved to git, they will say so; do not assume a commit is desired after finishing a task.
+
+See also **`AGENTS.md`** at the repository root for the same policy and other agent-oriented notes.
