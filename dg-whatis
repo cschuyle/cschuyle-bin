@@ -990,6 +990,22 @@ def maybe_quote_path_for_display(path_text: str) -> str:
     return path_text
 
 
+def diff_suppress_equal_field(field: str, value: Any) -> bool:
+    """Hide redundant equal lines in --diff output (plain and JSON equal_fields)."""
+    if field == 'video_cross_type_equivalence_verified' and value is None:
+        return True
+    if field == 'other_types' and value == []:
+        return True
+    if field == 'audio_bytes' and value == 0:
+        return True
+    if field == 'ebook_bytes' and value == 0:
+        return True
+    if field == 'video_cross_type_equivalence_message':
+        if isinstance(value, str) and 'not applicable' in value.lower():
+            return True
+    return False
+
+
 def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dict[str, Any], as_json: bool) -> None:
     shown_a = maybe_quote_path_for_display(path_a)
     shown_b = maybe_quote_path_for_display(path_b)
@@ -1010,6 +1026,11 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
             }
 
     if as_json:
+        equals_filtered = {
+            k: v
+            for k, v in equals.items()
+            if not diff_suppress_equal_field(k, proj_a.get(k))
+        }
         out = {
             'left_path': str(Path(path_a).expanduser()),
             'right_path': str(Path(path_b).expanduser()),
@@ -1017,7 +1038,7 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
             'different_field_count': len(diffs),
             'total_compared_fields': len(fields),
             'differences': diffs,
-            'equal_fields': equals,
+            'equal_fields': equals_filtered,
         }
         print(json.dumps(out, ensure_ascii=False), flush=True)
         return
@@ -1036,15 +1057,20 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
         else:
             different_fields.append((field, va, vb))
 
+    suppressed_equal = 0
     for field, va in equal_fields:
+        if diff_suppress_equal_field(field, va):
+            suppressed_equal += 1
+            continue
         print(f'  = {field}: {format_diff_value(va)}', flush=True)
     for field, va, vb in different_fields:
         print(f'  ! {field}', flush=True)
         print(f'    < {format_diff_value(va)}', flush=True)
         print(f'    > {format_diff_value(vb)}', flush=True)
     print('  ------------------------------------------------------------', flush=True)
+    shown_equal = len(equal_fields) - suppressed_equal
     print(
-        f'  summary: {len(diffs)} different field(s), {len(fields) - len(diffs)} equal field(s)',
+        f'  summary: {len(diffs)} different field(s), {shown_equal} equal field(s)',
         flush=True,
     )
 
