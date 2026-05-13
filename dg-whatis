@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Classify paths as movie, series, album, or ebook using filesystem heuristics.
 
-Usage: dg-whatis [--json] [-m|--media] [-e|--equivalence]
+Usage: dg-whatis [--json] [-v|--verbose] [-m|--media] [-e|--equivalence]
                      [-c CLASS|--classification CLASS] <path> [path ...]
     dg-whatis [--json] -d|--diff <path_a> <path_b>
 
+    -v / --verbose  Plain text only: full multi-line report (sizes, video by extension,
+                    cross-type equivalence, ffprobe visual lines). Without -v, default
+                    plain output is a path line plus one tab-separated summary line.
     -m / --media  Output only the media: line per path (no ffprobe, no equivalence analysis).
     -e / --equivalence  Print only each path and cross-type equivalence as one of:
                          verified, N/A, or not equivalent (tab-separated plain text;
@@ -39,17 +42,17 @@ Directory scans recurse at most SCAN_MAX_DEPTH path components below the root
 Video and image files under the same scan rules get optional stream metadata
 (resolution, duration, codec; embedded subtitle tracks with language and codec)
 via ffprobe when it is on PATH; see visual_metadata in JSON output and the
-visual: section in plain text.
+visual: lines in plain text when -v/--verbose is set.
 
 For directories that contain video files, output also groups videos by file
 extension and, when two or more extensions are present, reports whether
 cross-type equivalence was verified (same count per pair and a perfect
 duration+title matching between buckets) or NOT verified; see
 video_cross_type_equivalence in JSON and plain-text lines under video by
-extension. When equivalence is not verified, plain text includes a mismatch
-table: for each extension, a file column and a separate duration column, one
-inferred equivalence group per row (NONE / — when no file in that column); that
-table is omitted from --json output.
+extension when -v/--verbose is set. When equivalence is not verified, verbose
+plain text includes a mismatch table: for each extension, a file column and a
+separate duration column, one inferred equivalence group per row (NONE / — when
+no file in that column); that table is omitted from --json output.
 """
 
 from __future__ import annotations
@@ -1037,10 +1040,50 @@ def equivalence_status_label(eq: Optional[Dict[str, Any]]) -> str:
     return 'not equivalent'
 
 
+def plain_type_kind_labels(row: Dict[str, Any]) -> str:
+    """Type and classification for compact plain output, e.g. 'Directory, Series'."""
+    t = str(row.get('type') or 'unknown')
+    k = str(row.get('kind') or 'unknown')
+
+    def cap_words(s: str) -> str:
+        return ' '.join(p.capitalize() for p in s.split())
+
+    return f'{cap_words(t)}, {cap_words(k)}'
+
+
+def compact_detail_with_extensions(row: Dict[str, Any]) -> str:
+    """Classification detail plus (extensions: …) when media_types are known."""
+    detail = str(row.get('detail') or '')
+    media_raw = row.get('media_types') or []
+    media: List[str] = (
+        [str(m) for m in media_raw] if isinstance(media_raw, list) else []
+    )
+    if not media:
+        return detail
+
+    dots = ', '.join(m if m.startswith('.') else f'.{m}' for m in media)
+    ext_seg = f' (extensions: {dots})'
+
+    m = re.match(r'^(\d+\s+video\s+files)\s+(\([^)]*\))$', detail)
+    if m:
+        return f'{m.group(1)}{ext_seg} {m.group(2)}'
+
+    return f'{detail}{ext_seg}' if detail else ext_seg.strip()
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description='Classify media paths (movie/series/album/ebook).')
     p.add_argument('paths', nargs='*', help='Files or directories')
     p.add_argument('--json', action='store_true', help='NDJSON output')
+    p.add_argument(
+        '-v',
+        '--verbose',
+        action='store_true',
+        help=(
+            'Plain default mode only: print the full multi-line report per path. '
+            'Ignored with --json. Without -v, plain output is one summary line per path after the path.'
+        ),
+    )
     p.add_argument(
         '-m',
         '--media',
@@ -1161,6 +1204,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             continue
         media = ', '.join(row['media_types']) if row['media_types'] else '—'
         sz = row['sizes']
+        ts = file_timestamp(Path(row['path']))
+        if not args.verbose:
+            print(row['path'], flush=True)
+            detail_col = compact_detail_with_extensions(row)
+            print(
+                f'  {sz["total_human"]}\t{human_date(ts)}\t{plain_type_kind_labels(row)}\t{detail_col}',
+                flush=True,
+            )
+            continue
         print(row['path'], flush=True)
         print(f"  type: {row['type']}", flush=True)
         print(f"  classification: {row['kind']} — {row['detail']}", flush=True)
@@ -1183,7 +1235,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             print('  sizes: —', flush=True)
         if row['other_types']:
             print(f"  other: {', '.join(row['other_types'])}", flush=True)
-        ts = file_timestamp(Path(row['path']))
         print(f"  timestamp: {human_date(ts)}", flush=True)
         eq = row.get('video_cross_type_equivalence')
         if eq and (eq.get('groups_by_extension') or {}):
