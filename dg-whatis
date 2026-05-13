@@ -7,7 +7,8 @@ Usage: dg-whatis [--json] [-v|--verbose] [-m|--media] [-e|--equivalence]
 
     -v / --verbose  Plain text only: full multi-line report (sizes, video by extension,
                     cross-type equivalence, ffprobe visual lines). Without -v, default
-                    plain output is a path line plus one tab-separated summary line.
+                    plain output is a path line plus one tab-separated summary line and
+                    skips ffprobe and cross-type equivalence work.
     -m / --media  Output only the media: line per path (no ffprobe, no equivalence analysis).
     -e / --equivalence  Print only each path and cross-type equivalence as one of:
                          verified, N/A, or not equivalent (tab-separated plain text;
@@ -857,9 +858,26 @@ def classify(
     return 'unknown', 'no recognized media files'
 
 
-def analyze_path(path: Path) -> Dict[str, object]:
+def _equivalence_report_skipped() -> Dict[str, Any]:
+    """Stub when cross-type equivalence was not computed (plain non-verbose)."""
+    return {
+        'applicable': False,
+        'verified': None,
+        'message': '',
+        'groups_by_extension': {},
+        'pairs': [],
+        'mismatch_table': None,
+    }
+
+
+def analyze_path(path: Path, *, full: bool = True) -> Dict[str, object]:
     path = path.expanduser()
     if not path.exists():
+        veq = (
+            video_cross_type_equivalence_report([], [], False)
+            if full
+            else _equivalence_report_skipped()
+        )
         return {
             'path': str(path),
             'type': 'missing',
@@ -880,17 +898,19 @@ def analyze_path(path: Path) -> Dict[str, object]:
                 'total_human': '0 B',
             },
             'visual_metadata': [],
-            'video_cross_type_equivalence': video_cross_type_equivalence_report(
-                [], [], False
-            ),
+            'video_cross_type_equivalence': veq,
         }
 
     exts, v, a, e, imgs, other = gather_media(path)
     kind, detail = classify(path, v, a, e, imgs)
     sv, sa, se, si = sum_file_sizes(v), sum_file_sizes(a), sum_file_sizes(e), sum_file_sizes(imgs)
     st = sv + sa + se + si
-    vis = visual_metadata_for_paths(v, imgs)
-    v_equiv = video_cross_type_equivalence_report(v, vis, path.is_dir())
+    if full:
+        vis = visual_metadata_for_paths(v, imgs)
+        v_equiv = video_cross_type_equivalence_report(v, vis, path.is_dir())
+    else:
+        vis = []
+        v_equiv = _equivalence_report_skipped()
     return {
         'path': str(path.resolve()),
         'type': path_entry_type(path),
@@ -1080,8 +1100,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         '--verbose',
         action='store_true',
         help=(
-            'Plain default mode only: print the full multi-line report per path. '
-            'Ignored with --json. Without -v, plain output is one summary line per path after the path.'
+            'Plain default mode only: print the full multi-line report per path '
+            '(ffprobe visual lines and cross-type equivalence). '
+            'Ignored with --json. Without -v, default plain output skips that work '
+            'and prints one tab-separated summary line per path after the path.'
         ),
     )
     p.add_argument(
@@ -1157,6 +1179,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not args.paths:
         p.error('at least one path is required')
 
+    need_full_analysis = args.json or args.verbose or args.equivalence_only
+
     if args.media_only:
         rows_m: List[Tuple[str, str]] = []
         for x in args.paths:
@@ -1173,7 +1197,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     for x in args.paths:
-        row = analyze_path(Path(x))
+        row = analyze_path(Path(x), full=need_full_analysis)
         if args.kind_filter and row['kind'] != args.kind_filter:
             continue
         if args.equivalence_only:
