@@ -1,6 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
-trap 'echo "ERROR line $LINENO: $BASH_COMMAND" >&2' ERR
+
+_bh_now() { date '+%Y-%m-%d %H:%M:%S'; }
+
+trap 'printf "%s: ERROR line %s: %s\n" "$(_bh_now)" "$LINENO" "$BASH_COMMAND" >&2' ERR
+
+# Each argument may contain multiple lines; every line gets its own timestamp on stderr
+# (and /dev/tty when stderr is not a TTY, same as before).
+emit_status() {
+  local s line ts
+  for s in "$@"; do
+    while IFS= read -r line || [[ -n "${line:-}" ]]; do
+      ts="$(_bh_now)"
+      printf '%s: %s\n' "$ts" "$line" >&2
+      if [[ ! -t 2 ]]; then
+        printf '%s: %s\n' "$ts" "$line" >/dev/tty 2>/dev/null || true
+      fi
+    done <<< "$s"
+  done
+}
+
+# Timestamped lines on stdout (e.g. preset list).
+_bh_ts_out() {
+  local s line ts
+  for s in "$@"; do
+    while IFS= read -r line || [[ -n "${line:-}" ]]; do
+      ts="$(_bh_now)"
+      printf '%s: %s\n' "$ts" "$line"
+    done <<< "$s"
+  done
+}
+
+# Timestamp each line from stdin (pipeline tail).
+_bh_ts_pipe_stdout() {
+  local line ts
+  while IFS= read -r line || [[ -n "${line:-}" ]]; do
+    ts="$(_bh_now)"
+    printf '%s: %s\n' "$ts" "$line"
+  done
+}
 
 ############################
 # CONFIG / ENV
@@ -27,6 +65,7 @@ _bh_default_preset_note=0
 # Long-only --pattern (getopts does not handle long options).
 # Default glob for directory input; overridden by --pattern= / --pattern or -P.
 file_pattern="${BH_FILE_PATTERN:-}"
+continue_mode=0
 filtered_args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -37,10 +76,14 @@ while [[ $# -gt 0 ]]; do
     --pattern)
       shift
       [[ $# -ge 1 ]] || {
-        echo "ERROR: --pattern requires a value (e.g. --pattern='*.mkv')" >&2
+        emit_status "ERROR: --pattern requires a value (e.g. --pattern='*.mkv')"
         exit 1
       }
       file_pattern="$1"
+      shift
+      ;;
+    --continue)
+      continue_mode=1
       shift
       ;;
     *)
@@ -56,8 +99,9 @@ preset="$BH_DEFAULT_PRESET"
 # Preset listing: 0=off, 1=-l (names + sections), 2+=-ll / -l -l (full + descriptions)
 list_presets=0
 
-while getopts "o:p:lP:" opt; do
+while getopts "co:p:lP:" opt; do
   case $opt in
+    c) continue_mode=1 ;;
     o) output="$OPTARG" ;;
     p) preset="$OPTARG" ;;
     l) list_presets=$((list_presets + 1)) ;;
@@ -70,16 +114,16 @@ shift $((OPTIND - 1))
 
 if [[ "$list_presets" -ge 1 ]]; then
   [[ -n "$BH_HANDBRAKE_CLI_BIN" ]] && command -v "$BH_HANDBRAKE_CLI_BIN" >/dev/null 2>&1 || {
-    echo "Missing HandBrakeCLI or HandBrakeCLI.exe (set BH_HANDBRAKE_CLI_BIN)" >&2
+    emit_status "Missing HandBrakeCLI or HandBrakeCLI.exe (set BH_HANDBRAKE_CLI_BIN)"
     exit 1
   }
-  echo "=== Presets (built-in + custom from HandBrake GUI) ==="
+  _bh_ts_out "=== Presets (built-in + custom from HandBrake GUI) ==="
   if [[ "$list_presets" -ge 2 ]]; then
     "$BH_HANDBRAKE_CLI_BIN" --preset-import-gui --preset-list 2>&1 | awk '
       { gsub(/\r/, "", $0)
         if ($0 ~ /^\[[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\]/) next
         print
-      }'
+      }' | _bh_ts_pipe_stdout
   else
     # HandBrakeCLI prints PresetDescription as extra lines indented one level past
     # the preset name; keep folder lines (name/) and name lines only.
@@ -95,26 +139,27 @@ if [[ "$list_presets" -ge 1 ]]; then
         print
         if (content ~ /\/$/) last = -1
         else last = indent
-      }'
+      }' | _bh_ts_pipe_stdout
   fi
 
-  echo
-  echo "NOTE: CLI Default is NOT what you think it is."
+  printf '\n'
+  _bh_ts_out "NOTE: CLI Default is NOT what you think it is."
   if [[ "$_bh_default_preset_note" -eq 1 ]]; then
-    echo "NOTE: BH_DEFAULT_PRESET is set; default encode preset is: ${BH_DEFAULT_PRESET}"
+    _bh_ts_out "NOTE: BH_DEFAULT_PRESET is set; default encode preset is: ${BH_DEFAULT_PRESET}"
   fi
   exit 0
 fi
 
 [[ $# -ne 1 ]] && {
-  echo "Usage: $0 [-l|-ll]   # list presets (no input); -ll includes descriptions" >&2
-  echo "       $0 [-o out] [-p preset] [-P|--pattern <filename pattern>] <input file(s)/directory(ies)>" >&2
-  echo "  -P --pattern: when <input> is a directory, only encode files matching the glob." >&2
-  echo >&2
-  echo "Environment:" >&2
-  echo "  BH_HANDBRAKE_CLI_BIN                  HandBrakeCLI path (when not found on PATH)" >&2
-  echo "  BH_DEFAULT_PRESET      -p             Use HandBrake preset (else: Preset Not Defined)" >&2
-  echo "  BH_FILE_PATTERN        -P,--pattern   Encode only filenames matching pattern (when <input> is a directory)" >&2
+  emit_status "Usage: $0 [-l|-ll]   # list presets (no input); -ll includes descriptions"
+  emit_status "       $0 [-c|--continue] [-o out] [-p preset] [-P|--pattern <filename pattern>] <input file(s)/directory(ies)>"
+  emit_status "  -c --continue: skip inputs whose final output already exists; rename stale temp outputs to .OLD-<timestamp>."
+  emit_status "  -P --pattern: when <input> is a directory, only encode files matching the glob."
+  emit_status ""
+  emit_status "Environment:"
+  emit_status "  BH_HANDBRAKE_CLI_BIN                  HandBrakeCLI path (when not found on PATH)"
+  emit_status "  BH_DEFAULT_PRESET      -p             Use HandBrake preset (else: Preset Not Defined)"
+  emit_status "  BH_FILE_PATTERN        -P,--pattern   Encode only filenames matching pattern (when <input> is a directory)"
   exit 1
 }
 
@@ -172,39 +217,41 @@ path_sq() {
   printf '%s' "$r"
 }
 
-existing_out=0
-declare -A existing_out_seen=()
-while IFS= read -r f; do
-  [[ -z "$f" ]] && continue
-  f="${f%$'\r'}"
-  out="$(map_output "$f")"
-  if [[ -e "$out" ]]; then
-    existing_out=1
-    if [[ -z ${existing_out_seen["$out"]+x} ]]; then
-      existing_out_seen["$out"]=1
-      echo "ERROR: output already exists: $(path_sq "$out")" >&2
+if [[ "$continue_mode" -eq 0 ]]; then
+  existing_out=0
+  declare -A existing_out_seen=()
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    f="${f%$'\r'}"
+    out="$(map_output "$f")"
+    if [[ -e "$out" ]]; then
+      existing_out=1
+      if [[ -z ${existing_out_seen["$out"]+x} ]]; then
+        existing_out_seen["$out"]=1
+        emit_status "ERROR: output already exists: $(path_sq "$out")"
+      fi
     fi
-  fi
-done < <(build_tasks)
-(( existing_out == 0 )) || exit 1
-unset existing_out_seen
+  done < <(build_tasks)
+  (( existing_out == 0 )) || exit 1
+  unset existing_out_seen
+fi
 
 ############################
 # DEPENDENCY CHECKS
 ############################
 
 command -v ffmpeg >/dev/null || {
-  echo "Missing ffmpeg" >&2
+  emit_status "Missing ffmpeg"
   exit 1
 }
 
 [[ -n "$BH_HANDBRAKE_CLI_BIN" ]] && command -v "$BH_HANDBRAKE_CLI_BIN" >/dev/null 2>&1 || {
-  echo "Missing HandBrakeCLI or HandBrakeCLI.exe (set BH_HANDBRAKE_CLI_BIN)" >&2
+  emit_status "Missing HandBrakeCLI or HandBrakeCLI.exe (set BH_HANDBRAKE_CLI_BIN)"
   exit 1
 }
 
 [[ -z "$preset" ]] && {
-  echo "No preset set (-p or BH_DEFAULT_PRESET)" >&2
+  emit_status "No preset set (-p or BH_DEFAULT_PRESET)"
   exit 1
 }
 
@@ -228,8 +275,11 @@ encoder_run() {
     rm -f "$log"
     return 0
   fi
-  echo "ERROR: encoder failed (exit $st)" >&2
-  cat "$log" >&2
+  emit_status "ERROR: encoder failed (exit $st)"
+  local _elog
+  while IFS= read -r _elog || [[ -n "${_elog:-}" ]]; do
+    emit_status "$_elog"
+  done <"$log"
   rm -f "$log"
   return "$st"
 }
@@ -250,6 +300,14 @@ handbrake_json_progress_filter() {
       if (c == "}") n--
     }
     return n
+  }
+  function tsline(l,    dcmd, t, e) {
+    dcmd = "date \"+%Y-%m-%d %H:%M:%S\""
+    e = (dcmd | getline t)
+    close(dcmd)
+    if (e > 0) print t ": " l
+    else print l
+    fflush()
   }
   function emit_eta(buf,    eta, pct, rate, rateavg, tmp, n, i, em, es, pct100, pref, fpss) {
     # Idle/scan/finished blocks often include Progress: 0 with no ETA — skip or we
@@ -339,7 +397,7 @@ handbrake_json_progress_filter() {
     buf = ""
     next
   }
-  { print }
+  { tsline($0) }
   END { printf "\n" }
   '
 }
@@ -369,14 +427,17 @@ encoder_run_handbrake() {
     rm -f "$log"
     return 0
   fi
-  echo "ERROR: encoder failed (exit $st)" >&2
+  emit_status "ERROR: encoder failed (exit $st)"
   if grep -q "Invalid preset" "$log" 2>/dev/null; then
-    echo "HINT: preset name must match HandBrake GUI (custom presets need import; list: $BH_HANDBRAKE_CLI_BIN --preset-import-gui --preset-list)." >&2
+    emit_status "HINT: preset name must match HandBrake GUI (custom presets need import; list: $BH_HANDBRAKE_CLI_BIN --preset-import-gui --preset-list)."
   fi
   if ((_hb_streamed_stderr)); then
-    echo "INFO: stderr was already shown above; not repeating the full log." >&2
+    emit_status "INFO: stderr was already shown above; not repeating the full log."
   else
-    cat "$log" >&2
+    local _elog
+    while IFS= read -r _elog || [[ -n "${_elog:-}" ]]; do
+      emit_status "$_elog"
+    done <"$log"
   fi
   rm -f "$log"
   return "$st"
@@ -408,16 +469,60 @@ can_remux() {
   return 1
 }
 
-# Status to stderr; if stderr is not a TTY (piped/captured), also try /dev/tty.
-# Writing to both when they are the same device would duplicate every line.
-emit_status() {
-  local s
-  for s in "$@"; do
-    printf '%s\n' "$s" >&2
-    if [[ ! -t 2 ]]; then
-      printf '%s\n' "$s" >/dev/tty 2>/dev/null || true
+# File size in bytes (0 if missing); GNU stat first, then BSD.
+_bh_file_size_bytes() {
+  local f="$1" sz
+  [[ -f "$f" ]] || {
+    printf '%s\n' 0
+    return
+  }
+  if sz=$(stat -c%s -- "$f" 2>/dev/null); then
+    printf '%s\n' "$sz"
+  elif sz=$(stat -f%z "$f" 2>/dev/null); then
+    printf '%s\n' "$sz"
+  else
+    printf '%s\n' 0
+  fi
+}
+
+# Human-readable byte size (binary Ki/Mi/Gi/Ti or plain B).
+_bh_hr_bytes() {
+  local b="$1"
+  [[ "$b" =~ ^[0-9]+$ ]] || b=0
+  if command -v numfmt >/dev/null 2>&1; then
+    numfmt --to=iec-i --suffix=B "$b" 2>/dev/null && return
+  fi
+  local n div=1 i
+  local -a suf=(B Ki Mi Gi Ti)
+  for ((i = 0; i < ${#suf[@]}; i++)); do
+    if ((b < 1024 * div || i == ${#suf[@]} - 1)); then
+      if ((i == 0)); then
+        printf '%d%s\n' "$b" "${suf[i]}"
+      else
+        n=$((b * 100 / div))
+        printf '%d.%02d%s\n' $((n / 100)) $((n % 100)) "${suf[i]}"
+      fi
+      return
     fi
+    ((div *= 1024))
   done
+}
+
+_bh_fmt_elapsed() {
+  local t=$1 s m h
+  ((t < 0)) && t=0
+  if ((t < 60)); then
+    printf '%ds' "$t"
+  elif ((t < 3600)); then
+    m=$((t / 60))
+    s=$((t % 60))
+    printf '%dm %ds' "$m" "$s"
+  else
+    h=$((t / 3600))
+    m=$(((t % 3600) / 60))
+    s=$((t % 60))
+    printf '%dh %dm %ds' "$h" "$m" "$s"
+  fi
 }
 
 ############################
@@ -427,9 +532,23 @@ emit_status() {
 process_file() {
   local in="$1"
   local out="$2"
+  local _bh_ptag=""
+  if [[ -n "${BH_PROGRESS_TOTAL:-}" ]] && [[ "${BH_PROGRESS_TOTAL}" =~ ^[0-9]+$ ]] &&
+    ((BH_PROGRESS_TOTAL > 0)) && [[ -n "${BH_PROGRESS_INDEX:-}" ]] &&
+    [[ "${BH_PROGRESS_INDEX}" =~ ^[0-9]+$ ]]; then
+    _bh_ptag="[${BH_PROGRESS_INDEX}/${BH_PROGRESS_TOTAL}]: "
+  fi
 
   if [[ -e "$out" ]]; then
-    echo "ERROR: output already exists: $(path_sq "$out")" >&2
+    if [[ "${continue_mode:-0}" -eq 1 ]]; then
+      if [[ -n ${_BH_ALREADY_DONE_OUT["$out"]+x} ]]; then
+        return 0
+      fi
+      _BH_ALREADY_DONE_OUT["$out"]=1
+      emit_status "INFO: ${_bh_ptag}already done: $(path_sq "$out")"
+      return 0
+    fi
+    emit_status "ERROR: output already exists: $(path_sq "$out")"
     return 1
   fi
 
@@ -439,22 +558,39 @@ process_file() {
   tmpout="$tmpdir/$(basename "$out")"
 
   mkdir -p "$outdir" || {
-    echo "ERROR: cannot create output directory: $(path_sq "$outdir")" >&2
+    emit_status "ERROR: cannot create output directory: $(path_sq "$outdir")"
     return 1
   }
   if ! mkdir -p "$tmpdir"; then
-    echo "ERROR: cannot create temp directory: $(path_sq "$tmpdir")" >&2
+    emit_status "ERROR: cannot create temp directory: $(path_sq "$tmpdir")"
     return 1
   fi
 
-  emit_status "[IN ] $in" "[OUT] $out"
+  if [[ "${continue_mode:-0}" -eq 1 && -e "$tmpout" ]]; then
+    local _old_ts _old_dest
+    _old_ts="$(date '+%Y%m%d%H%M%S')"
+    _old_dest="${tmpout}.OLD-${_old_ts}"
+    if [[ -e "$_old_dest" ]]; then
+      _old_dest="${tmpout}.OLD-${_old_ts}-$$"
+    fi
+    mv -- "$tmpout" "$_old_dest" || {
+      emit_status "ERROR: cannot rename stale temp file: $(path_sq "$tmpout")"
+      return 1
+    }
+  fi
 
-  emit_status "INFO: probing whether MP4 stream-copy (remux) is possible..."
+  local _bh_t0
+  _bh_t0=$SECONDS
+
+  local _in_start_b _in_start_hr
+  _in_start_b="$(_bh_file_size_bytes "$in")"
+  _in_start_hr="$(_bh_hr_bytes "$_in_start_b")"
+  emit_status "INFO: ${_bh_ptag}[IN ] $in (${_in_start_hr})"
+  emit_status "INFO: ${_bh_ptag}[OUT] $out"
+
+  emit_status "INFO: ${_bh_ptag}probing whether MP4 stream-copy (remux) is possible..."
   if can_remux "$in"; then
-    emit_status \
-      "----------------------------------------------------------------" \
-      "INFO: MODE=REMUX  (ffmpeg -c copy to MP4; no re-encode)" \
-      "----------------------------------------------------------------"
+    emit_status "INFO: ${_bh_ptag}MODE=REMUX  (ffmpeg -c copy to MP4; no re-encode)"
 
     encoder_run ffmpeg -nostdin -hide_banner -loglevel error -nostats -i "$in" \
       -map 0 \
@@ -464,18 +600,15 @@ process_file() {
     mv "$tmpout" "$out"
 
   else
-    emit_status "INFO: MP4 stream-copy (remux) is not possible for this file."
+    emit_status "INFO: ${_bh_ptag}MP4 stream-copy (remux) is not possible for this file."
     if [[ -n "${_BH_REMUX_PROBE_ERR:-}" ]]; then
-      emit_status "INFO: ffmpeg:"
+      emit_status "INFO: ${_bh_ptag}ffmpeg:"
       local _line
       while IFS= read -r _line || [[ -n "${_line:-}" ]]; do
         emit_status "  $_line"
       done <<< "$_BH_REMUX_PROBE_ERR"
     fi
-    emit_status \
-      "----------------------------------------------------------------" \
-      "INFO: MODE=ENCODE  (HandBrakeCLI; preset: $preset)" \
-      "----------------------------------------------------------------"
+    emit_status "INFO: ${_bh_ptag}MODE=ENCODE  (HandBrakeCLI; preset: $preset)"
 
     # Windows HandBrakeCLI.exe expects Z:\... paths, not /mnt/z/... (WSL) or MSYS POSIX.
     local hb_in_arg="$in" hb_out_arg="$tmpout"
@@ -498,7 +631,15 @@ process_file() {
       --preset="$preset" </dev/null
     mv "$tmpout" "$out"
   fi
-  # Remove staging dir when empty (successful mv moved the only file out).
+
+  local _in_b _out_b _in_hr _out_hr _el_s _el_hr
+  _in_b="$(_bh_file_size_bytes "$in")"
+  _out_b="$(_bh_file_size_bytes "$out")"
+  _in_hr="$(_bh_hr_bytes "$_in_b")"
+  _out_hr="$(_bh_hr_bytes "$_out_b")"
+  _el_s=$((SECONDS - _bh_t0))
+  _el_hr="$(_bh_fmt_elapsed "$_el_s")"
+  emit_status "INFO: ${_bh_ptag}--- Done --- [IN: ${_in_hr}] [OUT: ${_out_hr}]  [elapsed: ${_el_hr}]"
   rmdir "$tmpdir" 2>/dev/null || true
 }
 
@@ -508,7 +649,28 @@ process_file() {
 # Task list is on stdin; encoders must not read stdin or they consume the next path.
 
 mapfile -t _BH_TASKS < <(build_tasks)
+if [[ "${continue_mode:-0}" -eq 1 ]]; then
+  declare -A _bh_skip_logged=()
+  _BH_TODO=()
+  for ((_bh_j = 0; _bh_j < ${#_BH_TASKS[@]}; _bh_j++)); do
+    f="${_BH_TASKS[_bh_j]}"
+    [[ -z "$f" ]] && continue
+    f="${f%$'\r'}"
+    out="$(map_output "$f")"
+    if [[ -e "$out" ]]; then
+      if [[ -z ${_bh_skip_logged["$out"]+x} ]]; then
+        _bh_skip_logged["$out"]=1
+        emit_status "INFO: already done: $(path_sq "$out")"
+      fi
+    else
+      _BH_TODO+=("$f")
+    fi
+  done
+  _BH_TASKS=("${_BH_TODO[@]}")
+  unset _bh_skip_logged
+fi
 _BH_TASK_N="${#_BH_TASKS[@]}"
+declare -A _BH_ALREADY_DONE_OUT=()
 for ((_bh_i = 0; _bh_i < _BH_TASK_N; _bh_i++)); do
   f="${_BH_TASKS[_bh_i]}"
   [[ -z "$f" ]] && continue
