@@ -197,6 +197,7 @@ def probe_visual_file(path: Path) -> Dict[str, Any]:
     """Width, height, duration (seconds), codec via ffprobe; values may be null."""
     base: Dict[str, Any] = {
         'path': str(path),
+        'size_bytes': file_size_bytes(path),
         'width': None,
         'height': None,
         'duration': None,
@@ -318,6 +319,20 @@ def format_visual_line(meta: Dict[str, Any]) -> str:
         sub_brief = format_subtitles_brief(meta.get('subtitles') or [])
         return f'{rel} ({label}): {res}, {dur}, {codec}; subs {sub_brief}'
     return f'{rel} ({label}): {res}, {dur}, {codec}'
+
+
+def top_videos_by_size(
+    visual_rows: List[Dict[str, Any]], limit: int = 5
+) -> List[Dict[str, Any]]:
+    """Return up to `limit` video entries sorted by size_bytes descending.
+
+    Returns an empty list when there are 25 or more video files (caller suppresses
+    the section in that case) or when there are no video files at all.
+    """
+    videos = [r for r in visual_rows if r.get('media') == 'video']
+    if not videos or len(videos) >= 25:
+        return []
+    return sorted(videos, key=lambda r: r.get('size_bytes', 0), reverse=True)[:limit]
 
 
 def sum_file_sizes(files: List[Path]) -> int:
@@ -909,7 +924,13 @@ def analyze_path(path: Path, *, full: bool = True) -> Dict[str, object]:
         vis = visual_metadata_for_paths(v, imgs)
         v_equiv = video_cross_type_equivalence_report(v, vis, path.is_dir())
     else:
-        vis = []
+        # Probe only the top-5 video files by size so compact output can show
+        # size + duration without running ffprobe on every file.
+        if v and len(v) < 25:
+            top_v = sorted(v, key=file_size_bytes, reverse=True)[:5]
+            vis = visual_metadata_for_paths(top_v, [])
+        else:
+            vis = []
         v_equiv = _equivalence_report_skipped()
     return {
         'path': str(path.resolve()),
@@ -1025,6 +1046,19 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
                 'right': jsonable_value(vb),
             }
 
+    def _top_videos_json(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+        vis = row.get('visual_metadata') or []
+        return [
+            {
+                'path': r['path'],
+                'size_bytes': r.get('size_bytes', 0),
+                'size_human': human_size(r.get('size_bytes', 0)),
+                'duration': r.get('duration'),
+                'duration_human': human_duration(r.get('duration')),
+            }
+            for r in top_videos_by_size(vis)
+        ]
+
     if as_json:
         equals_filtered = {
             k: v
@@ -1039,6 +1073,8 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
             'total_compared_fields': len(fields),
             'differences': diffs,
             'equal_fields': equals_filtered,
+            'top_videos_left': _top_videos_json(row_a),
+            'top_videos_right': _top_videos_json(row_b),
         }
         print(json.dumps(out, ensure_ascii=False), flush=True)
         return
@@ -1073,6 +1109,15 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
         f'  summary: {len(diffs)} different field(s), {shown_equal} equal field(s)',
         flush=True,
     )
+    for side_label, side_shown, side_row in (('<', shown_a, row_a), ('>', shown_b, row_b)):
+        top = top_videos_by_size(side_row.get('visual_metadata') or [])
+        if top:
+            print(f'  {side_label} {side_shown} — top video files by size:', flush=True)
+            for r in top:
+                name = Path(str(r['path'])).name
+                sz = human_size(r.get('size_bytes', 0))
+                dur = human_duration(r.get('duration'))
+                print(f'      {sz:<8}  {dur}  {name}', flush=True)
 
 
 def equivalence_status_label(eq: Optional[Dict[str, Any]]) -> str:
@@ -1262,6 +1307,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f'  {sz["total_human"]}\t{human_date(ts)}\t{plain_type_kind_labels(row)}\t{detail_col}',
                 flush=True,
             )
+            top = top_videos_by_size(row.get('visual_metadata') or [])
+            if top:
+                print('  top video files by size:', flush=True)
+                for r in top:
+                    name = Path(str(r['path'])).name
+                    sv = human_size(r.get('size_bytes', 0))
+                    dur = human_duration(r.get('duration'))
+                    print(f'    {sv:<8}  {dur}  {name}', flush=True)
             continue
         print(row['path'], flush=True)
         print(f"  type: {row['type']}", flush=True)
@@ -1315,6 +1368,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for ln in format_equivalence_mismatch_table_plain(cols, mt['rows']):
                     print(f'    {ln}', flush=True)
         vis = row.get('visual_metadata') or []
+        top = top_videos_by_size(vis)
+        if top:
+            print('  top video files by size:', flush=True)
+            for r in top:
+                name = Path(str(r['path'])).name
+                sz = human_size(r.get('size_bytes', 0))
+                dur = human_duration(r.get('duration'))
+                print(f'    {sz:<8}  {dur}  {name}', flush=True)
         if vis:
             cap = 20
             for meta in vis[:cap]:
