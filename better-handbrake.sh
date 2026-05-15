@@ -287,11 +287,17 @@ encoder_run() {
 # Collapse HandBrake --json repeated "Progress: { ... }" blocks to one \r line (ETA + %).
 # Optional: BH_PROGRESS_FILE (input basename), BH_PROGRESS_INDEX / BH_PROGRESS_TOTAL
 # for a "(n/m) name    " prefix before ETA (set by the main task loop).
+# All other HandBrake lines (scan, JSON job dump, job config) are suppressed; one
+# timestamped summary line is printed when encoding starts (preset, size/fps, duration).
 handbrake_json_progress_filter() {
   awk -v fname="${BH_PROGRESS_FILE:-}" \
       -v cur="${BH_PROGRESS_INDEX:-0}" \
       -v tot="${BH_PROGRESS_TOTAL:-0}" '
-  BEGIN { inblk = 0; dep = 0; buf = "" }
+  BEGIN {
+    inblk = 0; dep = 0; buf = ""
+    summary_emitted = 0
+    hb_preset = ""; hb_dur = ""; hb_geo = ""
+  }
   function count_braces(s,    i, c, n) {
     n = 0
     for (i = 1; i <= length(s); i++) {
@@ -308,6 +314,37 @@ handbrake_json_progress_filter() {
     if (e > 0) print t ": " l
     else print l
     fflush()
+  }
+  function sniff_meta(line) {
+    gsub(/\r/, "", line)
+    if (match(line, /Using preset:[[:space:]]*/)) {
+      hb_preset = substr(line, RSTART + RLENGTH)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", hb_preset)
+    }
+    if (match(line, /\+[[:space:]]+duration:[[:space:]]*/)) {
+      hb_dur = substr(line, RSTART + RLENGTH)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", hb_dur)
+    }
+    if (match(line, /\+[[:space:]]+size:[[:space:]]*/)) {
+      hb_geo = substr(line, RSTART + RLENGTH)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", hb_geo)
+      if (length(hb_geo) > 120) hb_geo = substr(hb_geo, 1, 117) "..."
+    }
+  }
+  function emit_hb_summary_once(    sum, x) {
+    if (summary_emitted) return
+    summary_emitted = 1
+    sum = "HandBrake"
+    if ((tot + 0) > 0 && (cur + 0) > 0)
+      sum = sum sprintf(" (%d/%d)", cur + 0, tot + 0)
+    if (length(fname) > 0) sum = sum " " fname
+    x = ""
+    if (length(hb_preset) > 0) x = x (x == "" ? "" : " | ") hb_preset
+    if (length(hb_geo) > 0) x = x (x == "" ? "" : " | ") hb_geo
+    if (length(hb_dur) > 0) x = x (x == "" ? "" : " | ") hb_dur
+    if (length(x) > 0) sum = sum ": " x
+    else sum = sum ": encode started"
+    tsline(sum)
   }
   function emit_eta(buf,    eta, pct, rate, rateavg, tmp, n, i, em, es, pct100, pref, fpss) {
     # Idle/scan/finished blocks often include Progress: 0 with no ETA — skip or we
@@ -348,6 +385,7 @@ handbrake_json_progress_filter() {
       }
     }
     if (eta < 0 && pct < 0) return
+    emit_hb_summary_once()
     pct100 = (pct >= 0) ? pct * 100 : -1
     fpss = ""
     if (rate >= 0 && rateavg >= 0)
@@ -397,7 +435,11 @@ handbrake_json_progress_filter() {
     buf = ""
     next
   }
-  { tsline($0) }
+  {
+    sniff_meta($0)
+    if ($0 ~ /Starting Task:/) emit_hb_summary_once()
+    next
+  }
   END { printf "\n" }
   '
 }
