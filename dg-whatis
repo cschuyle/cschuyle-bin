@@ -304,11 +304,18 @@ def visual_metadata_for_paths(
     return out
 
 
+def resolution_brief(meta: Dict[str, Any]) -> str:
+    """WxH for display, or em dash when unknown."""
+    w, h = meta.get('width'), meta.get('height')
+    if w is not None and h is not None:
+        return f'{w}×{h}'
+    return '—'
+
+
 def format_visual_line(meta: Dict[str, Any]) -> str:
     """One-line summary for text mode."""
     label = meta.get('media', '?')
-    w, h = meta.get('width'), meta.get('height')
-    res = f'{w}×{h}' if w is not None and h is not None else '—'
+    res = resolution_brief(meta)
     dur = human_duration(meta.get('duration'))
     codec = meta.get('codec') or '—'
     rel = Path(str(meta['path'])).name
@@ -1048,16 +1055,21 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
 
     def _top_videos_json(row: Dict[str, Any]) -> List[Dict[str, Any]]:
         vis = row.get('visual_metadata') or []
-        return [
-            {
+        out: List[Dict[str, Any]] = []
+        for r in top_videos_by_size(vis):
+            rb = resolution_brief(r)
+            entry: Dict[str, Any] = {
                 'path': r['path'],
                 'size_bytes': r.get('size_bytes', 0),
                 'size_human': human_size(r.get('size_bytes', 0)),
+                'width': r.get('width'),
+                'height': r.get('height'),
+                'resolution': rb if rb != '—' else None,
                 'duration': r.get('duration'),
                 'duration_human': human_duration(r.get('duration')),
             }
-            for r in top_videos_by_size(vis)
-        ]
+            out.append(entry)
+        return out
 
     if as_json:
         equals_filtered = {
@@ -1116,8 +1128,9 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
             for r in top:
                 name = Path(str(r['path'])).name
                 sz = human_size(r.get('size_bytes', 0))
+                res = resolution_brief(r)
                 dur = human_duration(r.get('duration'))
-                print(f'      {sz:<8}  {dur}  {name}', flush=True)
+                print(f'      {sz:<8}  {res:<12}  {dur}  {name}', flush=True)
 
 
 def equivalence_status_label(eq: Optional[Dict[str, Any]]) -> str:
@@ -1313,8 +1326,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for r in top:
                     name = Path(str(r['path'])).name
                     sv = human_size(r.get('size_bytes', 0))
+                    res = resolution_brief(r)
                     dur = human_duration(r.get('duration'))
-                    print(f'    {sv:<8}  {dur}  {name}', flush=True)
+                    print(f'    {sv:<8}  {res:<12}  {dur}  {name}', flush=True)
             continue
         print(row['path'], flush=True)
         print(f"  type: {row['type']}", flush=True)
@@ -1374,8 +1388,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             for r in top:
                 name = Path(str(r['path'])).name
                 sz = human_size(r.get('size_bytes', 0))
+                res = resolution_brief(r)
                 dur = human_duration(r.get('duration'))
-                print(f'    {sz:<8}  {dur}  {name}', flush=True)
+                print(f'    {sz:<8}  {res:<12}  {dur}  {name}', flush=True)
         if vis:
             cap = 20
             for meta in vis[:cap]:
