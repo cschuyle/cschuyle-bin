@@ -62,9 +62,12 @@ fi
 
 
 for src in "${aparams[@]}"; do
-    find "$src"/ -type f \( -name '*.mkv' -o -name '*.MKV' -o -name '*.avi' -o -name '*.AVI' -o -name '*.mov' -o -name '*.MOV' -o -name '*.webm' -o -name '*.WEBM' \) -print0 |
+    # Strip trailing slash so dirname works correctly.
+    src="${src%/}"
+    src_parent="$(dirname "$src")"
+    find "$src" -type f \( -name '*.mkv' -o -name '*.MKV' -o -name '*.avi' -o -name '*.AVI' -o -name '*.mov' -o -name '*.MOV' -o -name '*.webm' -o -name '*.WEBM' \) -print0 |
         while IFS= read -r -d '' f; do
-            rel_path="${f#$src/}"
+            rel_path="${f#$src_parent/}"
             mkdir -p "$dst/$(dirname "$rel_path")"
             set -x
             mv "$f" "$dst/$rel_path"
