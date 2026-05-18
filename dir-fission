@@ -2,6 +2,7 @@
 set -euo pipefail
 
 dry_run_flag=''
+prog="$(basename "$0")"
 dest_override=''
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -14,14 +15,14 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -*)
-            echo "Usage: $0 [--dry-run|-n] [-o <dest>] <source> [source ...]"
-            echo "  --dry-run|-n: show what would be done without actually doing it"
-            echo "  -o <dest>: destination directory (overrides \$DIR_FISSION_DEST_DIR)"
-            echo "  source: source directory to move video files from"
-            echo ""
-            echo "  What this does: Move files with certain extensions to dest dir, preserving dir structure."
-            echo "    file types moved: .mkv .avi .mov .webm (and uppercase variants)"
-
+            echo "Error: unknown option: $1" >&2
+            echo "Usage: $prog [--dry-run|-n] [-o <dest>] <source> [source ...]" >&2
+            echo "  --dry-run|-n: show what would be done without actually doing it" >&2
+            echo "  -o <dest>: destination directory (overrides \$DIR_FISSION_DEST_DIR)" >&2
+            echo "  source: source directory to move video files from" >&2
+            echo "" >&2
+            echo "  What this does: Move files with certain extensions to dest dir, preserving dir structure." >&2
+            echo "    file types moved: .mkv .avi .mov .webm (and uppercase variants)" >&2
             exit 1
             ;;
         *)
@@ -32,7 +33,7 @@ done
 
 aparams=("$@")
 if [[ ${#aparams[@]} -eq 0 ]]; then
-    echo "Usage: $0 [--dry-run|-n] [-o <dest>] <source> [source ...]"
+    echo "Usage: $prog [--dry-run|-n] [-o <dest>] <source> [source ...]"
     echo "  moved: .mkv .avi .mov .webm (and uppercase variants)"
     echo "  left alone: .mp4 .m4v and all other file types"
     exit 1
@@ -68,12 +69,17 @@ for src in "${aparams[@]}"; do
     find "$src" -type f \( -name '*.mkv' -o -name '*.MKV' -o -name '*.avi' -o -name '*.AVI' -o -name '*.mov' -o -name '*.MOV' -o -name '*.webm' -o -name '*.WEBM' \) -print0 |
         while IFS= read -r -d '' f; do
             rel_path="${f#$src_parent/}"
-            mkdir -p "$dst/$(dirname "$rel_path")"
-            set -x
-            mv "$f" "$dst/$rel_path"
-            { set +x; } 2>/dev/null
+            if [[ -n "$dry_run_flag" ]]; then
+                echo "[dry-run] mv $f $dst/$rel_path"
+            else
+                mkdir -p "$dst/$(dirname "$rel_path")"
+                set -x
+                mv "$f" "$dst/$rel_path"
+                { set +x; } 2>/dev/null
+            fi
         done
 done
-
-echo ""
-echo "Moved all non-mp4/non-m4v video files to $DIR_FISSION_DEST_DIR"
+if [[ -z "$dry_run_flag" ]]; then
+    echo ""
+    echo "Moved all non-mp4/non-m4v video files to $dst"
+fi
