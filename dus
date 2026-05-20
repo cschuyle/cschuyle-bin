@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
 # dus — disk usage for a list of paths, sorted by size ascending within each parent group.
 # Scans only the minimal set of root paths needed, then extracts sizes for each requested path.
-# Results are cached in ~/.dus/ and reused when directory mtimes have not changed.
+# Results are cached in ~/.dus/ and reused on subsequent runs (use --refresh to rescan).
 set -euo pipefail
 
 prog="$(basename "$0")"
 human_readable=false
 verbose=false
 no_cache=false
+refresh_cache=false
 clear_cache=false
 excludes=()
 
 DUS_CACHE_DIR="${DUS_CACHE_DIR:-$HOME/.dus}"
 
 print_usage() {
-    echo "Usage: $prog [-h] [-v] [--no-cache] [-c] [--exclude <pattern>]... <path> [path ...]" >&2
+    echo "Usage: $prog [-h] [-v] [--no-cache] [--refresh] [-c] [--exclude <pattern>]... <path> [path ...]" >&2
     echo "  -h                  Human-readable sizes (B, K, M, G, T)" >&2
     echo "  -v                  Print each du command to stderr before running it" >&2
     echo "  --no-cache          Skip reading and writing the cache for this run" >&2
+    echo "  --refresh           Ignore cache and rescan (still updates cache)" >&2
     echo "  -c/--clearcache/--clear  Delete all cached data and exit" >&2
     echo "  --exclude <pat>     Exclude files/dirs matching glob pattern (repeatable)" >&2
 }
@@ -29,6 +31,7 @@ while [[ $# -gt 0 ]]; do
         -h) human_readable=true; shift ;;
         -v) verbose=true; shift ;;
         --no-cache) no_cache=true; shift ;;
+        --refresh) refresh_cache=true; shift ;;
         -c|--clearcache|--clear) clear_cache=true; shift ;;
         --exclude)
             [[ $# -ge 2 ]] || { echo "$prog: --exclude requires a value" >&2; exit 1; }
@@ -86,19 +89,17 @@ _cache_path_for_root() {
     printf '%s/%s.cache' "$DUS_CACHE_DIR" "$hash"
 }
 
-# Validate cache file and load into size_map. Returns 1 if stale/missing.
-# Cache format: header lines (# root, # scanned, # dircount, # rootsize) then size TAB path rows.
+# Load cache file into size_map. Returns 1 if missing/unreadable.
+# Trusts cached data when the root still exists; use --refresh to rescan.
 _load_cache() {
-    local cache_file="$1" root="" dircount="" rootsize="" sz path
+    local cache_file="$1" root="" sz path
     [[ -f "$cache_file" ]] || return 1
 
     declare -a _entries=()
     while IFS= read -r line; do
         case "$line" in
-            '# root:'*)     root="${line#*: }" ;;
-            '# dircount:'*) dircount="${line#*: }" ;;
-            '# rootsize:'*) rootsize="${line#*: }" ;;
-            '# '*)          ;;
+            '# root:'*) root="${line#*: }" ;;
+            '# '*)       ;;
             '')
                 ;;
             *)
@@ -111,16 +112,6 @@ _load_cache() {
 
     [[ -n "$root" && -d "$root" ]] || return 1
     [[ ${#_entries[@]} -gt 0 ]] || return 1
-
-    # Fast validation: compare directory count and root total size.
-    if [[ -n "$dircount" && -n "$rootsize" ]]; then
-        local cur_count cur_rootsize
-        cur_count="$(find "$root" -type d 2>/dev/null | wc -l | tr -d ' ')"
-        cur_rootsize="$("$DU_BIN" -sk "$root" 2>/dev/null | cut -f1)" || return 1
-        [[ "$cur_count" == "$dircount" && "$cur_rootsize" == "$rootsize" ]] || return 1
-    else
-        return 1
-    fi
 
     for entry in "${_entries[@]+"${_entries[@]}"}"; do
         IFS=$'\t' read -r sz path <<< "$entry"
@@ -260,7 +251,7 @@ for root in "${roots[@]}"; do
         done
     else
         cache_file="$(_cache_path_for_root "$root")"
-        if _load_cache "$cache_file"; then
+        if ! $refresh_cache && _load_cache "$cache_file"; then
             $verbose && printf '%s: cache HIT:  %s\n' "$prog" "$root" >&2 || true
         else
             $verbose && printf '%s: cache MISS: %s\n' "$prog" "$root" >&2 || true
