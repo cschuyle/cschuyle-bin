@@ -120,6 +120,27 @@ _load_cache() {
     return 0
 }
 
+# Try to load a cache covering np (self or nearest ancestor). Returns 0 on success.
+_try_load_ancestor_cache() {
+    local np="$1"
+    [[ -n "${size_map[$np]+x}" ]] && return 0
+
+    local dir="$np"
+    while true; do
+        if ! $refresh_cache; then
+            local cf="$(_cache_path_for_root "$dir")"
+            if _load_cache "$cf"; then
+                $verbose && printf '%s: cache HIT:  %s\n' "$prog" "$dir" >&2 || true
+                [[ -n "${size_map[$np]+x}" ]] && return 0
+                [[ "$np" == "$dir" || "$np" == "$dir/"* ]] && return 0
+            fi
+        fi
+        [[ "$dir" == "/" ]] && break
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
 # Collect raw du output. Strips trailing slashes; skips blank lines.
 # Sets globals _DU_RAW and _DU_ROOT_PATH (du's path for the root, from last line).
 _du_collect() {
@@ -238,6 +259,21 @@ for p in "${inputs[@]}"; do
     fi
 done
 
+# Sibling collapse: if every root shares the same parent, scan the parent once.
+if [[ ${#roots[@]} -gt 1 ]]; then
+    _common_parent="$(dirname "${roots[0]}")"
+    _all_same_parent=true
+    for r in "${roots[@]}"; do
+        if [[ "$(dirname "$r")" != "$_common_parent" ]]; then
+            _all_same_parent=false
+            break
+        fi
+    done
+    if $_all_same_parent; then
+        roots=("$_common_parent")
+    fi
+fi
+
 # Scan each root; use cache when available and valid, otherwise run du fresh.
 declare -A size_map=()
 for root in "${roots[@]}"; do
@@ -250,11 +286,11 @@ for root in "${roots[@]}"; do
             [[ -n "$_DU_REBASED_PATH" ]] && size_map["$_DU_REBASED_PATH"]="$_nc_sz"
         done
     else
-        cache_file="$(_cache_path_for_root "$root")"
-        if ! $refresh_cache && _load_cache "$cache_file"; then
-            $verbose && printf '%s: cache HIT:  %s\n' "$prog" "$root" >&2 || true
+        if _try_load_ancestor_cache "$root"; then
+            :
         else
             $verbose && printf '%s: cache MISS: %s\n' "$prog" "$root" >&2 || true
+            cache_file="$(_cache_path_for_root "$root")"
             _scan_and_cache "$root" "$cache_file"
         fi
     fi
