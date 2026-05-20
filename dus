@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# dus — disk usage for a list of paths, sorted by size ascending within each parent group.
+# Scans only the minimal set of root paths needed, then extracts sizes for each requested path.
+set -euo pipefail
+
+prog="$(basename "$0")"
+human_readable=false
+excludes=()
+
+print_usage() {
+    echo "Usage: $prog [-h] [--exclude <pattern>]... <path> [path ...]" >&2
+    echo "  -h              Human-readable sizes (B, K, M, G, T)" >&2
+    echo "  --exclude <pat> Exclude files/dirs matching glob pattern (repeatable)" >&2
+}
+usage() { print_usage; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help) print_usage; exit 0 ;;
+        -h) human_readable=true; shift ;;
+        --exclude)
+            [[ $# -ge 2 ]] || { echo "$prog: --exclude requires a value" >&2; exit 1; }
+            excludes+=("$2"); shift 2 ;;
+        --exclude=*) excludes+=("${1#*=}"); shift ;;
+        --) shift; break ;;
+        -*) echo "$prog: unknown option: $1" >&2; usage ;;
+        *) break ;;
+    esac
+done
+
+[[ $# -eq 0 ]] && { echo "$prog: at least one path required" >&2; usage; }
+
+# Resolve to absolute path, no trailing slash.
+normalize_path() {
+    local p="${1%/}"
+    local dir base
+    base="$(basename -- "$p")"
+    if dir="$(cd "$(dirname -- "$p")" 2>/dev/null && pwd -P)"; then
+        printf '%s/%s' "$dir" "$base"
+    else
+        # Parent doesn't exist; best-effort: keep dirname as-is
+        printf '%s/%s' "$(dirname -- "$p")" "$base"
+    fi
+}
+
+# True if $1 is a strict path prefix of $2 (i.e. $2 is inside $1).
+is_proper_prefix() { [[ "$2" == "$1/"* ]]; }
+
+# Prefer GNU du (gdu from homebrew) for --exclude support on macOS.
+DU_BIN="du"
+command -v gdu >/dev/null 2>&1 && DU_BIN="gdu"
+
+du_exclude_args=()
+use_postfilter=false
+if [[ ${#excludes[@]} -gt 0 ]]; then
+    if [[ "$DU_BIN" == "gdu" ]]; then
+        for pat in "${excludes[@]}"; do du_exclude_args+=("--exclude=$pat"); done
+    else
+        echo "$prog: WARNING: GNU du (gdu) not available; --exclude filters by basename after scanning (sizes of excluded dirs still counted in parent totals)" >&2
+        use_postfilter=true
+    fi
+fi
+
+# Normalize all input paths.
+declare -a inputs=()
+declare -A norm_of=()
+for p in "$@"; do
+    inputs+=("$p")
+    norm_of["$p"]="$(normalize_path "$p")"
+done
+
+# Find the minimal set of root paths to scan: a path is a root if no other
+# input is a proper prefix of it (so we don't scan any subtree more than once).
+declare -a roots=()
+declare -A root_seen=()
+for p in "${inputs[@]}"; do
+    np="${norm_of[$p]}"
+    covered=false
+    for q in "${inputs[@]}"; do
+        [[ "$p" == "$q" ]] && continue
+        if is_proper_prefix "${norm_of[$q]}" "$np"; then
+            covered=true; break
+        fi
+    done
+    if ! $covered && [[ -z "${root_seen[$np]+x}" ]]; then
+        roots+=("$np")
+        root_seen[$np]=1
+    fi
+done
+
+# Scan each root with du (no -s so we get all subdirectory sizes), build path->size map.
+declare -A size_map=()
+for root in "${roots[@]}"; do
+    while IFS=$'\t' read -r sz rawpath; do
+        local_path="${rawpath%/}"
+        if $use_postfilter; then
+            bname="$(basename "$local_path")"
+            skip=false
+            for pat in "${excludes[@]}"; do
+                # shellcheck disable=SC2254
+                case "$bname" in $pat) skip=true; break ;; esac
+            done
+            $skip && continue
+        fi
+        size_map["$local_path"]="$sz"
+    done < <("$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root" 2>/dev/null)
+done
+
+# Format 1K-block count as human-readable (B, K, M, G, T).
+hr_size() {
+    awk -v kb="$1" 'BEGIN {
+        b = kb * 1024
+        if (b < 1024)           { printf "%dB",   b;                      exit }
+        if (b < 1048576)        { printf "%.1fK",  b / 1024;               exit }
+        if (b < 1073741824)     { printf "%.1fM",  b / 1048576;            exit }
+        if (b < 1099511627776)  { printf "%.1fG",  b / 1073741824;         exit }
+                                  printf "%.1fT",  b / 1099511627776
+    }'
+}
+
+# Group inputs by the parent dir of their normalized path.
+# Groups are ordered deepest-first (most path components first) so that children
+# are printed before their parent directories. Ties in depth preserve first-seen order.
+declare -a group_order=()
+declare -A group_seen=()
+_group_idx=0
+declare -a _group_sort_keys=()
+for p in "${inputs[@]}"; do
+    parent="$(dirname "${norm_of[$p]}")"
+    if [[ -z "${group_seen[$parent]+x}" ]]; then
+        group_seen[$parent]=1
+        local_depth="${parent//[^\/]/}"
+        # Sort key: depth descending (negated), then insertion index ascending for stability.
+        _group_sort_keys+=("$(printf '%010d\t%010d\t%s' "$((1000000 - ${#local_depth}))" "$_group_idx" "$parent")")
+        (( _group_idx++ )) || true
+    fi
+done
+while IFS=$'\t' read -r _ _ parent; do
+    group_order+=("$parent")
+done < <(printf '%s\n' "${_group_sort_keys[@]}" | sort -t$'\t' -k1,1n -k2,2n)
+
+# For each group: collect (size, original_path) pairs, sort by size ascending, print.
+for parent in "${group_order[@]}"; do
+    pair_lines=()
+    for p in "${inputs[@]}"; do
+        np="${norm_of[$p]}"
+        [[ "$(dirname "$np")" == "$parent" ]] || continue
+        sz="${size_map[$np]:-}"
+        if [[ -z "$sz" ]]; then
+            # Path not in scan (e.g. a file, or outside every scanned root); run du directly.
+            sz="$("$DU_BIN" -sk "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$np" 2>/dev/null | cut -f1)" || true
+            [[ -z "$sz" ]] && sz=0
+            echo "$prog: WARNING: $p not found in scan; ran du directly" >&2
+        fi
+        pair_lines+=("${sz}"$'\t'"${p}")
+    done
+
+    [[ ${#pair_lines[@]} -eq 0 ]] && continue
+
+    printf '%s\n' "${pair_lines[@]}" | sort -n -t$'\t' -k1 | \
+    while IFS=$'\t' read -r sz p; do
+        if $human_readable; then
+            printf '%s\t%s\n' "$(hr_size "$sz")" "$p"
+        else
+            printf '%s\t%s\n' "$sz" "$p"
+        fi
+    done
+done
