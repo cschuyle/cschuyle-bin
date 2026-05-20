@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
 # dus — disk usage for a list of paths, sorted by size ascending within each parent group.
 # Scans only the minimal set of root paths needed, then extracts sizes for each requested path.
+# Results are cached in ~/.dus/ and reused when directory mtimes have not changed.
 set -euo pipefail
 
 prog="$(basename "$0")"
 human_readable=false
 verbose=false
+no_cache=false
+clear_cache=false
 excludes=()
 
+DUS_CACHE_DIR="${DUS_CACHE_DIR:-$HOME/.dus}"
+
 print_usage() {
-    echo "Usage: $prog [-h] [-v] [--exclude <pattern>]... <path> [path ...]" >&2
-    echo "  -h              Human-readable sizes (B, K, M, G, T)" >&2
-    echo "  -v              Print each du command to stderr before running it" >&2
-    echo "  --exclude <pat> Exclude files/dirs matching glob pattern (repeatable)" >&2
+    echo "Usage: $prog [-h] [-v] [--no-cache] [-c] [--exclude <pattern>]... <path> [path ...]" >&2
+    echo "  -h                  Human-readable sizes (B, K, M, G, T)" >&2
+    echo "  -v                  Print each du command to stderr before running it" >&2
+    echo "  --no-cache          Skip reading and writing the cache for this run" >&2
+    echo "  -c/--clearcache/--clear  Delete all cached data and exit" >&2
+    echo "  --exclude <pat>     Exclude files/dirs matching glob pattern (repeatable)" >&2
 }
 usage() { print_usage; exit 1; }
 
@@ -21,6 +28,8 @@ while [[ $# -gt 0 ]]; do
         --help) print_usage; exit 0 ;;
         -h) human_readable=true; shift ;;
         -v) verbose=true; shift ;;
+        --no-cache) no_cache=true; shift ;;
+        -c|--clearcache|--clear) clear_cache=true; shift ;;
         --exclude)
             [[ $# -ge 2 ]] || { echo "$prog: --exclude requires a value" >&2; exit 1; }
             excludes+=("$2"); shift 2 ;;
@@ -30,6 +39,16 @@ while [[ $# -gt 0 ]]; do
         *) break ;;
     esac
 done
+
+if $clear_cache; then
+    if [[ -d "$DUS_CACHE_DIR" ]]; then
+        rm -rf "$DUS_CACHE_DIR"
+        echo "$prog: cleared cache: $DUS_CACHE_DIR" >&2
+    else
+        echo "$prog: no cache to clear: $DUS_CACHE_DIR" >&2
+    fi
+    exit 0
+fi
 
 [[ $# -eq 0 ]] && { echo "$prog: at least one path required" >&2; usage; }
 
@@ -52,14 +71,85 @@ is_proper_prefix() { [[ "$2" == "$1/"* ]]; }
 # Print command to stderr if -v is set.
 vlog() { $verbose && printf '+ %s\n' "$(printf '%q ' "$@")" >&2 || true; }
 
+# Portable directory mtime (seconds since epoch).
+_stat_mtime() {
+    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+}
+
+# Cache file path for a given root directory.
+_cache_path_for_root() {
+    local root="$1" hash
+    if command -v md5 >/dev/null 2>&1; then
+        hash="$(md5 -q -s "$root")"
+    else
+        hash="$(printf '%s' "$root" | md5sum | cut -c1-32)"
+    fi
+    printf '%s/%s.cache' "$DUS_CACHE_DIR" "$hash"
+}
+
+# Validate cache file and load into size_map. Returns 1 if stale/missing.
+# Each data line: size_kb TAB mtime_epoch TAB absolute_path
+_load_cache() {
+    local cache_file="$1"
+    [[ -f "$cache_file" ]] || return 1
+
+    declare -a _entries=()
+    local sz mtime path cur
+    while IFS=$'\t' read -r sz mtime path; do
+        [[ "$sz" == \#* ]] && continue          # skip comment lines
+        if [[ ! -e "$path" ]]; then return 1; fi # directory gone
+        cur="$(_stat_mtime "$path")" || true
+        [[ "$cur" == "$mtime" ]] || return 1    # mtime changed
+        _entries+=("$sz"$'\t'"$path")
+    done < "$cache_file"
+
+    for entry in "${_entries[@]+"${_entries[@]}"}"; do
+        IFS=$'\t' read -r sz path <<< "$entry"
+        size_map["$path"]="$sz"
+    done
+    return 0
+}
+
+# Scan root with du (no --exclude, so cache is exclude-agnostic), write cache,
+# then load results into size_map.
+_scan_and_cache() {
+    local root="$1" cache_file="$2"
+    local tmp_file="${cache_file}.tmp.$$"
+
+    mkdir -p "$DUS_CACHE_DIR"
+    vlog "$DU_BIN" -k "$root"
+    {
+        printf '# root: %s\n' "$root"
+        printf '# scanned: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')"
+        while IFS=$'\t' read -r sz rawpath; do
+            local path="${rawpath%/}"
+            local mtime
+            mtime="$(_stat_mtime "$path")" || mtime=0
+            printf '%s\t%s\t%s\n' "$sz" "$mtime" "$path"
+        done < <("$DU_BIN" -k "$root" 2>/dev/null)
+    } > "$tmp_file"
+    mv -- "$tmp_file" "$cache_file"
+
+    # Load from the written file into size_map.
+    while IFS=$'\t' read -r sz mtime path; do
+        [[ "$sz" == \#* ]] && continue
+        size_map["$path"]="$sz"
+    done < "$cache_file"
+}
+
 # Prefer GNU du (gdu from homebrew) for --exclude support on macOS.
 DU_BIN="du"
 command -v gdu >/dev/null 2>&1 && DU_BIN="gdu"
 
+# When caching is active we always scan without --exclude so the cache is
+# exclude-agnostic; exclusions are applied as a post-filter after loading.
+# Only use gdu --exclude when --no-cache is set (proper size exclusion, no cache).
 du_exclude_args=()
 use_postfilter=false
 if [[ ${#excludes[@]} -gt 0 ]]; then
-    if [[ "$DU_BIN" == "gdu" ]]; then
+    if ! $no_cache; then
+        use_postfilter=true
+    elif [[ "$DU_BIN" == "gdu" ]]; then
         for pat in "${excludes[@]}"; do du_exclude_args+=("--exclude=$pat"); done
     else
         echo "$prog: WARNING: GNU du (gdu) not available; --exclude filters by basename after scanning (sizes of excluded dirs still counted in parent totals)" >&2
@@ -94,24 +184,36 @@ for p in "${inputs[@]}"; do
     fi
 done
 
-# Scan each root with du (no -s so we get all subdirectory sizes), build path->size map.
+# Scan each root; use cache when available and valid, otherwise run du fresh.
 declare -A size_map=()
 for root in "${roots[@]}"; do
-    while IFS=$'\t' read -r sz rawpath; do
-        local_path="${rawpath%/}"
-        if $use_postfilter; then
-            bname="$(basename "$local_path")"
-            skip=false
-            for pat in "${excludes[@]}"; do
-                # shellcheck disable=SC2254
-                case "$bname" in $pat) skip=true; break ;; esac
-            done
-            $skip && continue
+    if $no_cache; then
+        vlog "$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root"
+        while IFS=$'\t' read -r sz rawpath; do
+            local_path="${rawpath%/}"
+            size_map["$local_path"]="$sz"
+        done < <("$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root" 2>/dev/null)
+    else
+        cache_file="$(_cache_path_for_root "$root")"
+        if _load_cache "$cache_file"; then
+            $verbose && printf '%s: cache HIT:  %s\n' "$prog" "$root" >&2 || true
+        else
+            $verbose && printf '%s: cache MISS: %s\n' "$prog" "$root" >&2 || true
+            _scan_and_cache "$root" "$cache_file"
         fi
-        size_map["$local_path"]="$sz"
-    vlog "$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root"
-    done < <("$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root" 2>/dev/null)
+    fi
 done
+
+# Apply post-filter: remove excluded entries from size_map by basename.
+if $use_postfilter; then
+    for path in "${!size_map[@]}"; do
+        bname="$(basename "$path")"
+        for pat in "${excludes[@]}"; do
+            # shellcheck disable=SC2254
+            case "$bname" in $pat) unset "size_map[$path]"; break ;; esac
+        done
+    done
+fi
 
 # Format 1K-block count as human-readable (B, K, M, G, T).
 hr_size() {
