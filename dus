@@ -111,6 +111,43 @@ _load_cache() {
     return 0
 }
 
+# Collect raw du output into caller's array variable (passed by name as $2).
+# Strips trailing slashes; skips blank lines.
+# Sets caller's variable $3 to du's own path for the root (the last output line),
+# which is used to rebase all paths to the canonical root.
+_du_collect() {
+    local _root="$1"
+    shift
+    # Remaining args ($@): extra du flags (e.g. --exclude=...), then the root.
+    # Caller passes extra flags first; we append _root at the end.
+    local _sz _rawp _arr_line
+    local -a _buf=()
+    while read -r _sz _rawp; do
+        [[ -z "$_rawp" ]] && continue
+        _rawp="${_rawp%/}"
+        [[ -z "$_rawp" ]] && continue
+        _buf+=("$_sz"$'\t'"$_rawp")
+    done < <("$DU_BIN" -k "$@" "$_root" 2>/dev/null)
+    # Export via global so callers (which may not be functions) can access.
+    _DU_RAW=("${_buf[@]+"${_buf[@]}"}")
+    _DU_ROOT_PATH=""
+    if [[ ${#_buf[@]} -gt 0 ]]; then
+        IFS=$'\t' read -r _ _DU_ROOT_PATH <<< "${_buf[$(( ${#_buf[@]} - 1 ))]}"
+    fi
+}
+
+# Rebase a single du path to the canonical root path.
+# Result stored in global _DU_REBASED_PATH.
+_du_rebase() {
+    local canonical_root="$1" rawp="$2" du_root_path="$3"
+    if [[ -n "$du_root_path" && \
+          ( "$rawp" == "$du_root_path" || "$rawp" == "$du_root_path/"* ) ]]; then
+        _DU_REBASED_PATH="${canonical_root}${rawp#$du_root_path}"
+    else
+        _DU_REBASED_PATH="$rawp"
+    fi
+}
+
 # Scan root with du (no --exclude, so cache is exclude-agnostic), write cache,
 # then load results into size_map.
 _scan_and_cache() {
@@ -119,17 +156,19 @@ _scan_and_cache() {
 
     mkdir -p "$DUS_CACHE_DIR"
     vlog "$DU_BIN" -k "$root"
+    _du_collect "$root"   # fills _DU_RAW and _DU_ROOT_PATH
+
     {
         printf '# root: %s\n' "$root"
         printf '# scanned: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')"
-        while read -r sz rawpath; do
-            [[ -z "$rawpath" ]] && continue          # skip blank/malformed lines
-            local path="${rawpath%/}"
-            [[ -z "$path" ]] && continue
-            local mtime
-            mtime="$(_stat_mtime "$path")" || mtime=0
-            printf '%s\t%s\t%s\n' "$sz" "$mtime" "$path"
-        done < <("$DU_BIN" -k "$root" 2>/dev/null)
+        local _entry _sz _rawp _mtime
+        for _entry in "${_DU_RAW[@]+"${_DU_RAW[@]}"}"; do
+            IFS=$'\t' read -r _sz _rawp <<< "$_entry"
+            _du_rebase "$root" "$_rawp" "$_DU_ROOT_PATH"
+            [[ -z "$_DU_REBASED_PATH" ]] && continue
+            _mtime="$(_stat_mtime "$_DU_REBASED_PATH")" || _mtime=0
+            printf '%s\t%s\t%s\n' "$_sz" "$_mtime" "$_DU_REBASED_PATH"
+        done
     } > "$tmp_file"
     mv -- "$tmp_file" "$cache_file"
 
@@ -193,12 +232,12 @@ declare -A size_map=()
 for root in "${roots[@]}"; do
     if $no_cache; then
         vlog "$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root"
-        while read -r sz rawpath; do
-            [[ -z "$rawpath" ]] && continue
-            local_path="${rawpath%/}"
-            [[ -z "$local_path" ]] && continue
-            size_map["$local_path"]="$sz"
-        done < <("$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root" 2>/dev/null)
+        _du_collect "$root" "${du_exclude_args[@]+"${du_exclude_args[@]}"}"
+        for _nc_entry in "${_DU_RAW[@]+"${_DU_RAW[@]}"}"; do
+            IFS=$'\t' read -r _nc_sz _nc_rawp <<< "$_nc_entry"
+            _du_rebase "$root" "$_nc_rawp" "$_DU_ROOT_PATH"
+            [[ -n "$_DU_REBASED_PATH" ]] && size_map["$_DU_REBASED_PATH"]="$_nc_sz"
+        done
     else
         cache_file="$(_cache_path_for_root "$root")"
         if _load_cache "$cache_file"; then
