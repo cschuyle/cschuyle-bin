@@ -71,10 +71,9 @@ is_proper_prefix() { [[ "$2" == "$1/"* ]]; }
 # Print command to stderr if -v is set.
 vlog() { $verbose && printf '+ %s\n' "$(printf '%q ' "$@")" >&2 || true; }
 
-# Portable directory mtime (seconds since epoch).
-_stat_mtime() {
-    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
-}
+# Prefer GNU du (gdu from homebrew) for --exclude support on macOS.
+DU_BIN="du"
+command -v gdu >/dev/null 2>&1 && DU_BIN="gdu"
 
 # Cache file path for a given root directory.
 _cache_path_for_root() {
@@ -88,21 +87,40 @@ _cache_path_for_root() {
 }
 
 # Validate cache file and load into size_map. Returns 1 if stale/missing.
-# Each data line: size_kb TAB mtime_epoch TAB absolute_path
+# Cache format: header lines (# root, # scanned, # dircount, # rootsize) then size TAB path rows.
 _load_cache() {
-    local cache_file="$1"
+    local cache_file="$1" root="" dircount="" rootsize="" sz path
     [[ -f "$cache_file" ]] || return 1
 
     declare -a _entries=()
-    local sz mtime path cur
-    while IFS=$'\t' read -r sz mtime path; do
-        [[ "$sz" == \#* ]] && continue          # skip comment lines
-        [[ -z "$path" ]] && return 1            # malformed cache
-        if [[ ! -e "$path" ]]; then return 1; fi # directory gone
-        cur="$(_stat_mtime "$path")" || true
-        [[ "$cur" == "$mtime" ]] || return 1    # mtime changed
-        _entries+=("$sz"$'\t'"$path")
+    while IFS= read -r line; do
+        case "$line" in
+            '# root:'*)     root="${line#*: }" ;;
+            '# dircount:'*) dircount="${line#*: }" ;;
+            '# rootsize:'*) rootsize="${line#*: }" ;;
+            '# '*)          ;;
+            '')
+                ;;
+            *)
+                IFS=$'\t' read -r sz path <<< "$line"
+                [[ -z "$path" ]] && return 1
+                _entries+=("$sz"$'\t'"$path")
+                ;;
+        esac
     done < "$cache_file"
+
+    [[ -n "$root" && -d "$root" ]] || return 1
+    [[ ${#_entries[@]} -gt 0 ]] || return 1
+
+    # Fast validation: compare directory count and root total size.
+    if [[ -n "$dircount" && -n "$rootsize" ]]; then
+        local cur_count cur_rootsize
+        cur_count="$(find "$root" -type d 2>/dev/null | wc -l | tr -d ' ')"
+        cur_rootsize="$("$DU_BIN" -sk "$root" 2>/dev/null | cut -f1)" || return 1
+        [[ "$cur_count" == "$dircount" && "$cur_rootsize" == "$rootsize" ]] || return 1
+    else
+        return 1
+    fi
 
     for entry in "${_entries[@]+"${_entries[@]}"}"; do
         IFS=$'\t' read -r sz path <<< "$entry"
@@ -111,24 +129,25 @@ _load_cache() {
     return 0
 }
 
-# Collect raw du output into caller's array variable (passed by name as $2).
-# Strips trailing slashes; skips blank lines.
-# Sets caller's variable $3 to du's own path for the root (the last output line),
-# which is used to rebase all paths to the canonical root.
+# Collect raw du output. Strips trailing slashes; skips blank lines.
+# Sets globals _DU_RAW and _DU_ROOT_PATH (du's path for the root, from last line).
 _du_collect() {
     local _root="$1"
     shift
-    # Remaining args ($@): extra du flags (e.g. --exclude=...), then the root.
-    # Caller passes extra flags first; we append _root at the end.
-    local _sz _rawp _arr_line
+    local _sz _rawp _n=0
     local -a _buf=()
+    $verbose && printf '%s: scanning %s...\n' "$prog" "$_root" >&2 || true
     while read -r _sz _rawp; do
         [[ -z "$_rawp" ]] && continue
         _rawp="${_rawp%/}"
         [[ -z "$_rawp" ]] && continue
         _buf+=("$_sz"$'\t'"$_rawp")
+        (( ++_n )) || true
+        if $verbose && ((_n % 500 == 0)); then
+            printf '\r%s: scanned %d directories...' "$prog" "$_n" >&2
+        fi
     done < <("$DU_BIN" -k "$@" "$_root" 2>/dev/null)
-    # Export via global so callers (which may not be functions) can access.
+    $verbose && printf '\r%s: scanned %d directories\n' "$prog" "$_n" >&2 || true
     _DU_RAW=("${_buf[@]+"${_buf[@]}"}")
     _DU_ROOT_PATH=""
     if [[ ${#_buf[@]} -gt 0 ]]; then
@@ -158,31 +177,32 @@ _scan_and_cache() {
     vlog "$DU_BIN" -k "$root"
     _du_collect "$root"   # fills _DU_RAW and _DU_ROOT_PATH
 
+    local _entry _sz _rawp _rootsize="" _dircount=0
+    declare -a _rebased=()
+    for _entry in "${_DU_RAW[@]+"${_DU_RAW[@]}"}"; do
+        IFS=$'\t' read -r _sz _rawp <<< "$_entry"
+        _du_rebase "$root" "$_rawp" "$_DU_ROOT_PATH"
+        [[ -z "$_DU_REBASED_PATH" ]] && continue
+        _rebased+=("$_sz"$'\t'"$_DU_REBASED_PATH")
+        size_map["$_DU_REBASED_PATH"]="$_sz"
+        if [[ "$_DU_REBASED_PATH" == "$root" ]]; then
+            _rootsize="$_sz"
+        fi
+    done
+    _dircount=${#_rebased[@]}
+
     {
         printf '# root: %s\n' "$root"
         printf '# scanned: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')"
-        local _entry _sz _rawp _mtime
-        for _entry in "${_DU_RAW[@]+"${_DU_RAW[@]}"}"; do
-            IFS=$'\t' read -r _sz _rawp <<< "$_entry"
-            _du_rebase "$root" "$_rawp" "$_DU_ROOT_PATH"
-            [[ -z "$_DU_REBASED_PATH" ]] && continue
-            _mtime="$(_stat_mtime "$_DU_REBASED_PATH")" || _mtime=0
-            printf '%s\t%s\t%s\n' "$_sz" "$_mtime" "$_DU_REBASED_PATH"
+        printf '# dircount: %s\n' "$_dircount"
+        printf '# rootsize: %s\n' "$_rootsize"
+        local _line
+        for _line in "${_rebased[@]+"${_rebased[@]}"}"; do
+            printf '%s\n' "$_line"
         done
     } > "$tmp_file"
     mv -- "$tmp_file" "$cache_file"
-
-    # Load from the written file into size_map.
-    while IFS=$'\t' read -r sz mtime path; do
-        [[ "$sz" == \#* ]] && continue
-        [[ -z "$path" ]] && continue
-        size_map["$path"]="$sz"
-    done < "$cache_file"
 }
-
-# Prefer GNU du (gdu from homebrew) for --exclude support on macOS.
-DU_BIN="du"
-command -v gdu >/dev/null 2>&1 && DU_BIN="gdu"
 
 # When caching is active we always scan without --exclude so the cache is
 # exclude-agnostic; exclusions are applied as a post-filter after loading.
