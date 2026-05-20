@@ -97,6 +97,7 @@ _load_cache() {
     local sz mtime path cur
     while IFS=$'\t' read -r sz mtime path; do
         [[ "$sz" == \#* ]] && continue          # skip comment lines
+        [[ -z "$path" ]] && return 1            # malformed cache
         if [[ ! -e "$path" ]]; then return 1; fi # directory gone
         cur="$(_stat_mtime "$path")" || true
         [[ "$cur" == "$mtime" ]] || return 1    # mtime changed
@@ -122,7 +123,9 @@ _scan_and_cache() {
         printf '# root: %s\n' "$root"
         printf '# scanned: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')"
         while read -r sz rawpath; do
+            [[ -z "$rawpath" ]] && continue          # skip blank/malformed lines
             local path="${rawpath%/}"
+            [[ -z "$path" ]] && continue
             local mtime
             mtime="$(_stat_mtime "$path")" || mtime=0
             printf '%s\t%s\t%s\n' "$sz" "$mtime" "$path"
@@ -133,6 +136,7 @@ _scan_and_cache() {
     # Load from the written file into size_map.
     while IFS=$'\t' read -r sz mtime path; do
         [[ "$sz" == \#* ]] && continue
+        [[ -z "$path" ]] && continue
         size_map["$path"]="$sz"
     done < "$cache_file"
 }
@@ -190,7 +194,9 @@ for root in "${roots[@]}"; do
     if $no_cache; then
         vlog "$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root"
         while read -r sz rawpath; do
+            [[ -z "$rawpath" ]] && continue
             local_path="${rawpath%/}"
+            [[ -z "$local_path" ]] && continue
             size_map["$local_path"]="$sz"
         done < <("$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root" 2>/dev/null)
     else
