@@ -184,9 +184,11 @@ build_tasks() {
   if [[ -f "$input" ]]; then
     echo "$input"
   elif [[ -n "${file_pattern:-}" ]]; then
-    find "$input" -type f -iname "$file_pattern" | sort -u
+    find "$input" \( -type d -name '@*' -prune \) -o \
+      \( -type f -not -name '._*' -iname "$file_pattern" -print \) | sort -u
   else
-    find "$input" -type f \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi" \) | sort -u
+    find "$input" \( -type d -name '@*' -prune \) -o \
+      \( -type f -not -name '._*' \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi" \) -print \) | sort -u
   fi
 }
 
