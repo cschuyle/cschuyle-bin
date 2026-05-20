@@ -259,24 +259,35 @@ for p in "${inputs[@]}"; do
     fi
 done
 
-# Sibling collapse: if every root shares the same parent, scan the parent once.
-if [[ ${#roots[@]} -gt 1 ]]; then
-    _common_parent="$(dirname "${roots[0]}")"
+# Resolve what still needs scanning. Use cached subtrees when available; only
+# collapse siblings to their parent when every sibling missed cache (e.g. video/*).
+declare -A size_map=()
+declare -a to_scan=()
+for root in "${roots[@]}"; do
+    if $no_cache; then
+        to_scan+=("$root")
+    elif _try_load_ancestor_cache "$root"; then
+        :
+    else
+        to_scan+=("$root")
+    fi
+done
+
+if [[ ${#to_scan[@]} -gt 1 && ${#to_scan[@]} -eq ${#roots[@]} ]]; then
+    _common_parent="$(dirname "${to_scan[0]}")"
     _all_same_parent=true
-    for r in "${roots[@]}"; do
+    for r in "${to_scan[@]}"; do
         if [[ "$(dirname "$r")" != "$_common_parent" ]]; then
             _all_same_parent=false
             break
         fi
     done
     if $_all_same_parent; then
-        roots=("$_common_parent")
+        to_scan=("$_common_parent")
     fi
 fi
 
-# Scan each root; use cache when available and valid, otherwise run du fresh.
-declare -A size_map=()
-for root in "${roots[@]}"; do
+for root in "${to_scan[@]}"; do
     if $no_cache; then
         vlog "$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root"
         _du_collect "$root" "${du_exclude_args[@]+"${du_exclude_args[@]}"}"
@@ -286,13 +297,9 @@ for root in "${roots[@]}"; do
             [[ -n "$_DU_REBASED_PATH" ]] && size_map["$_DU_REBASED_PATH"]="$_nc_sz"
         done
     else
-        if _try_load_ancestor_cache "$root"; then
-            :
-        else
-            $verbose && printf '%s: cache MISS: %s\n' "$prog" "$root" >&2 || true
-            cache_file="$(_cache_path_for_root "$root")"
-            _scan_and_cache "$root" "$cache_file"
-        fi
+        $verbose && printf '%s: cache MISS: %s\n' "$prog" "$root" >&2 || true
+        cache_file="$(_cache_path_for_root "$root")"
+        _scan_and_cache "$root" "$cache_file"
     fi
 done
 
