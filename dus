@@ -5,11 +5,13 @@ set -euo pipefail
 
 prog="$(basename "$0")"
 human_readable=false
+verbose=false
 excludes=()
 
 print_usage() {
-    echo "Usage: $prog [-h] [--exclude <pattern>]... <path> [path ...]" >&2
+    echo "Usage: $prog [-h] [-v] [--exclude <pattern>]... <path> [path ...]" >&2
     echo "  -h              Human-readable sizes (B, K, M, G, T)" >&2
+    echo "  -v              Print each du command to stderr before running it" >&2
     echo "  --exclude <pat> Exclude files/dirs matching glob pattern (repeatable)" >&2
 }
 usage() { print_usage; exit 1; }
@@ -18,6 +20,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --help) print_usage; exit 0 ;;
         -h) human_readable=true; shift ;;
+        -v) verbose=true; shift ;;
         --exclude)
             [[ $# -ge 2 ]] || { echo "$prog: --exclude requires a value" >&2; exit 1; }
             excludes+=("$2"); shift 2 ;;
@@ -45,6 +48,9 @@ normalize_path() {
 
 # True if $1 is a strict path prefix of $2 (i.e. $2 is inside $1).
 is_proper_prefix() { [[ "$2" == "$1/"* ]]; }
+
+# Print command to stderr if -v is set.
+vlog() { $verbose && printf '+ %s\n' "$(printf '%q ' "$@")" >&2 || true; }
 
 # Prefer GNU du (gdu from homebrew) for --exclude support on macOS.
 DU_BIN="du"
@@ -103,6 +109,7 @@ for root in "${roots[@]}"; do
             $skip && continue
         fi
         size_map["$local_path"]="$sz"
+    vlog "$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root"
     done < <("$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root" 2>/dev/null)
 done
 
@@ -148,6 +155,7 @@ for parent in "${group_order[@]}"; do
         sz="${size_map[$np]:-}"
         if [[ -z "$sz" ]]; then
             # Path not in scan (e.g. a file, or outside every scanned root); run du directly.
+            vlog "$DU_BIN" -sk "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$np"
             sz="$("$DU_BIN" -sk "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$np" 2>/dev/null | cut -f1)" || true
             [[ -z "$sz" ]] && sz=0
             echo "$prog: WARNING: $p not found in scan; ran du directly" >&2
