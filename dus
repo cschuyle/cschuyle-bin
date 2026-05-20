@@ -121,7 +121,7 @@ _scan_and_cache() {
     {
         printf '# root: %s\n' "$root"
         printf '# scanned: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')"
-        while IFS=$'\t' read -r sz rawpath; do
+        while read -r sz rawpath; do
             local path="${rawpath%/}"
             local mtime
             mtime="$(_stat_mtime "$path")" || mtime=0
@@ -189,7 +189,7 @@ declare -A size_map=()
 for root in "${roots[@]}"; do
     if $no_cache; then
         vlog "$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root"
-        while IFS=$'\t' read -r sz rawpath; do
+        while read -r sz rawpath; do
             local_path="${rawpath%/}"
             size_map["$local_path"]="$sz"
         done < <("$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root" 2>/dev/null)
