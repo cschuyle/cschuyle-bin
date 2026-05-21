@@ -17,7 +17,7 @@ DUS_CACHE_DIR="${DUS_CACHE_DIR:-$HOME/.dus}"
 print_usage() {
     echo "Usage: $prog [-h] [-v] [--no-cache] [--refresh] [-c] [--exclude <pattern>]... <path> [path ...]" >&2
     echo "  -h                  Human-readable sizes (B, K, M, G, T)" >&2
-    echo "  -v                  Print each du command to stderr before running it" >&2
+    echo "  -v                  Verbose: du commands, cache decisions, and timing on stderr" >&2
     echo "  --no-cache          Skip reading and writing the cache for this run" >&2
     echo "  --refresh           Ignore cache and rescan (still updates cache)" >&2
     echo "  -c/--clearcache/--clear  Delete all cached data and exit" >&2
@@ -76,7 +76,12 @@ normalize_path() {
 is_proper_prefix() { [[ "$2" == "$1/"* ]]; }
 
 # Print command to stderr if -v is set.
-vlog() { $verbose && printf '+ %s\n' "$(printf '%q ' "$@")" >&2 || true; }
+_dus_vlog() { $verbose && printf '%s: %s +%ds %s\n' "$prog" "$(date '+%Y-%m-%dT%H:%M:%S')" "$(( SECONDS - _dus_t0 ))" "$*" >&2 || true; }
+vlog() { $verbose && _dus_vlog "+ $(printf '%q ' "$@")" || true; }
+
+# Elapsed-time stage log (bash SECONDS); no-op unless -v.
+_dus_t0=0
+_dus_vstage() { _dus_vlog "$@"; }
 
 # Format 1K-block count as human-readable (B, K, M, G, T); pure bash (no awk).
 hr_size() {
@@ -174,11 +179,13 @@ _purge_cache_entries_for_root() {
 # True when a direct child has its own newer cache with a different size.
 _stale_vs_child_caches() {
     local np="$1" parent_scanned="$2"
-    local child nchild cf cscanned csize psize
+    local child nchild cf cscanned csize psize _n=0
     [[ -n "$parent_scanned" && -d "$np" ]] || return 1
+    $verbose && _dus_vstage "stale check: scanning child caches under $(basename "$np")"
     for child in "$np"/* "$np"/.[!.]* "$np"/..?*; do
         [[ -e "$child" ]] || continue
         [[ -d "$child" ]] || continue
+        (( ++_n )) || true
         nchild="$(normalize_path "$child")"
         cf="$(_cache_path_for_root "$nchild")"
         [[ -f "$cf" ]] || continue
@@ -186,8 +193,12 @@ _stale_vs_child_caches() {
         [[ "$cscanned" > "$parent_scanned" ]] || continue
         csize="$(_cache_header_field "$cf" rootsize)" || continue
         psize="$(_lookup_size "$nchild" || true)"
-        [[ -z "$psize" || "$csize" != "$psize" ]] && return 0
+        if [[ -z "$psize" || "$csize" != "$psize" ]]; then
+            $verbose && _dus_vstage "stale: newer child cache $(basename "$nchild") (child=$csize parent_map=${psize:-missing})"
+            return 0
+        fi
     done
+    $verbose && _dus_vstage "stale check: $(_n) dirs, no newer child cache"
     return 1
 }
 
@@ -217,7 +228,11 @@ _is_cache_stale() {
     if _stale_vs_child_caches "$np" "$scanned"; then
         return 0
     fi
-    _oversized_same_fs_child "$np" "$rsz"
+    if _oversized_same_fs_child "$np" "$rsz"; then
+        $verbose && _dus_vstage "stale: same-fs child larger than root for $(basename "$np")"
+        return 0
+    fi
+    return 1
 }
 
 # True when an oversized direct child sits on a different filesystem (mount).
@@ -241,8 +256,10 @@ _has_cross_fs_oversized_child() {
 # Load cache into size_map. Optional 2nd arg: only direct children of that root.
 _load_cache() {
     local cache_file="$1" filter_root="${2:-}" root="" sz path rest
+    local _lines=0 _kept=0 _t=$SECONDS
     [[ -f "$cache_file" ]] || return 1
     [[ -n "$filter_root" ]] && filter_root="$(normalize_path "$filter_root")"
+    $verbose && _dus_vstage "cache read: ${cache_file##*/}${filter_root:+ (direct children of $(basename "$filter_root"))}"
 
     while IFS= read -r line; do
         case "$line" in
@@ -251,6 +268,7 @@ _load_cache() {
             '')
                 ;;
             *)
+                (( ++_lines )) || true
                 IFS=$'\t' read -r sz path <<< "$line"
                 [[ -z "$path" ]] && return 1
                 if [[ -n "$filter_root" ]]; then
@@ -265,12 +283,14 @@ _load_cache() {
                     fi
                 fi
                 size_map["$path"]="$sz"
+                (( ++_kept )) || true
                 ;;
         esac
     done < "$cache_file"
 
     [[ -n "$root" && -d "$root" ]] || return 1
     [[ ${#size_map[@]} -gt 0 ]] || return 1
+    $verbose && _dus_vstage "cache read done: ${_lines} data lines, ${_kept} kept, ${#size_map[@]} in map, $(( SECONDS - _t ))s"
     return 0
 }
 
@@ -339,20 +359,21 @@ _try_load_exact_cache() {
     fi
 
     $refresh_cache && return 1
+    $verbose && _dus_vstage "cache load full: $(basename "$np")"
     _load_cache "$cf" || return 1
     _lookup_size "$np" >/dev/null || return 1
     if _is_cache_stale "$np" "$cf"; then
-        $verbose && printf '%s: cache STALE: %s\n' "$prog" "$np" >&2 || true
+        _dus_vlog "cache STALE: $np"
         _purge_cache_entries_for_root "$np"
         return 1
     fi
-    $verbose && printf '%s: cache HIT:  %s\n' "$prog" "$np" >&2 || true
+    _dus_vlog "cache HIT:  $np"
     return 0
 }
 
 # If np has its own newer cache than the parent, use its rootsize (header only).
 _maybe_upgrade_from_child_cache() {
-    local np="$1" cf pcf pscanned cscanned csize
+    local np="$1" cf pcf pscanned cscanned csize oldsize
     cf="$(_cache_path_for_root "$np")"
     [[ -f "$cf" ]] || return 0
     pcf="$(_cache_path_for_root "$(dirname "$np")")"
@@ -361,7 +382,9 @@ _maybe_upgrade_from_child_cache() {
     cscanned="$(_cache_header_field "$cf" scanned)" || return 0
     [[ "$cscanned" > "$pscanned" ]] || return 0
     csize="$(_cache_header_field "$cf" rootsize)" || return 0
+    oldsize="$(_lookup_size "$np" || true)"
     size_map["$np"]="$csize"
+    $verbose && _dus_vstage "upgraded $(basename "$np") from child cache: ${oldsize:-?} -> $csize"
 }
 
 # Try to load a cache covering np. Returns 0 if np is in size_map afterward.
@@ -377,8 +400,9 @@ _try_load_ancestor_cache() {
             local load_filter=""
             [[ -n "$direct_only" && "$dir" == "$direct_only" ]] && load_filter="$direct_only"
             if _load_cache "$cf" "$load_filter"; then
-                $verbose && printf '%s: cache HIT:  %s\n' "$prog" "$dir" >&2 || true
+                _dus_vlog "cache HIT:  $dir"
                 _lookup_size "$np" >/dev/null && return 0
+                $verbose && _dus_vstage "ancestor cache loaded $dir but $(basename "$np") not in map"
             fi
         fi
         [[ "$dir" == "/" ]] && break
@@ -394,7 +418,7 @@ _du_collect() {
     shift
     local _sz _rawp _n=0
     local -a _buf=()
-    $verbose && printf '%s: scanning %s...\n' "$prog" "$_root" >&2 || true
+    $verbose && _dus_vlog "scanning $_root..."
     while read -r _sz _rawp; do
         [[ -z "$_rawp" ]] && continue
         _rawp="${_rawp%/}"
@@ -402,10 +426,10 @@ _du_collect() {
         _buf+=("$_sz"$'\t'"$_rawp")
         (( ++_n )) || true
         if $verbose && ((_n % 500 == 0)); then
-            printf '\r%s: scanned %d directories...' "$prog" "$_n" >&2
+            printf '\r%s: %s +%ds scanned %d directories...' "$prog" "$(date '+%Y-%m-%dT%H:%M:%S')" "$(( SECONDS - _dus_t0 ))" "$_n" >&2
         fi
     done < <("$DU_BIN" -k "$@" "$_root" 2>/dev/null)
-    $verbose && printf '\r%s: scanned %d directories\n' "$prog" "$_n" >&2 || true
+    $verbose && _dus_vlog "scanned $_n directories"
     _DU_RAW=("${_buf[@]+"${_buf[@]}"}")
     _DU_ROOT_PATH=""
     local _entry _sz _rawp
@@ -485,12 +509,14 @@ if [[ ${#excludes[@]} -gt 0 ]]; then
 fi
 
 # Normalize all input paths.
+$verbose && { _dus_t0=$SECONDS; _dus_vstage "start"; }
 declare -a inputs=()
 declare -A norm_of=()
 for p in "$@"; do
     inputs+=("$p")
     norm_of["$p"]="$(normalize_path "$p")"
 done
+$verbose && _dus_vstage "normalized ${#inputs[@]} input path(s)"
 
 # Find the minimal set of root paths to scan: a path is a root if no other
 # input is a proper prefix of it (so we don't scan any subtree more than once).
@@ -510,9 +536,11 @@ for p in "${inputs[@]}"; do
         root_seen[$np]=1
     fi
 done
+$verbose && _dus_vstage "${#roots[@]} scan root(s)"
 
 declare -A size_map=()
 _sib_parent=""
+_dus_sibling_listing=false
 
 # When all inputs are siblings (e.g. dus *), prefetch the parent directory cache
 # created by an earlier "dus ." in the same directory.
@@ -526,6 +554,8 @@ if [[ ${#inputs[@]} -gt 1 ]] && ! $no_cache && ! $refresh_cache; then
         fi
     done
     if $_all_share_parent; then
+        _dus_sibling_listing=true
+        $verbose && _dus_vstage "sibling prefetch from $(basename "$_sib_parent")"
         _try_load_ancestor_cache "$_sib_parent" "$_sib_parent" || true
     fi
 fi
@@ -533,15 +563,24 @@ fi
 # Resolve what still needs scanning. Use cached subtrees when available; only
 # collapse siblings to their parent when every sibling missed cache (e.g. video/*).
 declare -a to_scan=()
+_dus_v_resolve=0 _dus_v_map_hits=0
 for root in "${roots[@]}"; do
+    (( ++_dus_v_resolve )) || true
     if $no_cache; then
         to_scan+=("$root")
+    elif _lookup_size "$root" >/dev/null; then
+        (( ++_dus_v_map_hits )) || true
+        _maybe_upgrade_from_child_cache "$root"
     elif _try_load_exact_cache "$root"; then
         :
     else
         to_scan+=("$root")
     fi
+    if $verbose && ((_dus_v_resolve % 100 == 0)); then
+        _dus_vstage "resolve progress: $_dus_v_resolve/${#roots[@]} roots, ${#to_scan[@]} to scan, ${#size_map[@]} in map"
+    fi
 done
+$verbose && _dus_vstage "resolve done: $_dus_v_map_hits map hits, ${#to_scan[@]} to scan, ${#size_map[@]} in map"
 
 if [[ ${#to_scan[@]} -gt 1 && ${#to_scan[@]} -eq ${#roots[@]} ]]; then
     _common_parent="$(dirname "${to_scan[0]}")"
@@ -556,6 +595,7 @@ if [[ ${#to_scan[@]} -gt 1 && ${#to_scan[@]} -eq ${#roots[@]} ]]; then
         _parent_cf="$(_cache_path_for_root "$_common_parent")"
         if [[ -f "$_parent_cf" ]]; then
             # Parent was scanned by "dus ."; read direct-child rows only — never rescan.
+            $verbose && _dus_vstage "retry parent cache for ${#to_scan[@]} missing sibling(s)"
             _load_cache "$_parent_cf" "$_common_parent" || true
             declare -a _still_missing=()
             for r in "${to_scan[@]}"; do
@@ -572,6 +612,10 @@ if [[ ${#to_scan[@]} -gt 1 && ${#to_scan[@]} -eq ${#roots[@]} ]]; then
     fi
 fi
 
+if [[ ${#to_scan[@]} -gt 0 ]]; then
+    $verbose && _dus_vstage "scanning ${#to_scan[@]} root(s): ${to_scan[*]##*/}"
+fi
+
 for root in "${to_scan[@]}"; do
     if $no_cache; then
         vlog "$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root"
@@ -582,7 +626,7 @@ for root in "${to_scan[@]}"; do
             [[ -n "$_DU_REBASED_PATH" ]] && size_map["$_DU_REBASED_PATH"]="$_nc_sz"
         done
     else
-        $verbose && printf '%s: cache MISS: %s\n' "$prog" "$root" >&2 || true
+        _dus_vlog "cache MISS: $root"
         cache_file="$(_cache_path_for_root "$root")"
         _scan_and_cache "$root" "$cache_file"
     fi
@@ -630,28 +674,47 @@ while IFS=$'\t' read -r _ _ parent; do
 done < <(_dus_order_lines "${_group_sort_keys[@]+"${_group_sort_keys[@]}"}")
 
 # For each group: collect (size, original_path) pairs, sort by size ascending, print.
+_dus_v_out=0 _dus_v_du_fallback=0
+$verbose && _dus_vstage "output: ${#inputs[@]} path(s), ${#size_map[@]} in map"
 for parent in "${group_order[@]}"; do
     pair_lines=()
     for p in "${inputs[@]}"; do
         np="${norm_of[$p]}"
         [[ "$(dirname "$np")" == "$parent" ]] || continue
+        (( ++_dus_v_out )) || true
         sz="$(_lookup_size "$np" || true)"
         if [[ -z "$sz" && -d "$np" ]]; then
+            $verbose && _dus_vstage "output miss: $p — trying parent cache"
             _try_load_ancestor_cache "$np" "$(dirname "$np")" || true
             sz="$(_lookup_size "$np" || true)"
         fi
         if [[ -z "$sz" ]]; then
+            (( ++_dus_v_du_fallback )) || true
             vlog "$DU_BIN" -sk "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$np"
             sz="$("$DU_BIN" -sk "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$np" 2>/dev/null | cut -f1)" || true
             [[ -z "$sz" ]] && sz=0
             echo "$prog: WARNING: $p not found in cache; ran du directly" >&2
         fi
-        if [[ -d "$np" && "$(_max_direct_child_size "$np")" -eq 0 ]]; then
-            _cf="$(_cache_path_for_root "$np")"
-            [[ -f "$_cf" ]] && _load_cache "$_cf" "$np" || true
+        # Sibling listings (dus *) already have authoritative sizes from parent cache;
+        # skip per-entry child-cache loads used only for mount reconciliation.
+        if ! $_dus_sibling_listing || [[ "$(dirname "$np")" != "$_sib_parent" || -z "$sz" ]]; then
+            if [[ -d "$np" && "$(_max_direct_child_size "$np")" -eq 0 ]]; then
+                _cf="$(_cache_path_for_root "$np")"
+                if [[ -f "$_cf" ]]; then
+                    $verbose && _dus_vstage "output: loading direct children of $(basename "$np")"
+                    _load_cache "$_cf" "$np" || true
+                fi
+            fi
+            _sz_before="$sz"
+            sz="$(_reconcile_dir_size "$np" "$sz")"
+            [[ "$sz" != "$_sz_before" ]] && $verbose && _dus_vstage "output: reconciled $p $_sz_before -> $sz"
+        else
+            $verbose && _dus_vstage "output: using parent cache size for $(basename "$np")"
         fi
-        sz="$(_reconcile_dir_size "$np" "$sz")"
         pair_lines+=("${sz}"$'\t'"${p}")
+        if $verbose && ((_dus_v_out % 100 == 0)); then
+            _dus_vstage "output progress: $_dus_v_out path(s), $_dus_v_du_fallback du fallback(s)"
+        fi
     done
 
     [[ ${#pair_lines[@]} -eq 0 ]] && continue
@@ -687,3 +750,4 @@ for parent in "${group_order[@]}"; do
         fi
     done
 done
+$verbose && _dus_vstage "done: $_dus_v_out output, $_dus_v_du_fallback du fallback(s)"
