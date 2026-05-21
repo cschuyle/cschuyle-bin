@@ -81,7 +81,21 @@ vlog() { $verbose && _dus_vlog "+ $(printf '%q ' "$@")" || true; }
 
 # Elapsed-time stage log (bash SECONDS); no-op unless -v.
 _dus_t0=0
-_dus_vstage() { _dus_vlog "$@"; }
+_dus_vstage() { $verbose && _dus_vlog "$@" || true; }
+
+# One-line run status on stderr (always, not only -v).
+_dus_status_printed=false
+_dus_print_run_status() {
+    if $_dus_status_printed; then
+        return 0
+    fi
+    _dus_status_printed=true
+    if [[ ${#to_scan[@]} -eq 0 ]]; then
+        printf '%s: ALL DATA IS CACHED\n' "$prog" >&2
+    else
+        printf '%s: HOLD ON, SCANNING DIRECTORIES\n' "$prog" >&2
+    fi
+}
 
 # Format 1K-block count as human-readable (B, K, M, G, T); pure bash (no awk).
 hr_size() {
@@ -198,7 +212,7 @@ _stale_vs_child_caches() {
             return 0
         fi
     done
-    $verbose && _dus_vstage "stale check: $(_n) dirs, no newer child cache"
+    $verbose && _dus_vstage "stale check: ${_n} dirs, no newer child cache"
     return 1
 }
 
@@ -509,7 +523,12 @@ if [[ ${#excludes[@]} -gt 0 ]]; then
 fi
 
 # Normalize all input paths.
-$verbose && { _dus_t0=$SECONDS; _dus_vstage "start"; }
+_dus_t0=$SECONDS
+if $no_cache || $refresh_cache; then
+    printf '%s: HOLD ON, SCANNING DIRECTORIES\n' "$prog" >&2
+    _dus_status_printed=true
+fi
+$verbose && _dus_vstage "start"
 declare -a inputs=()
 declare -A norm_of=()
 for p in "$@"; do
@@ -612,6 +631,8 @@ if [[ ${#to_scan[@]} -gt 1 && ${#to_scan[@]} -eq ${#roots[@]} ]]; then
     fi
 fi
 
+_dus_print_run_status
+
 if [[ ${#to_scan[@]} -gt 0 ]]; then
     $verbose && _dus_vstage "scanning ${#to_scan[@]} root(s): ${to_scan[*]##*/}"
 fi
@@ -707,7 +728,9 @@ for parent in "${group_order[@]}"; do
             fi
             _sz_before="$sz"
             sz="$(_reconcile_dir_size "$np" "$sz")"
-            [[ "$sz" != "$_sz_before" ]] && $verbose && _dus_vstage "output: reconciled $p $_sz_before -> $sz"
+            if [[ "$sz" != "$_sz_before" ]]; then
+                $verbose && _dus_vstage "output: reconciled $p $_sz_before -> $sz"
+            fi
         else
             $verbose && _dus_vstage "output: using parent cache size for $(basename "$np")"
         fi
@@ -750,4 +773,5 @@ for parent in "${group_order[@]}"; do
         fi
     done
 done
-$verbose && _dus_vstage "done: $_dus_v_out output, $_dus_v_du_fallback du fallback(s)"
+$verbose && _dus_vstage "done: $_dus_v_out output, $_dus_v_du_fallback du fallback(s)" || true
+true
