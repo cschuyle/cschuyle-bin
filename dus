@@ -909,7 +909,9 @@ for parent in "${group_order[@]}"; do
             vlog "$DU_BIN" -sk "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$np"
             sz="$("$DU_BIN" -sk "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$np" 2>/dev/null | cut -f1)" || true
             [[ -z "$sz" ]] && sz=0
-            echo "$prog: WARNING: $p not found in cache; ran du directly" >&2
+            if [[ -d "$np" ]]; then
+                echo "$prog: WARNING: $p not found in cache; ran du directly" >&2
+            fi
         fi
         # Sibling listings (dus *) already have authoritative sizes from parent cache;
         # skip per-entry child-cache loads used only for mount reconciliation.
