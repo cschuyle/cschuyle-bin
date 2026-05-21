@@ -190,6 +190,58 @@ _cache_dircount_estimate() {
     printf '%s' "$n"
 }
 
+# Recursive directory count for a path (cache header, else entries in size_map).
+_dircount_lines_in_cache() {
+    local cache_file="$1" np="$2" line path cnt=0
+    [[ -f "$cache_file" ]] || { printf '0'; return; }
+    np="$(normalize_path "$np")"
+    while IFS= read -r line; do
+        case "$line" in
+            '# '*|'') ;;
+            *)
+                IFS=$'\t' read -r _ path <<< "$line"
+                [[ -z "$path" ]] && continue
+                path="$(normalize_path "$path")"
+                [[ "$path" == "$np" || "$path" == "$np/"* ]] || continue
+                (( ++cnt )) || true
+                ;;
+        esac
+    done < "$cache_file"
+    printf '%s' "$cnt"
+}
+
+_dircount_for_path() {
+    local np="$1" cf n path cnt=0 pcf
+    [[ -d "$np" ]] || { printf '0'; return; }
+    np="$(normalize_path "$np")"
+    cf="$(_cache_path_for_root "$np")"
+    if [[ -f "$cf" ]]; then
+        n="$(_cache_header_field "$cf" dircount)" || true
+        if [[ "$n" =~ ^[0-9]+$ ]]; then
+            printf '%s' "$n"
+            return
+        fi
+    fi
+    for path in "${!size_map[@]}"; do
+        [[ "$path" == "$np" || "$path" == "$np/"* ]] || continue
+        (( ++cnt )) || true
+    done
+    if (( cnt > 1 )); then
+        printf '%s' "$cnt"
+        return
+    fi
+    if [[ -f "$cf" ]]; then
+        printf '%s' "$(_dircount_lines_in_cache "$cf" "$np")"
+        return
+    fi
+    pcf="$(_cache_path_for_root "$(dirname "$np")")"
+    if [[ -f "$pcf" ]]; then
+        printf '%s' "$(_dircount_lines_in_cache "$pcf" "$np")"
+        return
+    fi
+    printf '%s' "$cnt"
+}
+
 # Short label for progress (basename of scan root or current du path).
 _dus_progress_label() {
     local p="${1%/}"
@@ -838,15 +890,14 @@ done < <(_dus_order_lines "${_group_sort_keys[@]+"${_group_sort_keys[@]}"}")
 
 # For each group: collect (size, original_path) pairs, sort by size ascending, print.
 _dus_v_out=0 _dus_v_du_fallback=0 _dus_out_total=${#inputs[@]}
-_dus_status "preparing output (${_dus_out_total} path(s), ${#size_map[@]} cached entries)..."
-$verbose && _dus_vstage "output: ${_dus_out_total} path(s), ${#size_map[@]} in map"
+$verbose && _dus_vstage "preparing output (${_dus_out_total} path(s), ${#size_map[@]} cached entries)..."
 for parent in "${group_order[@]}"; do
     pair_lines=()
     for p in "${inputs[@]}"; do
         np="${norm_of[$p]}"
         [[ "$(dirname "$np")" == "$parent" ]] || continue
         (( ++_dus_v_out )) || true
-        _dus_status "output ${_dus_v_out}/${_dus_out_total}: $(_dus_progress_label "$p")..."
+        $verbose && _dus_vstage "output ${_dus_v_out}/${_dus_out_total}: $(_dus_progress_label "$p")..."
         sz="$(_lookup_size "$np" || true)"
         if [[ -z "$sz" && -d "$np" ]]; then
             $verbose && _dus_vstage "output miss: $p — trying parent cache"
@@ -880,7 +931,7 @@ for parent in "${group_order[@]}"; do
         else
             $verbose && _dus_vstage "output: using parent cache size for $(basename "$np")"
         fi
-        pair_lines+=("${sz}"$'\t'"${p}")
+        pair_lines+=("${sz}"$'\t'"$(_dircount_for_path "$np")"$'\t'"${p}")
         if $verbose && ((_dus_v_out % 100 == 0)); then
             _dus_vstage "output progress: $_dus_v_out path(s), $_dus_v_du_fallback du fallback(s)"
         fi
@@ -888,11 +939,12 @@ for parent in "${group_order[@]}"; do
 
     [[ ${#pair_lines[@]} -eq 0 ]] && continue
 
-    declare -a _szs=() _paths=()
-    _line="" _sz="" _p="" _i=0 _j=0 _min=0 _tmp_sz="" _tmp_p=""
+    declare -a _szs=() _dcs=() _paths=()
+    _line="" _sz="" _dc="" _p="" _i=0 _j=0 _min=0 _tmp_sz="" _tmp_dc="" _tmp_p=""
     for _line in "${pair_lines[@]}"; do
-        IFS=$'\t' read -r _sz _p <<< "$_line"
+        IFS=$'\t' read -r _sz _dc _p <<< "$_line"
         _szs+=("$_sz")
+        _dcs+=("$_dc")
         _paths+=("$_p")
     done
     for ((_i = 0; _i < ${#_szs[@]}; _i++)); do
@@ -906,6 +958,9 @@ for parent in "${group_order[@]}"; do
             _tmp_sz="${_szs[_i]}"
             _szs[_i]="${_szs[_min]}"
             _szs[_min]="$_tmp_sz"
+            _tmp_dc="${_dcs[_i]}"
+            _dcs[_i]="${_dcs[_min]}"
+            _dcs[_min]="$_tmp_dc"
             _tmp_p="${_paths[_i]}"
             _paths[_i]="${_paths[_min]}"
             _paths[_min]="$_tmp_p"
@@ -913,9 +968,9 @@ for parent in "${group_order[@]}"; do
     done
     for ((_i = 0; _i < ${#_szs[@]}; _i++)); do
         if $human_readable; then
-            printf '%s\t%s\n' "$(hr_size "${_szs[_i]}")" "${_paths[_i]}"
+            printf '%s\t%s\t%s\n' "$(hr_size "${_szs[_i]}")" "${_dcs[_i]}" "${_paths[_i]}"
         else
-            printf '%s\t%s\n' "${_szs[_i]}" "${_paths[_i]}"
+            printf '%s\t%s\t%s\n' "${_szs[_i]}" "${_dcs[_i]}" "${_paths[_i]}"
         fi
     done
 done
