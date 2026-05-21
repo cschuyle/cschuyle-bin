@@ -85,6 +85,18 @@ _dus_vstage() { $verbose && _dus_vlog "$@" || true; }
 
 # One-line run status on stderr (always, not only -v).
 _dus_status_printed=false
+_dus_sibling_listing=false
+_sib_parent=""
+
+_dus_early_feedback() {
+    if $no_cache || $refresh_cache; then
+        printf '%s: HOLD ON, SCANNING DIRECTORIES\n' "$prog" >&2
+        _dus_status_printed=true
+    else
+        printf '%s: READING CACHE...\n' "$prog" >&2
+    fi
+}
+
 _dus_print_run_status() {
     if $_dus_status_printed; then
         return 0
@@ -315,6 +327,10 @@ _lookup_size() {
         printf '%s' "${size_map[$np]}"
         return 0
     fi
+    # Prefetched siblings should hit exactly; avoid O(n) scan over a huge map.
+    if $_dus_sibling_listing && [[ -n "$_sib_parent" && "$(dirname "$np")" == "$_sib_parent" ]]; then
+        return 1
+    fi
     local parent="${np%/*}" base="${np##*/}" key
     for key in "${!size_map[@]}"; do
         [[ "$(basename "$key")" == "$base" && "${key%/$base}" == "$parent" ]] || continue
@@ -366,9 +382,11 @@ _reconcile_dir_size() {
 _try_load_exact_cache() {
     local np="$1" cf="$(_cache_path_for_root "$np")"
 
+    [[ -d "$np" ]] || return 1
+
     # Already satisfied (e.g. sibling prefetch from parent cache).
     if _lookup_size "$np" >/dev/null; then
-        _maybe_upgrade_from_child_cache "$np"
+        ! $_dus_sibling_listing && _maybe_upgrade_from_child_cache "$np"
         return 0
     fi
 
@@ -388,6 +406,7 @@ _try_load_exact_cache() {
 # If np has its own newer cache than the parent, use its rootsize (header only).
 _maybe_upgrade_from_child_cache() {
     local np="$1" cf pcf pscanned cscanned csize oldsize
+    [[ -d "$np" ]] || return 0
     cf="$(_cache_path_for_root "$np")"
     [[ -f "$cf" ]] || return 0
     pcf="$(_cache_path_for_root "$(dirname "$np")")"
@@ -524,10 +543,7 @@ fi
 
 # Normalize all input paths.
 _dus_t0=$SECONDS
-if $no_cache || $refresh_cache; then
-    printf '%s: HOLD ON, SCANNING DIRECTORIES\n' "$prog" >&2
-    _dus_status_printed=true
-fi
+_dus_early_feedback
 $verbose && _dus_vstage "start"
 declare -a inputs=()
 declare -A norm_of=()
@@ -558,8 +574,6 @@ done
 $verbose && _dus_vstage "${#roots[@]} scan root(s)"
 
 declare -A size_map=()
-_sib_parent=""
-_dus_sibling_listing=false
 
 # When all inputs are siblings (e.g. dus *), prefetch the parent directory cache
 # created by an earlier "dus ." in the same directory.
@@ -587,9 +601,11 @@ for root in "${roots[@]}"; do
     (( ++_dus_v_resolve )) || true
     if $no_cache; then
         to_scan+=("$root")
+    elif [[ ! -d "$root" ]]; then
+        :
     elif _lookup_size "$root" >/dev/null; then
         (( ++_dus_v_map_hits )) || true
-        _maybe_upgrade_from_child_cache "$root"
+        ! $_dus_sibling_listing && _maybe_upgrade_from_child_cache "$root"
     elif _try_load_exact_cache "$root"; then
         :
     else
