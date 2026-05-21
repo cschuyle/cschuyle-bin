@@ -109,6 +109,11 @@ _dus_print_run_status() {
     fi
 }
 
+# Always-on stderr status with elapsed seconds (scan/write/output phases).
+_dus_status() {
+    printf '%s: %s +%ds\n' "$prog" "$*" "$(( SECONDS - _dus_t0 ))" >&2
+}
+
 # Format 1K-block count as human-readable (B, K, M, G, T); pure bash (no awk).
 hr_size() {
     local kb=$1 b
@@ -176,7 +181,89 @@ _cache_header_field() {
     return 1
 }
 
-# Device id for a path (Linux stat -c %d, BSD stat -f %d).
+# Estimated directory count from an existing cache file (0 if unknown).
+_cache_dircount_estimate() {
+    local cache_file="$1" n
+    [[ -f "$cache_file" ]] || return 0
+    n="$(_cache_header_field "$cache_file" dircount)" || return 0
+    [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || return 0
+    printf '%s' "$n"
+}
+
+# Short label for progress (basename of scan root or current du path).
+_dus_progress_label() {
+    local p="${1%/}"
+    [[ -n "$p" ]] || return 0
+    if [[ ${#p} -le 48 ]]; then
+        printf '%s' "${p##*/}"
+    else
+        printf '…/%s' "${p##*/}"
+    fi
+}
+
+# Live scan progress on stderr (bar when prior dircount known, else count only).
+# Args: count, estimate, scan-root name, optional current path from du.
+_dus_scan_progress() {
+    local n="$1" est="$2" root_name="${3:-}" cur_path="${4:-}" elapsed pct filled bar="" i msg cur_label=""
+    elapsed=$(( SECONDS - _dus_t0 ))
+    [[ -n "$cur_path" ]] && cur_label="$(_dus_progress_label "$cur_path")"
+    if [[ -n "$est" && "$est" -gt 0 ]]; then
+        pct=$(( n * 100 / est ))
+        (( pct > 100 )) && pct=100
+        filled=$(( n * 20 / est ))
+        (( filled > 20 )) && filled=20
+        for (( i = 0; i < 20; i++ )); do
+            if (( i < filled )); then
+                bar+='='
+            elif (( i == filled && filled < 20 )); then
+                bar+='>'
+            else
+                bar+=' '
+            fi
+        done
+        if [[ -n "$root_name" && -n "$cur_label" ]]; then
+            msg=$(printf '%s: %s [%s] %d/%d dirs (%d%%) at %s +%ds' \
+                "$prog" "$root_name" "$bar" "$n" "$est" "$pct" "$cur_label" "$elapsed")
+        elif [[ -n "$root_name" ]]; then
+            msg=$(printf '%s: %s [%s] %d/%d dirs (%d%%) +%ds' \
+                "$prog" "$root_name" "$bar" "$n" "$est" "$pct" "$elapsed")
+        else
+            msg=$(printf '%s: [%s] %d/%d dirs (%d%%) +%ds' "$prog" "$bar" "$n" "$est" "$pct" "$elapsed")
+        fi
+    else
+        if [[ -n "$root_name" && -n "$cur_label" ]]; then
+            msg=$(printf '%s: %s scanned %d directories at %s +%ds' \
+                "$prog" "$root_name" "$n" "$cur_label" "$elapsed")
+        elif [[ -n "$root_name" ]]; then
+            msg=$(printf '%s: %s scanned %d directories +%ds' "$prog" "$root_name" "$n" "$elapsed")
+        else
+            msg=$(printf '%s: scanned %d directories +%ds' "$prog" "$n" "$elapsed")
+        fi
+    fi
+    if [[ -t 2 ]]; then
+        printf '\r%s' "$msg" >&2
+    elif (( n == 1 || n % 5000 == 0 )); then
+        printf '%s\n' "$msg" >&2
+    fi
+}
+
+_dus_scan_progress_done() {
+    local n="$1" est="$2" root_name="${3:-}" elapsed=$(( SECONDS - _dus_t0 ))
+    [[ -t 2 ]] && printf '\n' >&2
+    if [[ -n "$root_name" ]]; then
+        if [[ -n "$est" && "$est" -gt 0 ]]; then
+            printf '%s: %s scanned %d directories (est. was %d) +%ds\n' \
+                "$prog" "$root_name" "$n" "$est" "$elapsed" >&2
+        else
+            printf '%s: %s scanned %d directories +%ds\n' \
+                "$prog" "$root_name" "$n" "$elapsed" >&2
+        fi
+    elif [[ -n "$est" && "$est" -gt 0 ]]; then
+        printf '%s: scanned %d directories (est. was %d) +%ds\n' "$prog" "$n" "$est" "$elapsed" >&2
+    else
+        printf '%s: scanned %d directories +%ds\n' "$prog" "$n" "$elapsed" >&2
+    fi
+}
 _dev_id() {
     local p="$1" id
     if id="$(stat -c %d "$p" 2>/dev/null)"; then
@@ -340,42 +427,48 @@ _lookup_size() {
     return 1
 }
 
-# Largest direct-child size under np in size_map (0 if none).
-_max_direct_child_size() {
-    local np="$1" path rest csz maxc=0
+# One pass over size_map: sets _DUS_MAX_CHILD and _DUS_SUM_CHILD for np's direct children.
+_direct_child_stats() {
+    local np="$1" path rest csz
+    _DUS_MAX_CHILD=0
+    _DUS_SUM_CHILD=0
+    _DUS_CHILD_STATS_NP="$np"
     for path in "${!size_map[@]}"; do
         [[ "$path" == "$np/"* ]] || continue
         rest="${path#"$np"/}"
         [[ "$rest" == */* ]] && continue
         csz=${size_map[$path]}
-        (( csz > maxc )) && maxc=$csz
+        (( csz > _DUS_MAX_CHILD )) && _DUS_MAX_CHILD=$csz
+        _DUS_SUM_CHILD=$(( _DUS_SUM_CHILD + csz ))
     done
-    printf '%s' "$maxc"
 }
 
-# Sum of direct-child sizes under np in size_map.
-_sum_direct_child_sizes() {
-    local np="$1" path rest csz sumc=0
-    for path in "${!size_map[@]}"; do
-        [[ "$path" == "$np/"* ]] || continue
-        rest="${path#"$np"/}"
-        [[ "$rest" == */* ]] && continue
-        csz=${size_map[$path]}
-        sumc=$((sumc + csz))
-    done
-    printf '%s' "$sumc"
+# Largest direct-child size under np in size_map (0 if none).
+_max_direct_child_size() {
+    _direct_child_stats "$1"
+    printf '%s' "$_DUS_MAX_CHILD"
 }
 
 # When du(.) skips a mount, parent total can be less than sum(children); prefer sum.
+# Uses _DUS_MAX_CHILD / _DUS_SUM_CHILD when already computed by _direct_child_stats.
 _reconcile_dir_size() {
-    local np="$1" sz="$2" maxc sumc
+    local np="$1" sz="$2" path rest csz pdev cdev
     [[ -d "$np" ]] || { printf '%s' "$sz"; return; }
-    maxc="$(_max_direct_child_size "$np")"
-    (( maxc == 0 )) && { printf '%s' "$sz"; return; }
-    (( maxc <= sz )) && { printf '%s' "$sz"; return; }
-    _has_cross_fs_oversized_child "$np" "$sz" || { printf '%s' "$sz"; return; }
-    sumc="$(_sum_direct_child_sizes "$np")"
-    printf '%s' "$sumc"
+    [[ "${_DUS_CHILD_STATS_NP:-}" == "$np" ]] || _direct_child_stats "$np"
+    (( _DUS_MAX_CHILD == 0 )) && { printf '%s' "$sz"; return; }
+    (( _DUS_MAX_CHILD <= sz )) && { printf '%s' "$sz"; return; }
+    pdev="$(_dev_id "$np")" || { printf '%s' "$sz"; return; }
+    for path in "${!size_map[@]}"; do
+        [[ "$path" == "$np/"* ]] || continue
+        rest="${path#"$np"/}"
+        [[ "$rest" == */* ]] && continue
+        csz=${size_map[$path]}
+        (( csz <= sz )) && continue
+        [[ -d "$path" ]] || continue
+        cdev="$(_dev_id "$path")" || continue
+        [[ "$cdev" != "$pdev" ]] && { printf '%s' "$_DUS_SUM_CHILD"; return; }
+    done
+    printf '%s' "$sz"
 }
 
 # Load cache for np only when this directory was the scan root (not an ancestor).
@@ -445,12 +538,19 @@ _try_load_ancestor_cache() {
 }
 
 # Collect raw du output. Strips trailing slashes; skips blank lines.
+# Optional 2nd arg: estimated directory count (from prior cache) for progress bar.
 # Sets globals _DU_RAW and _DU_ROOT_PATH (du's path for the root, from last line).
 _du_collect() {
-    local _root="$1"
+    local _root="$1" _est=0 _progress_every=250
     shift
-    local _sz _rawp _n=0
+    if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then
+        _est="$1"
+        shift
+    fi
+    local _sz _rawp _n=0 _root_name
     local -a _buf=()
+    _root_name="$(_dus_progress_label "$_root")"
+    (( _est > 0 )) && (( _progress_every = _est / 80 + 1 ))
     $verbose && _dus_vlog "scanning $_root..."
     while read -r _sz _rawp; do
         [[ -z "$_rawp" ]] && continue
@@ -458,10 +558,12 @@ _du_collect() {
         [[ -z "$_rawp" ]] && continue
         _buf+=("$_sz"$'\t'"$_rawp")
         (( ++_n )) || true
-        if $verbose && ((_n % 500 == 0)); then
-            printf '\r%s: %s +%ds scanned %d directories...' "$prog" "$(date '+%Y-%m-%dT%H:%M:%S')" "$(( SECONDS - _dus_t0 ))" "$_n" >&2
+        if (( _n == 1 || _n % _progress_every == 0 )); then
+            _dus_scan_progress "$_n" "$_est" "$_root_name" "$_rawp"
         fi
     done < <("$DU_BIN" -k "$@" "$_root" 2>/dev/null)
+    _dus_scan_progress "$_n" "$_est" "$_root_name" "$_root"
+    _dus_scan_progress_done "$_n" "$_est" "$_root_name"
     $verbose && _dus_vlog "scanned $_n directories"
     _DU_RAW=("${_buf[@]+"${_buf[@]}"}")
     _DU_ROOT_PATH=""
@@ -496,10 +598,17 @@ _scan_and_cache() {
     root="$(normalize_path "$root")"
     mkdir -p "$DUS_CACHE_DIR"
     vlog "$DU_BIN" -k "$root"
-    _du_collect "$root"   # fills _DU_RAW and _DU_ROOT_PATH
+    _est="$(_cache_dircount_estimate "$cache_file" 2>/dev/null || true)"
+    _du_collect "$root" "$_est"   # fills _DU_RAW and _DU_ROOT_PATH
 
-    local _entry _sz _rawp _rootsize="" _dircount=0
+    local _entry _sz _rawp _rootsize="" _dircount=0 _label _total _ri=0 _we
     declare -a _rebased=()
+    _label="$(_dus_progress_label "$root")"
+    _total=${#_DU_RAW[@]}
+    if (( _total >= 500 )); then
+        _dus_status "$_label indexing $_total entries..."
+    fi
+    _we=$(( _total / 20 + 1 ))
     for _entry in "${_DU_RAW[@]+"${_DU_RAW[@]}"}"; do
         IFS=$'\t' read -r _sz _rawp <<< "$_entry"
         _du_rebase "$root" "$_rawp" "$_DU_ROOT_PATH"
@@ -509,9 +618,18 @@ _scan_and_cache() {
         if [[ "$_DU_REBASED_PATH" == "$root" ]]; then
             _rootsize="$_sz"
         fi
+        (( ++_ri )) || true
+        if (( _total >= 500 && (_ri == 1 || _ri % _we == 0) )); then
+            _dus_status "$_label indexing $_ri/$_total..."
+        fi
     done
     _dircount=${#_rebased[@]}
 
+    if (( _dircount >= 500 )); then
+        _dus_status "$_label writing cache ($_dircount entries)..."
+    fi
+    _we=$(( _dircount / 20 + 1 ))
+    _ri=0
     {
         printf '# root: %s\n' "$root"
         printf '# scanned: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')"
@@ -520,9 +638,16 @@ _scan_and_cache() {
         local _line
         for _line in "${_rebased[@]+"${_rebased[@]}"}"; do
             printf '%s\n' "$_line"
+            (( ++_ri )) || true
+            if (( _dircount >= 500 && (_ri == 1 || _ri % _we == 0) )); then
+                _dus_status "$_label writing cache $_ri/$_dircount..." >&2
+            fi
         done
     } > "$tmp_file"
     mv -- "$tmp_file" "$cache_file"
+    if (( _dircount >= 500 )); then
+        _dus_status "$_label cache saved"
+    fi
 }
 
 # When caching is active we always scan without --exclude so the cache is
@@ -656,7 +781,8 @@ fi
 for root in "${to_scan[@]}"; do
     if $no_cache; then
         vlog "$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root"
-        _du_collect "$root" "${du_exclude_args[@]+"${du_exclude_args[@]}"}"
+        _est="$(_cache_dircount_estimate "$(_cache_path_for_root "$root")" 2>/dev/null || true)"
+        _du_collect "$root" "$_est" "${du_exclude_args[@]+"${du_exclude_args[@]}"}"
         for _nc_entry in "${_DU_RAW[@]+"${_DU_RAW[@]}"}"; do
             IFS=$'\t' read -r _nc_sz _nc_rawp <<< "$_nc_entry"
             _du_rebase "$root" "$_nc_rawp" "$_DU_ROOT_PATH"
@@ -711,14 +837,16 @@ while IFS=$'\t' read -r _ _ parent; do
 done < <(_dus_order_lines "${_group_sort_keys[@]+"${_group_sort_keys[@]}"}")
 
 # For each group: collect (size, original_path) pairs, sort by size ascending, print.
-_dus_v_out=0 _dus_v_du_fallback=0
-$verbose && _dus_vstage "output: ${#inputs[@]} path(s), ${#size_map[@]} in map"
+_dus_v_out=0 _dus_v_du_fallback=0 _dus_out_total=${#inputs[@]}
+_dus_status "preparing output (${_dus_out_total} path(s), ${#size_map[@]} cached entries)..."
+$verbose && _dus_vstage "output: ${_dus_out_total} path(s), ${#size_map[@]} in map"
 for parent in "${group_order[@]}"; do
     pair_lines=()
     for p in "${inputs[@]}"; do
         np="${norm_of[$p]}"
         [[ "$(dirname "$np")" == "$parent" ]] || continue
         (( ++_dus_v_out )) || true
+        _dus_status "output ${_dus_v_out}/${_dus_out_total}: $(_dus_progress_label "$p")..."
         sz="$(_lookup_size "$np" || true)"
         if [[ -z "$sz" && -d "$np" ]]; then
             $verbose && _dus_vstage "output miss: $p — trying parent cache"
@@ -735,11 +863,13 @@ for parent in "${group_order[@]}"; do
         # Sibling listings (dus *) already have authoritative sizes from parent cache;
         # skip per-entry child-cache loads used only for mount reconciliation.
         if ! $_dus_sibling_listing || [[ "$(dirname "$np")" != "$_sib_parent" || -z "$sz" ]]; then
-            if [[ -d "$np" && "$(_max_direct_child_size "$np")" -eq 0 ]]; then
+            _direct_child_stats "$np"
+            if [[ -d "$np" && _DUS_MAX_CHILD -eq 0 ]]; then
                 _cf="$(_cache_path_for_root "$np")"
                 if [[ -f "$_cf" ]]; then
                     $verbose && _dus_vstage "output: loading direct children of $(basename "$np")"
                     _load_cache "$_cf" "$np" || true
+                    _direct_child_stats "$np"
                 fi
             fi
             _sz_before="$sz"
