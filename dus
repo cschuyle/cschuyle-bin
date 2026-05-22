@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dus — disk usage for a list of paths, sorted by size ascending within each parent group.
+# dus — disk usage for a list of paths, tree-ordered with siblings sorted by size ascending.
 # Scans only the minimal set of root paths needed, then extracts sizes for each requested path.
 # Results are cached in ~/.dus/ and reused on subsequent runs (use --refresh to rescan).
 set -euo pipefail
@@ -88,8 +88,13 @@ _dus_status_printed=false
 _dus_sibling_listing=false
 _sib_parent=""
 _dircount_index_built=false
+_child_index_built=false
 declare -A _dircount_map=()
 declare -A _known_norm_paths=()
+declare -A _children_of=()
+declare -A _cache_fully_passed=()
+declare -A _slim_loaded_for=()
+declare -A _header_only_root=()
 
 _dus_early_feedback() {
     if $no_cache || $refresh_cache; then
@@ -152,6 +157,87 @@ _dus_order_lines() {
         done
     done
     printf '%s\n' "${_lines[@]}"
+}
+
+# Bubble-sort normalized paths by ascending _out_sz (print phase only).
+_dus_sort_nps_by_sz() {
+    local _arr_name="$1"
+    local -n _nps="$_arr_name"
+    local _i _j _min _tmp _sz_a _sz_b
+    for ((_i = 0; _i < ${#_nps[@]}; _i++)); do
+        _min=$_i
+        for ((_j = _i + 1; _j < ${#_nps[@]}; _j++)); do
+            _sz_a="${_out_sz["${_nps[_j]}"]:--1}"
+            _sz_b="${_out_sz["${_nps[_min]}"]:--1}"
+            if (( _sz_a < _sz_b )); then
+                _min=$_j
+            fi
+        done
+        if ((_min != _i)); then
+            _tmp="${_nps[_i]}"
+            _nps[_i]="${_nps[_min]}"
+            _nps[_min]="$_tmp"
+        fi
+    done
+}
+
+# Longest input path that is a proper prefix of np (nearest input ancestor).
+_input_parent_of() {
+    local np="$1" q nq best="" len=0 blen
+    np="$(normalize_path "$np")"
+    for q in "${inputs[@]}"; do
+        nq="${norm_of[$q]}"
+        [[ "$np" == "$nq" ]] && continue
+        is_proper_prefix "$nq" "$np" || continue
+        blen=${#nq}
+        if (( blen > len )); then
+            best="$nq"
+            len=$blen
+        fi
+    done
+    printf '%s' "$best"
+}
+
+# Preorder walk: emit np, then nearest-input-children (size-sorted), recurse.
+_dus_collect_preorder() {
+    local np="$1" p k parent
+    _print_order+=("$np")
+    declare -a _kids=()
+    for p in "${inputs[@]}"; do
+        k="${norm_of[$p]}"
+        [[ "$k" == "$np" ]] && continue
+        parent="$(_input_parent_of "$k")"
+        [[ "$parent" == "$np" ]] && _kids+=("$k")
+    done
+    if [[ ${#_kids[@]} -gt 0 ]]; then
+        _dus_sort_nps_by_sz _kids
+        for k in "${_kids[@]}"; do
+            _dus_collect_preorder "$k"
+        done
+    fi
+}
+
+# True when np has descendant paths among inputs.
+_has_input_descendants() {
+    local np="$1" p nq
+    np="$(normalize_path "$np")"
+    for p in "${inputs[@]}"; do
+        nq="${norm_of[$p]}"
+        [[ "$nq" != "$np" ]] && is_proper_prefix "$np" "$nq" && return 0
+    done
+    return 1
+}
+
+# One slim cache read so header-only roots have direct-child sizes for descendants.
+_preload_header_root_children() {
+    local np="$1" cf
+    np="$(normalize_path "$np")"
+    _has_input_descendants "$np" || return 0
+    _cf="$(_cache_path_for_root "$np")"
+    [[ -f "$_cf" ]] || return 0
+    [[ -n "${_slim_loaded_for[$np]+x}" || -n "${_cache_fully_passed[$_cf]+x}" ]] && return 0
+    $verbose && _dus_vstage "preload direct children of $(basename "$np") for nested inputs"
+    _load_cache "$_cf" "$np" || true
 }
 
 # Prefer GNU du (gdu from homebrew) for --exclude support on macOS.
@@ -258,6 +344,59 @@ _ensure_dircount_index() {
     _build_dircount_index "$pcf" "$parent_root"
 }
 
+# True when np's dircount is available without building a parent index.
+_dircount_resolvable() {
+    local np="$1" cf n
+    [[ -d "$np" ]] || return 0
+    np="$(normalize_path "$np")"
+    cf="$(_cache_path_for_root "$np")"
+    if [[ -f "$cf" ]]; then
+        n="$(_cache_header_field "$cf" dircount)" || true
+        [[ "$n" =~ ^[0-9]+$ ]] && return 0
+    fi
+    [[ -n "${_dircount_map[$np]+x}" ]] && return 0
+    return 1
+}
+
+# True when at least one directory input still needs a parent dircount index.
+_dircount_index_needed() {
+    local p np
+    $_dircount_index_built && return 1
+    for p in "${inputs[@]}"; do
+        np="${norm_of[$p]}"
+        _dircount_resolvable "$np" || return 0
+    done
+    return 1
+}
+
+_invalidate_child_index() { _child_index_built=false; }
+
+_children_append() {
+    local parent="$1" child="$2"
+    [[ -n "$parent" && -n "$child" ]] || return 0
+    if [[ -n "${_children_of[$parent]+x}" ]]; then
+        _children_of[$parent]+=" $child"
+    else
+        _children_of[$parent]="$child"
+    fi
+}
+
+_children_note() {
+    local path="$1"
+    _children_append "$(dirname "$path")" "$path"
+}
+
+_ensure_child_index() {
+    local path parent
+    $_child_index_built && return 0
+    for path in "${!size_map[@]}"; do
+        parent="$(dirname "$path")"
+        _children_append "$parent" "$path"
+    done
+    _child_index_built=true
+    $verbose && _dus_vstage "child index built: ${#_children_of[@]} parent(s)"
+}
+
 _dircount_for_path() {
     local np="$1" cf n path cnt=0
     [[ -d "$np" ]] || { printf '0'; return; }
@@ -274,13 +413,17 @@ _dircount_for_path() {
         printf '%s' "${_dircount_map[$np]}"
         return
     fi
-    for path in "${!size_map[@]}"; do
-        [[ "$path" == "$np" || "$path" == "$np/"* ]] || continue
-        (( ++cnt )) || true
-    done
-    if (( cnt > 1 )); then
-        printf '%s' "$cnt"
-        return
+    _ensure_child_index
+    if [[ -n "${_children_of[$np]+x}" || -n "${size_map[$np]+x}" ]]; then
+        cnt=0
+        [[ -n "${size_map[$np]+x}" ]] && (( ++cnt )) || true
+        for path in ${_children_of[$np]:-}; do
+            [[ -n "$path" ]] && (( ++cnt )) || true
+        done
+        if (( cnt > 1 )); then
+            printf '%s' "$cnt"
+            return
+        fi
     fi
     _ensure_dircount_index "$(dirname "$np")" || true
     if [[ -n "${_dircount_map[$np]+x}" ]]; then
@@ -391,6 +534,7 @@ _purge_cache_entries_for_root() {
     for path in "${!_keep[@]}"; do
         size_map["$path"]="${_keep[$path]}"
     done
+    _invalidate_child_index
 }
 
 # True when a direct child has its own newer cache with a different size.
@@ -421,14 +565,13 @@ _stale_vs_child_caches() {
 
 # True when a cached direct child exceeds root on the same filesystem (impossible unless stale).
 _oversized_same_fs_child() {
-    local np="$1" rsz="$2" pdev path rest csz cdev
+    local np="$1" rsz="$2" pdev path csz cdev
     [[ -n "$rsz" ]] || return 1
     pdev="$(_dev_id "$np")" || return 1
-    for path in "${!size_map[@]}"; do
-        [[ "$path" == "$np/"* ]] || continue
-        rest="${path#"$np"/}"
-        [[ "$rest" == */* ]] && continue
-        csz=${size_map[$path]}
+    _ensure_child_index
+    for path in ${_children_of[$np]:-}; do
+        [[ -n "$path" ]] || continue
+        csz=${size_map[$path]:-0}
         (( csz <= rsz )) && continue
         [[ -d "$path" ]] || continue
         cdev="$(_dev_id "$path")" || continue
@@ -439,13 +582,13 @@ _oversized_same_fs_child() {
 
 # True when a loaded cache for np should be discarded and rescanned.
 _is_cache_stale() {
-    local np="$1" cf="$2" scanned rsz
+    local np="$1" cf="$2" header_only="${3:-false}" scanned rsz
     scanned="$(_cache_header_field "$cf" scanned)" || return 1
     rsz="$(_lookup_size "$np" || true)"
     if _stale_vs_child_caches "$np" "$scanned"; then
         return 0
     fi
-    if _oversized_same_fs_child "$np" "$rsz"; then
+    if ! $header_only && _oversized_same_fs_child "$np" "$rsz"; then
         $verbose && _dus_vstage "stale: same-fs child larger than root for $(basename "$np")"
         return 0
     fi
@@ -454,14 +597,13 @@ _is_cache_stale() {
 
 # True when an oversized direct child sits on a different filesystem (mount).
 _has_cross_fs_oversized_child() {
-    local np="$1" rsz="$2" pdev path rest csz cdev
+    local np="$1" rsz="$2" pdev path csz cdev
     [[ -n "$rsz" ]] || return 1
     pdev="$(_dev_id "$np")" || return 1
-    for path in "${!size_map[@]}"; do
-        [[ "$path" == "$np/"* ]] || continue
-        rest="${path#"$np"/}"
-        [[ "$rest" == */* ]] && continue
-        csz=${size_map[$path]}
+    _ensure_child_index
+    for path in ${_children_of[$np]:-}; do
+        [[ -n "$path" ]] || continue
+        csz=${size_map[$path]:-0}
         (( csz <= rsz )) && continue
         [[ -d "$path" ]] || continue
         cdev="$(_dev_id "$path")" || continue
@@ -471,12 +613,15 @@ _has_cross_fs_oversized_child() {
 }
 
 # Load cache into size_map. Optional 2nd arg: only direct children of that root.
+# When filter_root is set, also builds _dircount_map in the same pass.
 _load_cache() {
     local cache_file="$1" filter_root="${2:-}" root="" sz path rest
-    local _lines=0 _kept=0 _t=$SECONDS
+    local _lines=0 _kept=0 _t=$SECONDS build_dircount=false
     [[ -f "$cache_file" ]] || return 1
     [[ -n "$filter_root" ]] && filter_root="$(normalize_path "$filter_root")"
-    $verbose && _dus_vstage "cache read: ${cache_file##*/}${filter_root:+ (direct children of $(basename "$filter_root"))}"
+    [[ -n "$filter_root" ]] && build_dircount=true
+    [[ -n "$filter_root" ]] && _invalidate_child_index
+    $verbose && _dus_vstage "cache read: ${cache_file##*/}${filter_root:+ (direct children of $(basename "$filter_root"))}${build_dircount:+ + dircount index}"
 
     while IFS= read -r line; do
         case "$line" in
@@ -488,6 +633,9 @@ _load_cache() {
                 (( ++_lines )) || true
                 IFS=$'\t' read -r sz path <<< "$line"
                 [[ -z "$path" ]] && return 1
+                if $build_dircount && [[ -n "$root" ]]; then
+                    _dircount_bump_child "$root" "$path"
+                fi
                 if [[ -n "$filter_root" ]]; then
                     if [[ "$path" == "$filter_root" ]]; then
                         path="$filter_root"
@@ -502,6 +650,7 @@ _load_cache() {
                     fi
                 fi
                 size_map["$path"]="$sz"
+                _children_note "$path"
                 (( ++_kept )) || true
                 ;;
         esac
@@ -509,6 +658,16 @@ _load_cache() {
 
     [[ -n "$root" && -d "$root" ]] || return 1
     [[ ${#size_map[@]} -gt 0 ]] || return 1
+    _cache_fully_passed["$cache_file"]=1
+    if $build_dircount; then
+        _dircount_index_built=true
+        $verbose && _dus_vstage "dircount index built during cache read: ${#_dircount_map[@]} child bucket(s)"
+    fi
+    if [[ -n "$filter_root" ]]; then
+        _slim_loaded_for["$filter_root"]=1
+    else
+        _child_index_built=true
+    fi
     $verbose && _dus_vstage "cache read done: ${_lines} data lines, ${_kept} kept, ${#size_map[@]} in map, $(( SECONDS - _t ))s"
     return 0
 }
@@ -533,17 +692,16 @@ _lookup_size() {
     return 1
 }
 
-# One pass over size_map: sets _DUS_MAX_CHILD and _DUS_SUM_CHILD for np's direct children.
+# One pass over direct children: sets _DUS_MAX_CHILD and _DUS_SUM_CHILD for np.
 _direct_child_stats() {
-    local np="$1" path rest csz
+    local np="$1" path csz
     _DUS_MAX_CHILD=0
     _DUS_SUM_CHILD=0
     _DUS_CHILD_STATS_NP="$np"
-    for path in "${!size_map[@]}"; do
-        [[ "$path" == "$np/"* ]] || continue
-        rest="${path#"$np"/}"
-        [[ "$rest" == */* ]] && continue
-        csz=${size_map[$path]}
+    _ensure_child_index
+    for path in ${_children_of[$np]:-}; do
+        [[ -n "$path" ]] || continue
+        csz=${size_map[$path]:-0}
         (( csz > _DUS_MAX_CHILD )) && _DUS_MAX_CHILD=$csz
         _DUS_SUM_CHILD=$(( _DUS_SUM_CHILD + csz ))
     done
@@ -558,23 +716,35 @@ _max_direct_child_size() {
 # When du(.) skips a mount, parent total can be less than sum(children); prefer sum.
 # Uses _DUS_MAX_CHILD / _DUS_SUM_CHILD when already computed by _direct_child_stats.
 _reconcile_dir_size() {
-    local np="$1" sz="$2" path rest csz pdev cdev
+    local np="$1" sz="$2" path csz pdev cdev
     [[ -d "$np" ]] || { printf '%s' "$sz"; return; }
     [[ "${_DUS_CHILD_STATS_NP:-}" == "$np" ]] || _direct_child_stats "$np"
     (( _DUS_MAX_CHILD == 0 )) && { printf '%s' "$sz"; return; }
     (( _DUS_MAX_CHILD <= sz )) && { printf '%s' "$sz"; return; }
     pdev="$(_dev_id "$np")" || { printf '%s' "$sz"; return; }
-    for path in "${!size_map[@]}"; do
-        [[ "$path" == "$np/"* ]] || continue
-        rest="${path#"$np"/}"
-        [[ "$rest" == */* ]] && continue
-        csz=${size_map[$path]}
+    _ensure_child_index
+    for path in ${_children_of[$np]:-}; do
+        [[ -n "$path" ]] || continue
+        csz=${size_map[$path]:-0}
         (( csz <= sz )) && continue
         [[ -d "$path" ]] || continue
         cdev="$(_dev_id "$path")" || continue
         [[ "$cdev" != "$pdev" ]] && { printf '%s' "$_DUS_SUM_CHILD"; return; }
     done
     printf '%s' "$sz"
+}
+
+# True when mount reconciliation may change the reported size for np.
+_needs_reconcile() {
+    local np="$1" p nq
+    if [[ -n "${_header_only_root[$np]+x}" ]]; then
+        for p in "${inputs[@]}"; do
+            nq="${norm_of[$p]}"
+            [[ "$nq" != "$np" ]] && is_proper_prefix "$np" "$nq" && return 0
+        done
+        return 1
+    fi
+    return 0
 }
 
 # Load cache for np only when this directory was the scan root (not an ancestor).
@@ -707,12 +877,17 @@ _du_process_lines() {
             if [[ "$_rebased" == "$root" ]]; then
                 size_map["$_rebased"]="$_sz"
                 _rootsize="$_sz"
+                _children_note "$_rebased"
             elif [[ "$_rebased" == "$root_prefix"* ]]; then
                 rest="${_rebased#"$root_prefix"}"
-                [[ "$rest" == */* ]] || size_map["$_rebased"]="$_sz"
+                if [[ "$rest" != */* ]]; then
+                    size_map["$_rebased"]="$_sz"
+                    _children_note "$_rebased"
+                fi
             fi
         else
             size_map["$_rebased"]="$_sz"
+            _children_note "$_rebased"
             [[ "$_rebased" == "$root" ]] && _rootsize="$_sz"
         fi
         _dircount_bump_child "$root" "$_rebased"
@@ -720,6 +895,7 @@ _du_process_lines() {
     done < "$raw_file"
     _DUS_SCAN_ROOTSIZE="$_rootsize"
     _DUS_SCAN_DIRCOUNT="$_n"
+    _child_index_built=true
 }
 
 # Run du and capture raw output to a temp file (no giant bash arrays).
@@ -899,8 +1075,17 @@ for root in "${roots[@]}"; do
     elif _lookup_size "$root" >/dev/null; then
         (( ++_dus_v_map_hits )) || true
         ! $_dus_sibling_listing && _maybe_upgrade_from_child_cache "$root"
-    elif $_dus_sibling_listing && [[ "$(dirname "$root")" == "$_sib_parent" ]] && _try_load_cache_header "$root"; then
-        (( ++_dus_v_map_hits )) || true
+    elif ! $use_postfilter && ! $refresh_cache && [[ -d "$root" ]] && _try_load_cache_header "$root"; then
+        cf="$(_cache_path_for_root "$root")"
+        if _is_cache_stale "$root" "$cf" true; then
+            unset 'size_map[$root]'
+            unset '_dircount_map[$root]'
+            to_scan+=("$root")
+        else
+            (( ++_dus_v_map_hits )) || true
+            _header_only_root["$root"]=1
+            $verbose && _dus_vstage "header HIT (no full load): $(_dus_progress_label "$root")"
+        fi
     elif _try_load_exact_cache "$root"; then
         :
     else
@@ -936,7 +1121,6 @@ if [[ ${#to_scan[@]} -gt 1 && ${#to_scan[@]} -eq ${#roots[@]} ]]; then
         elif [[ -f "$_parent_cf" ]]; then
             $verbose && _dus_vstage "retry parent cache for ${#_still_missing[@]} missing sibling(s)"
             _load_cache "$_parent_cf" "$_common_parent" || true
-            _ensure_dircount_index "$_common_parent" || true
             to_scan=()
             for r in "${_still_missing[@]}"; do
                 _lookup_size "$r" >/dev/null || to_scan+=("$r")
@@ -986,66 +1170,52 @@ if $use_postfilter; then
     for path in "${!_filtered[@]}"; do
         size_map["$path"]="${_filtered[$path]}"
     done
+    _invalidate_child_index
 fi
 
-# Group inputs by the parent dir of their normalized path.
-# Groups are ordered deepest-first (most path components first) so that children
-# are printed before their parent directories. Ties in depth preserve first-seen order.
-declare -a group_order=()
-declare -A group_seen=()
-_group_idx=0
-declare -a _group_sort_keys=()
-for p in "${inputs[@]}"; do
-    parent="$(dirname "${norm_of[$p]}")"
-    if [[ -z "${group_seen[$parent]+x}" ]]; then
-        group_seen[$parent]=1
-        local_depth="${parent//[^\/]/}"
-        # Sort key: depth descending (negated), then insertion index ascending for stability.
-        _group_sort_keys+=("$(printf '%010d\t%010d\t%s' "$((1000000 - ${#local_depth}))" "$_group_idx" "$parent")")
-        (( _group_idx++ )) || true
-    fi
-done
-while IFS=$'\t' read -r _ _ parent; do
-    group_order+=("$parent")
-done < <(_dus_order_lines "${_group_sort_keys[@]+"${_group_sort_keys[@]}"}")
-
-# For each group: collect (size, original_path) pairs, sort by size ascending, print.
+# Resolve size/dircount for every input, then print in preorder (parent before children,
+# siblings at each level sorted smallest-to-largest by size).
+declare -A _out_sz=() _out_dc=() _out_orig=()
 _dus_v_out=0 _dus_v_du_fallback=0 _dus_out_total=${#inputs[@]}
-if $_dus_sibling_listing && [[ -n "$_sib_parent" ]]; then
+if $_dus_sibling_listing && [[ -n "$_sib_parent" ]] && _dircount_index_needed; then
     _ensure_dircount_index "$_sib_parent" || true
 fi
+for np in "${!_header_only_root[@]}"; do
+    _preload_header_root_children "$np"
+done
 $verbose && _dus_vstage "preparing output (${_dus_out_total} path(s), ${#size_map[@]} cached entries)..."
-for parent in "${group_order[@]}"; do
-    pair_lines=()
-    for p in "${inputs[@]}"; do
-        np="${norm_of[$p]}"
-        [[ "$(dirname "$np")" == "$parent" ]] || continue
-        (( ++_dus_v_out )) || true
-        $verbose && _dus_vstage "output ${_dus_v_out}/${_dus_out_total}: $(_dus_progress_label "$p")..."
+set +e
+for p in "${inputs[@]}"; do
+    np="${norm_of[$p]}"
+    (( ++_dus_v_out )) || true
+    $verbose && _dus_vstage "output ${_dus_v_out}/${_dus_out_total}: $(_dus_progress_label "$p")..."
+    sz="$(_lookup_size "$np" || true)"
+    if [[ -z "$sz" && -d "$np" ]]; then
+        $verbose && _dus_vstage "output miss: $p — trying parent cache"
+        _try_load_ancestor_cache "$np" "$(dirname "$np")" || true
         sz="$(_lookup_size "$np" || true)"
-        if [[ -z "$sz" && -d "$np" ]]; then
-            $verbose && _dus_vstage "output miss: $p — trying parent cache"
-            _try_load_ancestor_cache "$np" "$(dirname "$np")" || true
-            sz="$(_lookup_size "$np" || true)"
+    fi
+    if [[ -z "$sz" ]]; then
+        (( ++_dus_v_du_fallback )) || true
+        vlog "$DU_BIN" -sk "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$np"
+        sz="$("$DU_BIN" -sk "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$np" 2>/dev/null | cut -f1)" || true
+        [[ -z "$sz" ]] && sz=0
+        if [[ -d "$np" ]]; then
+            echo "$prog: WARNING: $p not found in cache; ran du directly" >&2
         fi
-        if [[ -z "$sz" ]]; then
-            (( ++_dus_v_du_fallback )) || true
-            vlog "$DU_BIN" -sk "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$np"
-            sz="$("$DU_BIN" -sk "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$np" 2>/dev/null | cut -f1)" || true
-            [[ -z "$sz" ]] && sz=0
-            if [[ -d "$np" ]]; then
-                echo "$prog: WARNING: $p not found in cache; ran du directly" >&2
-            fi
-        fi
-        # Sibling listings (dus *) already have authoritative sizes from parent cache;
-        # skip per-entry child-cache loads used only for mount reconciliation.
-        if ! $_dus_sibling_listing || [[ "$(dirname "$np")" != "$_sib_parent" || -z "$sz" ]]; then
+    fi
+    # Sibling listings (dus *) already have authoritative sizes from parent cache;
+    # skip per-entry child-cache loads used only for mount reconciliation.
+    if ! $_dus_sibling_listing || [[ "$(dirname "$np")" != "$_sib_parent" || -z "$sz" ]]; then
+        if _needs_reconcile "$np"; then
             _direct_child_stats "$np"
             if [[ -d "$np" && _DUS_MAX_CHILD -eq 0 ]]; then
                 _cf="$(_cache_path_for_root "$np")"
-                if [[ -f "$_cf" ]]; then
-                    $verbose && _dus_vstage "output: loading direct children of $(basename "$np")"
-                    _load_cache "$_cf" "$np" || true
+                if [[ -f "$_cf" && -z "${_slim_loaded_for[$np]+x}" ]]; then
+                    if [[ -z "${_cache_fully_passed[$_cf]+x}" ]]; then
+                        $verbose && _dus_vstage "output: loading direct children of $(basename "$np")"
+                        _load_cache "$_cf" "$np" || true
+                    fi
                     _direct_child_stats "$np"
                 fi
             fi
@@ -1055,50 +1225,66 @@ for parent in "${group_order[@]}"; do
                 $verbose && _dus_vstage "output: reconciled $p $_sz_before -> $sz"
             fi
         else
-            $verbose && _dus_vstage "output: using parent cache size for $(basename "$np")"
+            $verbose && _dus_vstage "output: skipping reconcile for $(basename "$np") (header-only)"
         fi
-        pair_lines+=("${sz}"$'\t'"$(_dircount_for_path "$np")"$'\t'"${p}")
-        if $verbose && ((_dus_v_out % 100 == 0)); then
-            _dus_vstage "output progress: $_dus_v_out path(s), $_dus_v_du_fallback du fallback(s)"
-        fi
-    done
+    else
+        $verbose && _dus_vstage "output: using parent cache size for $(basename "$np")"
+    fi
+    _out_sz["$np"]="$sz"
+    _out_dc["$np"]="$( _dircount_for_path "$np" || printf '0' )"
+    _out_orig["$np"]="$p"
+    if $verbose && ((_dus_v_out % 100 == 0)); then
+        _dus_vstage "output progress: $_dus_v_out path(s), $_dus_v_du_fallback du fallback(s)"
+    fi
+done
+set -e
 
-    [[ ${#pair_lines[@]} -eq 0 ]] && continue
+declare -a _forest_roots=() _print_order=()
+declare -A _printed_np=()
+for p in "${inputs[@]}"; do
+    np="${norm_of[$p]}"
+    _is_root=true
+    for q in "${inputs[@]}"; do
+        nq="${norm_of[$q]}"
+        [[ "$np" == "$nq" ]] && continue
+        if is_proper_prefix "$nq" "$np"; then
+            _is_root=false
+            break
+        fi
+    done
+    $_is_root && _forest_roots+=("$np")
+done
+_dus_sort_nps_by_sz _forest_roots
+for np in "${_forest_roots[@]}"; do
+    _dus_collect_preorder "$np"
+done
+for np in "${_print_order[@]}"; do
+    _printed_np["$np"]=1
+done
+declare -a _orphans=()
+for p in "${inputs[@]}"; do
+    np="${norm_of[$p]}"
+    [[ -z "${_printed_np[$np]+x}" ]] && _orphans+=("$np")
+done
+if [[ ${#_orphans[@]} -gt 0 ]]; then
+    _dus_sort_nps_by_sz _orphans
+    for np in "${_orphans[@]}"; do
+        _print_order+=("$np")
+    done
+fi
+if [[ ${#_print_order[@]} -eq 0 ]]; then
+    for p in "${inputs[@]}"; do
+        _print_order+=("${norm_of[$p]}")
+    done
+fi
 
-    declare -a _szs=() _dcs=() _paths=()
-    _line="" _sz="" _dc="" _p="" _i=0 _j=0 _min=0 _tmp_sz="" _tmp_dc="" _tmp_p=""
-    for _line in "${pair_lines[@]}"; do
-        IFS=$'\t' read -r _sz _dc _p <<< "$_line"
-        _szs+=("$_sz")
-        _dcs+=("$_dc")
-        _paths+=("$_p")
-    done
-    for ((_i = 0; _i < ${#_szs[@]}; _i++)); do
-        _min=$_i
-        for ((_j = _i + 1; _j < ${#_szs[@]}; _j++)); do
-            if (( _szs[_j] < _szs[_min] )); then
-                _min=$_j
-            fi
-        done
-        if ((_min != _i)); then
-            _tmp_sz="${_szs[_i]}"
-            _szs[_i]="${_szs[_min]}"
-            _szs[_min]="$_tmp_sz"
-            _tmp_dc="${_dcs[_i]}"
-            _dcs[_i]="${_dcs[_min]}"
-            _dcs[_min]="$_tmp_dc"
-            _tmp_p="${_paths[_i]}"
-            _paths[_i]="${_paths[_min]}"
-            _paths[_min]="$_tmp_p"
-        fi
-    done
-    for ((_i = 0; _i < ${#_szs[@]}; _i++)); do
-        if $human_readable; then
-            printf '%s\t%s\t%s\n' "$(hr_size "${_szs[_i]}")" "${_dcs[_i]}" "${_paths[_i]}"
-        else
-            printf '%s\t%s\t%s\n' "${_szs[_i]}" "${_dcs[_i]}" "${_paths[_i]}"
-        fi
-    done
+for np in "${_print_order[@]}"; do
+    p="${_out_orig[$np]}"
+    if $human_readable; then
+        printf '%s\t%s\t%s\n' "$(hr_size "${_out_sz[$np]}")" "${_out_dc[$np]}" "$p"
+    else
+        printf '%s\t%s\t%s\n' "${_out_sz[$np]}" "${_out_dc[$np]}" "$p"
+    fi
 done
 $verbose && _dus_vstage "done: $_dus_v_out output, $_dus_v_du_fallback du fallback(s)" || true
 true
