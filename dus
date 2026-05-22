@@ -754,27 +754,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             to_scan.append(root)
 
-    # Collapse sibling misses to parent scan
+    # Collapse sibling scans to parent when all roots share a parent
     if len(to_scan) > 1 and len(to_scan) == len(roots):
         common_parent = str(Path(to_scan[0]).parent)
         if all(str(Path(r).parent) == common_parent for r in to_scan):
-            still_missing: List[str] = []
-            for r in to_scan:
-                if isinstance(store, DusDB) and store.get_size(r) is not None:
-                    continue
-                still_missing.append(r)
-            if not still_missing:
-                to_scan = []
-            elif isinstance(store, DusDB) and store.has_scan(common_parent):
+            if cfg.refresh or cfg.no_cache:
                 cfg.vstage(
-                    f"retry parent scan for {len(still_missing)} missing sibling(s)"
+                    f"refresh: scanning parent {progress_label(common_parent)} "
+                    f"for {len(to_scan)} sibling(s)"
                 )
-                to_scan = []
-                for r in still_missing:
-                    if store.get_size(r) is None:
-                        to_scan.append(r)
-            elif len(to_scan) == len(roots):
                 to_scan = [common_parent]
+            else:
+                still_missing: List[str] = []
+                for r in to_scan:
+                    if isinstance(store, DusDB) and store.get_size(r) is not None:
+                        continue
+                    still_missing.append(r)
+                if not still_missing:
+                    to_scan = []
+                elif isinstance(store, DusDB) and store.has_scan(common_parent):
+                    cfg.vstage(
+                        f"retry parent scan for {len(still_missing)} missing sibling(s)"
+                    )
+                    to_scan = []
+                    for r in still_missing:
+                        if store.get_size(r) is None:
+                            to_scan.append(r)
+                elif len(to_scan) == len(roots):
+                    to_scan = [common_parent]
 
     if not status_printed:
         if not to_scan:
