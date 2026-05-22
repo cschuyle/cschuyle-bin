@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# dus — disk usage for a list of paths, tree-ordered with siblings sorted by size ascending.
+# dus — disk usage for paths; postorder tree (children before parents), siblings by size ascending.
 # Scans minimal roots with du; caches in SQLite (~/.dus/dus.db). Stdlib only.
 from __future__ import annotations
 
@@ -510,19 +510,6 @@ def dircount_from_store(store: object, np: str) -> int:
     return store.dircount(np)  # type: ignore[union-attr]
 
 
-def input_parent_of(norm_paths: Dict[str, str], norm_inputs: List[str], np: str) -> str:
-    best = ""
-    best_len = -1
-    for orig in norm_inputs:
-        nq = norm_paths[orig]
-        if np == nq:
-            continue
-        if is_proper_prefix(nq, np) and len(nq) > best_len:
-            best = nq
-            best_len = len(nq)
-    return best
-
-
 def forest_roots(norm_paths: Dict[str, str], norm_inputs: List[str]) -> List[str]:
     roots: List[str] = []
     nps = [norm_paths[p] for p in norm_inputs]
@@ -539,24 +526,92 @@ def forest_roots(norm_paths: Dict[str, str], norm_inputs: List[str]) -> List[str
     return roots
 
 
-def collect_preorder(
+def _inputs_under(np: str, norm_paths: Dict[str, str], norm_inputs: List[str]) -> List[str]:
+    return [
+        norm_paths[orig]
+        for orig in norm_inputs
+        if norm_paths[orig] != np and is_proper_prefix(np, norm_paths[orig])
+    ]
+
+
+def _collect_fs_postorder(
+    np: str,
+    allowed: set[str],
+    sizes: Dict[str, int],
+    order: List[str],
+) -> None:
+    """Postorder within allowed set: children (size-sorted) first, then np."""
+    p_np = Path(np)
+    kids = sorted(
+        (k for k in allowed if Path(k).parent == p_np),
+        key=lambda k: sizes.get(k, -1),
+    )
+    for k in kids:
+        _collect_fs_postorder(k, allowed, sizes, order)
+    order.append(np)
+
+
+def _collect_segment_bucket(
+    np: str,
+    seg: str,
+    bucket: List[str],
+    sizes: Dict[str, int],
+    order: List[str],
+) -> None:
+    """Postorder under np/<segment>/; segment dir (e.g. video) last in its group."""
+    allowed = set(bucket)
+    parent_path = f"{np}/{seg}"
+    if parent_path in allowed:
+        _collect_fs_postorder(parent_path, allowed, sizes, order)
+        return
+    roots: List[str] = []
+    for k in bucket:
+        if any(k != o and is_proper_prefix(o, k) for o in bucket):
+            continue
+        roots.append(k)
+    for k in sorted(roots, key=lambda x: sizes.get(x, -1)):
+        _collect_fs_postorder(k, allowed, sizes, order)
+
+
+def collect_postorder(
     np: str,
     norm_paths: Dict[str, str],
     norm_inputs: List[str],
     sizes: Dict[str, int],
     order: List[str],
 ) -> None:
+    """Postorder under np: descendants first (grouped), parent np last."""
+    p_np = Path(np)
+    under = _inputs_under(np, norm_paths, norm_inputs)
+    under_set = set(under)
+
+    direct = sorted(
+        (k for k in under if Path(k).parent == p_np),
+        key=lambda k: sizes.get(k, -1),
+    )
+    covered: set[str] = set()
+    for k in direct:
+        _collect_fs_postorder(k, under_set, sizes, order)
+        covered.add(k)
+        for o in under:
+            if is_proper_prefix(k, o):
+                covered.add(o)
+
+    remaining = [k for k in under if k not in covered]
+    prefix = np + "/"
+    segments: Dict[str, List[str]] = {}
+    for k in remaining:
+        rest = k[len(prefix) :]
+        seg = rest.split("/")[0]
+        segments.setdefault(seg, []).append(k)
+
+    for seg in sorted(
+        segments.keys(),
+        key=lambda s: min(sizes.get(k, -1) for k in segments[s]),
+    ):
+        _collect_segment_bucket(np, seg, segments[seg], sizes, order)
+
     order.append(np)
-    kids: List[str] = []
-    for orig in norm_inputs:
-        k = norm_paths[orig]
-        if k == np:
-            continue
-        if input_parent_of(norm_paths, norm_inputs, k) == np:
-            kids.append(k)
-    kids.sort(key=lambda k: sizes.get(k, -1))
-    for k in kids:
-        collect_preorder(k, norm_paths, norm_inputs, sizes, order)
 
 
 def excluded_basename(path: str, patterns: Sequence[str]) -> bool:
@@ -772,7 +827,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     froots.sort(key=lambda k: out_sz.get(k, -1))
     print_order: List[str] = []
     for np in froots:
-        collect_preorder(np, norm_paths, norm_inputs, out_sz, print_order)
+        has_descendants = any(
+            is_proper_prefix(np, norm_paths[p]) for p in paths
+        )
+        if has_descendants:
+            collect_postorder(np, norm_paths, norm_inputs, out_sz, print_order)
+        else:
+            print_order.append(np)
     printed = set(print_order)
     orphans = [norm_paths[p] for p in paths if norm_paths[p] not in printed]
     orphans.sort(key=lambda k: out_sz.get(k, -1))
