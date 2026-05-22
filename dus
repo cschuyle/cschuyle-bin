@@ -1,1290 +1,832 @@
-#!/usr/bin/env bash
+#!/usr/bin/env python3
 # dus — disk usage for a list of paths, tree-ordered with siblings sorted by size ascending.
-# Scans only the minimal set of root paths needed, then extracts sizes for each requested path.
-# Results are cached in ~/.dus/ and reused on subsequent runs (use --refresh to rescan).
-set -euo pipefail
+# Scans minimal roots with du; caches in SQLite (~/.dus/dus.db). Stdlib only.
+from __future__ import annotations
 
-prog="$(basename "$0")"
-human_readable=false
-verbose=false
-no_cache=false
-refresh_cache=false
-clear_cache=false
-excludes=()
+import argparse
+import fnmatch
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-DUS_CACHE_DIR="${DUS_CACHE_DIR:-$HOME/.dus}"
+PROG = Path(sys.argv[0]).name or "dus"
+BATCH = 8000
 
-print_usage() {
-    echo "Usage: $prog [-h] [-v] [--no-cache] [--refresh] [-c] [--exclude <pattern>]... <path> [path ...]" >&2
-    echo "  -h                  Human-readable sizes (B, K, M, G, T)" >&2
-    echo "  -v                  Verbose: du commands, cache decisions, and timing on stderr" >&2
-    echo "  --no-cache          Skip reading and writing the cache for this run" >&2
-    echo "  --refresh           Ignore cache and rescan (still updates cache)" >&2
-    echo "  -c/--clearcache/--clear  Delete all cached data and exit" >&2
-    echo "  --exclude <pat>     Exclude files/dirs matching glob pattern (repeatable)" >&2
-}
-usage() { print_usage; exit 1; }
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --help) print_usage; exit 0 ;;
-        -h) human_readable=true; shift ;;
-        -v) verbose=true; shift ;;
-        --no-cache) no_cache=true; shift ;;
-        --refresh) refresh_cache=true; shift ;;
-        -c|--clearcache|--clear) clear_cache=true; shift ;;
-        --exclude)
-            [[ $# -ge 2 ]] || { echo "$prog: --exclude requires a value" >&2; exit 1; }
-            excludes+=("$2"); shift 2 ;;
-        --exclude=*) excludes+=("${1#*=}"); shift ;;
-        --) shift; break ;;
-        -*) echo "$prog: unknown option: $1" >&2; usage ;;
-        *) break ;;
-    esac
-done
+def hr_size(kb: int) -> str:
+    kb = kb or 0
+    b = kb * 1024
+    if b < 1024:
+        return f"{b}B"
+    if b < 1048576:
+        return f"{b // 1024}.{(b % 1024) * 10 // 1024}K"
+    if b < 1073741824:
+        b //= 1024
+        return f"{b // 1024}.{(b % 1024) * 10 // 1024}M"
+    if b < 1099511627776:
+        b //= 1048576
+        return f"{b // 1024}.{(b % 1024) * 10 // 1024}G"
+    b //= 1073741824
+    return f"{b // 1024}.{(b % 1024) * 10 // 1024}T"
 
-if $clear_cache; then
-    if [[ -d "$DUS_CACHE_DIR" ]]; then
-        rm -rf "$DUS_CACHE_DIR"
-        echo "$prog: cleared cache: $DUS_CACHE_DIR" >&2
-    else
-        echo "$prog: no cache to clear: $DUS_CACHE_DIR" >&2
-    fi
-    exit 0
-fi
 
-[[ $# -eq 0 ]] && { echo "$prog: at least one path required" >&2; usage; }
+def normalize_path(p: str) -> str:
+    p = p.rstrip("/") or "."
+    path = Path(p)
+    if p == ".":
+        return str(path.resolve())
+    try:
+        parent = path.parent.resolve()
+        return str(parent / path.name)
+    except OSError:
+        return str(path.parent / path.name)
 
-# Resolve to absolute path, no trailing slash.
-normalize_path() {
-    local p="${1%/}"
-    if [[ "$p" == "." ]]; then
-        pwd -P
-        return
-    fi
-    local dir base
-    base="$(basename -- "$p")"
-    if dir="$(cd "$(dirname -- "$p")" 2>/dev/null && pwd -P)"; then
-        printf '%s/%s' "$dir" "$base"
-    else
-        # Parent doesn't exist; best-effort: keep dirname as-is
-        printf '%s/%s' "$(dirname -- "$p")" "$base"
-    fi
-}
 
-# True if $1 is a strict path prefix of $2 (i.e. $2 is inside $1).
-is_proper_prefix() { [[ "$2" == "$1/"* ]]; }
+def is_proper_prefix(parent: str, child: str) -> bool:
+    return child.startswith(parent + "/")
 
-# Print command to stderr if -v is set.
-_dus_vlog() { $verbose && printf '%s: %s +%ds %s\n' "$prog" "$(date '+%Y-%m-%dT%H:%M:%S')" "$(( SECONDS - _dus_t0 ))" "$*" >&2 || true; }
-vlog() { $verbose && _dus_vlog "+ $(printf '%q ' "$@")" || true; }
 
-# Elapsed-time stage log (bash SECONDS); no-op unless -v.
-_dus_t0=0
-_dus_vstage() { $verbose && _dus_vlog "$@" || true; }
+def du_bin() -> str:
+    return "gdu" if shutil.which("gdu") else "du"
 
-# One-line run status on stderr (always, not only -v).
-_dus_status_printed=false
-_dus_sibling_listing=false
-_sib_parent=""
-_dircount_index_built=false
-_child_index_built=false
-declare -A _dircount_map=()
-declare -A _known_norm_paths=()
-declare -A _children_of=()
-declare -A _cache_fully_passed=()
-declare -A _slim_loaded_for=()
-declare -A _header_only_root=()
 
-_dus_early_feedback() {
-    if $no_cache || $refresh_cache; then
-        printf '%s: HOLD ON, SCANNING DIRECTORIES\n' "$prog" >&2
-        _dus_status_printed=true
-    else
-        printf '%s: READING CACHE...\n' "$prog" >&2
-    fi
-}
+def dev_id(path: str) -> Optional[int]:
+    try:
+        return os.stat(path).st_dev
+    except OSError:
+        return None
 
-_dus_print_run_status() {
-    if $_dus_status_printed; then
+
+def progress_label(path: str) -> str:
+    p = path.rstrip("/")
+    if not p:
+        return ""
+    name = p.split("/")[-1]
+    return name if len(p) <= 48 else f"…/{name}"
+
+
+class DusDB:
+    SCHEMA = """
+    CREATE TABLE IF NOT EXISTS scans (
+        root_path   TEXT PRIMARY KEY,
+        scanned_at  TEXT NOT NULL,
+        rootsize_kb INTEGER NOT NULL,
+        dircount    INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS entries (
+        path        TEXT PRIMARY KEY,
+        parent_path TEXT NOT NULL,
+        scan_root   TEXT NOT NULL,
+        size_kb     INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_entries_parent ON entries(parent_path);
+    CREATE INDEX IF NOT EXISTS idx_entries_scan_root ON entries(scan_root);
+    CREATE INDEX IF NOT EXISTS idx_entries_parent_size ON entries(parent_path, size_kb);
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        self.path = db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(db_path)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.executescript(self.SCHEMA)
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def clear(self) -> None:
+        self.conn.execute("DELETE FROM entries")
+        self.conn.execute("DELETE FROM scans")
+        self.conn.commit()
+
+    def has_scan(self, root: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM scans WHERE root_path = ?", (root,)
+        ).fetchone()
+        return row is not None
+
+    def scan_meta(self, root: str) -> Optional[Tuple[str, int, int]]:
+        row = self.conn.execute(
+            "SELECT scanned_at, rootsize_kb, dircount FROM scans WHERE root_path = ?",
+            (root,),
+        ).fetchone()
+        return row if row else None
+
+    def get_size(self, path: str) -> Optional[int]:
+        row = self.conn.execute(
+            "SELECT size_kb FROM entries WHERE path = ?", (path,)
+        ).fetchone()
+        return int(row[0]) if row else None
+
+    def get_children(self, parent: str) -> List[Tuple[str, int]]:
+        rows = self.conn.execute(
+            "SELECT path, size_kb FROM entries WHERE parent_path = ? ORDER BY size_kb",
+            (parent,),
+        ).fetchall()
+        return [(r[0], int(r[1])) for r in rows]
+
+    def dircount(self, path: str) -> int:
+        meta = self.scan_meta(path)
+        if meta is not None:
+            return meta[2]
+        like = path + "/%"
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM entries WHERE path = ? OR path LIKE ?",
+            (path, like),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def delete_scan(self, root: str) -> None:
+        self.conn.execute("DELETE FROM entries WHERE scan_root = ?", (root,))
+        self.conn.execute("DELETE FROM scans WHERE root_path = ?", (root,))
+        self.conn.commit()
+
+    def store_scan(
+        self,
+        root: str,
+        scanned_at: str,
+        rootsize_kb: int,
+        dircount: int,
+        rows: Sequence[Tuple[str, str, str, int]],
+    ) -> None:
+        self.delete_scan(root)
+        self.conn.execute(
+            "INSERT INTO scans (root_path, scanned_at, rootsize_kb, dircount) VALUES (?,?,?,?)",
+            (root, scanned_at, rootsize_kb, dircount),
+        )
+        for i in range(0, len(rows), BATCH):
+            self.conn.executemany(
+                "INSERT INTO entries (path, parent_path, scan_root, size_kb) VALUES (?,?,?,?)",
+                rows[i : i + BATCH],
+            )
+        self.conn.commit()
+
+
+@dataclass
+class MemoryCache:
+    """In-memory sizes when --no-cache."""
+
+    sizes: Dict[str, int] = field(default_factory=dict)
+
+    def get_size(self, path: str) -> Optional[int]:
+        return self.sizes.get(path)
+
+    def get_children(self, parent: str) -> List[Tuple[str, int]]:
+        kids = [
+            (p, s)
+            for p, s in self.sizes.items()
+            if p != parent and p.startswith(parent + "/") and "/" not in p[len(parent) + 1 :]
+        ]
+        kids.sort(key=lambda x: x[1])
+        return kids
+
+    def dircount(self, path: str) -> int:
+        n = 1 if path in self.sizes else 0
+        prefix = path + "/"
+        for p in self.sizes:
+            if p.startswith(prefix):
+                n += 1
+        return n
+
+
+@dataclass
+class Config:
+    human: bool = False
+    verbose: bool = False
+    no_cache: bool = False
+    refresh: bool = False
+    excludes: List[str] = field(default_factory=list)
+    cache_dir: Path = field(default_factory=lambda: Path.home() / ".dus")
+    db_path: Optional[Path] = None
+    t0: float = field(default_factory=time.monotonic)
+
+    @property
+    def db_file(self) -> Path:
+        return self.db_path or (self.cache_dir / "dus.db")
+
+    def elapsed(self) -> int:
+        return int(time.monotonic() - self.t0)
+
+    def vlog(self, msg: str) -> None:
+        if self.verbose:
+            ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            print(f"{PROG}: {ts} +{self.elapsed()}s {msg}", file=sys.stderr)
+
+    def vstage(self, msg: str) -> None:
+        self.vlog(msg)
+
+    def status(self, msg: str) -> None:
+        print(f"{PROG}: {msg} +{self.elapsed()}s", file=sys.stderr)
+
+
+def rebase_path(canonical_root: str, rawp: str, du_root_path: str) -> str:
+    rawp = rawp.rstrip("/")
+    if du_root_path and (
+        rawp == du_root_path or rawp.startswith(du_root_path + "/")
+    ):
+        return canonical_root + rawp[len(du_root_path) :]
+    return rawp
+
+
+def scan_progress(
+    cfg: Config,
+    n: int,
+    est: int,
+    root_name: str,
+    cur_path: str = "",
+) -> None:
+    elapsed = cfg.elapsed()
+    cur = progress_label(cur_path) if cur_path else ""
+    if est > 0:
+        pct = min(100, n * 100 // est)
+        filled = min(20, n * 20 // est)
+        bar = "=" * filled + (">" if filled < 20 else "") + " " * (19 - filled)
+        if root_name and cur:
+            msg = f"{PROG}: {root_name} [{bar}] {n}/{est} dirs ({pct}%) at {cur} +{elapsed}s"
+        elif root_name:
+            msg = f"{PROG}: {root_name} [{bar}] {n}/{est} dirs ({pct}%) +{elapsed}s"
+        else:
+            msg = f"{PROG}: [{bar}] {n}/{est} dirs ({pct}%) +{elapsed}s"
+    else:
+        if root_name and cur:
+            msg = f"{PROG}: {root_name} scanned {n} directories at {cur} +{elapsed}s"
+        elif root_name:
+            msg = f"{PROG}: {root_name} scanned {n} directories +{elapsed}s"
+        else:
+            msg = f"{PROG}: scanned {n} directories +{elapsed}s"
+    if sys.stderr.isatty():
+        print(f"\r{msg}", file=sys.stderr, end="", flush=True)
+    elif n == 1 or n % 5000 == 0:
+        print(msg, file=sys.stderr)
+
+
+def run_du_scan(
+    cfg: Config,
+    root: str,
+    du: str,
+    extra_args: Sequence[str],
+) -> Tuple[int, int, List[Tuple[str, str, str, int]]]:
+    """Run du -k, return (rootsize_kb, dircount, entry rows)."""
+    est = 0
+    if not cfg.no_cache:
+        db_tmp = DusDB(cfg.db_file)
+        meta = db_tmp.scan_meta(root)
+        db_tmp.close()
+        if meta:
+            est = meta[2]
+    progress_every = max(1, est // 80 + 1) if est > 0 else 250
+    label = progress_label(root)
+    cfg.vlog(f"scanning {root}...")
+    cmd = [du, "-k", *extra_args, root]
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    lines: List[Tuple[int, str]] = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            sz = int(parts[0])
+        except ValueError:
+            continue
+        rawp = parts[1].rstrip("/")
+        if rawp:
+            lines.append((sz, rawp))
+    proc.wait()
+    if proc.returncode not in (0, None):
+        cfg.vstage(f"du exited {proc.returncode} for {root}")
+
+    du_root_path = lines[-1][1] if lines else ""
+    rows: List[Tuple[str, str, str, int]] = []
+    rootsize_kb = 0
+    n = 0
+    for sz, rawp in lines:
+        rebased = rebase_path(root, rawp, du_root_path)
+        if not rebased:
+            continue
+        parent = str(Path(rebased).parent)
+        if rebased == parent and rebased != root:
+            parent = str(Path(rebased).parent)
+        rows.append((rebased, parent, root, sz))
+        if rebased == root:
+            rootsize_kb = sz
+        n += 1
+        if n == 1 or n % progress_every == 0:
+            scan_progress(cfg, n, est, label, rebased)
+    scan_progress(cfg, n, est, label, root)
+    if sys.stderr.isatty():
+        print(file=sys.stderr)
+    if est > 0:
+        print(
+            f"{PROG}: {label} scanned {n} directories (est. was {est}) +{cfg.elapsed()}s",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"{PROG}: {label} scanned {n} directories +{cfg.elapsed()}s",
+            file=sys.stderr,
+        )
+    cfg.vlog(f"scanned {n} directories")
+    return rootsize_kb, n, rows
+
+
+def stale_vs_child_scans(
+    cfg: Config,
+    db: DusDB,
+    np: str,
+    parent_scanned: str,
+) -> bool:
+    if not parent_scanned or not os.path.isdir(np):
+        return False
+    cfg.vstage(f"stale check: scanning child caches under {progress_label(np)}")
+    n = 0
+    try:
+        names = os.listdir(np)
+    except OSError:
+        return False
+    for name in names:
+        child = os.path.join(np, name)
+        if not os.path.isdir(child):
+            continue
+        n += 1
+        nchild = normalize_path(child)
+        meta = db.scan_meta(nchild)
+        if not meta:
+            continue
+        cscanned, csize, _ = meta
+        if cscanned <= parent_scanned:
+            continue
+        psize = db.get_size(nchild)
+        if psize is None or psize != csize:
+            cfg.vstage(
+                f"stale: newer child scan {progress_label(nchild)} "
+                f"(child={csize} parent_map={psize})"
+            )
+            return True
+    cfg.vstage(f"stale check: {n} dirs, no newer child scan")
+    return False
+
+
+def is_scan_stale(cfg: Config, db: DusDB, np: str, header_only: bool = False) -> bool:
+    meta = db.scan_meta(np)
+    if not meta:
+        return True
+    scanned_at, rootsize_kb, _ = meta
+    if stale_vs_child_scans(cfg, db, np, scanned_at):
+        return True
+    if header_only:
+        return False
+    pdev = dev_id(np)
+    if pdev is None:
+        return False
+    rsz = db.get_size(np) or rootsize_kb
+    for cpath, csz in db.get_children(np):
+        if csz <= rsz:
+            continue
+        if not os.path.isdir(cpath):
+            continue
+        cdev = dev_id(cpath)
+        if cdev is not None and cdev == pdev:
+            cfg.vstage(f"stale: same-fs child larger than root for {progress_label(np)}")
+            return True
+    return False
+
+
+def reconcile_size(
+    store: object,
+    np: str,
+    sz: int,
+) -> int:
+    if not os.path.isdir(np):
+        return sz
+
+    def children() -> List[Tuple[str, int]]:
+        if isinstance(store, DusDB):
+            return store.get_children(np)
+        return store.get_children(np)  # type: ignore[union-attr]
+
+    kids = children()
+    if not kids:
+        return sz
+    max_child = max(s for _, s in kids)
+    sum_child = sum(s for _, s in kids)
+    if max_child <= sz:
+        return sz
+    pdev = dev_id(np)
+    if pdev is None:
+        return sz
+    for cpath, csz in kids:
+        if csz <= sz:
+            continue
+        if not os.path.isdir(cpath):
+            continue
+        cdev = dev_id(cpath)
+        if cdev is not None and cdev != pdev:
+            return sum_child
+    return sz
+
+
+def minimal_scan_roots(norm_paths: Sequence[str]) -> List[str]:
+    roots: List[str] = []
+    seen: set[str] = set()
+    for i, np in enumerate(norm_paths):
+        covered = False
+        for j, nq in enumerate(norm_paths):
+            if i == j:
+                continue
+            if is_proper_prefix(nq, np):
+                covered = True
+                break
+        if not covered and np not in seen:
+            roots.append(np)
+            seen.add(np)
+    return roots
+
+
+def get_size_from_store(store: object, path: str) -> Optional[int]:
+    if isinstance(store, DusDB):
+        return store.get_size(path)
+    return store.get_size(path)  # type: ignore[union-attr]
+
+
+def resolve_size(
+    cfg: Config,
+    store: object,
+    np: str,
+    sibling_parent: Optional[str],
+    skip_reconcile: bool,
+) -> int:
+    sz = get_size_from_store(store, np)
+    if sz is None:
+        du = du_bin()
+        args: List[str] = []
+        if cfg.no_cache and cfg.excludes and du == "gdu":
+            args = [f"--exclude={p}" for p in cfg.excludes]
+        cfg.vlog(f"+ {du} -sk {' '.join(args)} {np}")
+        try:
+            out = subprocess.run(
+                [du, "-sk", *args, np],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            line = out.stdout.strip().split()
+            sz = int(line[0]) if line else 0
+        except (OSError, ValueError):
+            sz = 0
+        if os.path.isdir(np):
+            print(
+                f"{PROG}: WARNING: {np} not found in cache; ran du directly",
+                file=sys.stderr,
+            )
+        return sz or 0
+
+    if not skip_reconcile:
+        sz = reconcile_size(store, np, sz)
+    return sz
+
+
+def dircount_from_store(store: object, np: str) -> int:
+    if not os.path.isdir(np):
         return 0
-    fi
-    _dus_status_printed=true
-    if [[ ${#to_scan[@]} -eq 0 ]]; then
-        printf '%s: ALL DATA IS CACHED\n' "$prog" >&2
-    else
-        printf '%s: HOLD ON, SCANNING DIRECTORIES\n' "$prog" >&2
-    fi
-}
+    if isinstance(store, DusDB):
+        return store.dircount(np)
+    return store.dircount(np)  # type: ignore[union-attr]
 
-# Always-on stderr status with elapsed seconds (scan/write/output phases).
-_dus_status() {
-    printf '%s: %s +%ds\n' "$prog" "$*" "$(( SECONDS - _dus_t0 ))" >&2
-}
 
-# Format 1K-block count as human-readable (B, K, M, G, T); pure bash (no awk).
-hr_size() {
-    local kb=$1 b
-    kb=${kb:-0}
-    b=$((kb * 1024))
-    if (( b < 1024 )); then
-        printf '%dB' "$b"
-    elif (( b < 1048576 )); then
-        printf '%d.%dK' $((b / 1024)) $(((b % 1024) * 10 / 1024))
-    elif (( b < 1073741824 )); then
-        b=$((b / 1024))
-        printf '%d.%dM' $((b / 1024)) $(((b % 1024) * 10 / 1024))
-    elif (( b < 1099511627776 )); then
-        b=$((b / 1048576))
-        printf '%d.%dG' $((b / 1024)) $(((b % 1024) * 10 / 1024))
-    else
-        b=$((b / 1073741824))
-        printf '%d.%dT' $((b / 1024)) $(((b % 1024) * 10 / 1024))
-    fi
-}
+def input_parent_of(norm_paths: Dict[str, str], norm_inputs: List[str], np: str) -> str:
+    best = ""
+    best_len = -1
+    for orig in norm_inputs:
+        nq = norm_paths[orig]
+        if np == nq:
+            continue
+        if is_proper_prefix(nq, np) and len(nq) > best_len:
+            best = nq
+            best_len = len(nq)
+    return best
 
-# Lexicographic sort of string array (zero-padded keys sort numerically).
-_dus_order_lines() {
-    local -a _lines=("$@") _tmp
-    local _i _j
-    for ((_i = 0; _i < ${#_lines[@]}; _i++)); do
-        for ((_j = _i + 1; _j < ${#_lines[@]}; _j++)); do
-            if [[ "${_lines[_i]}" > "${_lines[_j]}" ]]; then
-                _tmp="${_lines[_i]}"
-                _lines[_i]="${_lines[_j]}"
-                _lines[_j]="$_tmp"
-            fi
-        done
-    done
-    printf '%s\n' "${_lines[@]}"
-}
 
-# Bubble-sort normalized paths by ascending _out_sz (print phase only).
-_dus_sort_nps_by_sz() {
-    local _arr_name="$1"
-    local -n _nps="$_arr_name"
-    local _i _j _min _tmp _sz_a _sz_b
-    for ((_i = 0; _i < ${#_nps[@]}; _i++)); do
-        _min=$_i
-        for ((_j = _i + 1; _j < ${#_nps[@]}; _j++)); do
-            _sz_a="${_out_sz["${_nps[_j]}"]:--1}"
-            _sz_b="${_out_sz["${_nps[_min]}"]:--1}"
-            if (( _sz_a < _sz_b )); then
-                _min=$_j
-            fi
-        done
-        if ((_min != _i)); then
-            _tmp="${_nps[_i]}"
-            _nps[_i]="${_nps[_min]}"
-            _nps[_min]="$_tmp"
-        fi
-    done
-}
+def forest_roots(norm_paths: Dict[str, str], norm_inputs: List[str]) -> List[str]:
+    roots: List[str] = []
+    nps = [norm_paths[p] for p in norm_inputs]
+    for i, np in enumerate(nps):
+        is_root = True
+        for j, nq in enumerate(nps):
+            if i == j:
+                continue
+            if is_proper_prefix(nq, np):
+                is_root = False
+                break
+        if is_root:
+            roots.append(np)
+    return roots
 
-# Longest input path that is a proper prefix of np (nearest input ancestor).
-_input_parent_of() {
-    local np="$1" q nq best="" len=0 blen
-    np="$(normalize_path "$np")"
-    for q in "${inputs[@]}"; do
-        nq="${norm_of[$q]}"
-        [[ "$np" == "$nq" ]] && continue
-        is_proper_prefix "$nq" "$np" || continue
-        blen=${#nq}
-        if (( blen > len )); then
-            best="$nq"
-            len=$blen
-        fi
-    done
-    printf '%s' "$best"
-}
 
-# Preorder walk: emit np, then nearest-input-children (size-sorted), recurse.
-_dus_collect_preorder() {
-    local np="$1" p k parent
-    _print_order+=("$np")
-    declare -a _kids=()
-    for p in "${inputs[@]}"; do
-        k="${norm_of[$p]}"
-        [[ "$k" == "$np" ]] && continue
-        parent="$(_input_parent_of "$k")"
-        [[ "$parent" == "$np" ]] && _kids+=("$k")
-    done
-    if [[ ${#_kids[@]} -gt 0 ]]; then
-        _dus_sort_nps_by_sz _kids
-        for k in "${_kids[@]}"; do
-            _dus_collect_preorder "$k"
-        done
-    fi
-}
+def collect_preorder(
+    np: str,
+    norm_paths: Dict[str, str],
+    norm_inputs: List[str],
+    sizes: Dict[str, int],
+    order: List[str],
+) -> None:
+    order.append(np)
+    kids: List[str] = []
+    for orig in norm_inputs:
+        k = norm_paths[orig]
+        if k == np:
+            continue
+        if input_parent_of(norm_paths, norm_inputs, k) == np:
+            kids.append(k)
+    kids.sort(key=lambda k: sizes.get(k, -1))
+    for k in kids:
+        collect_preorder(k, norm_paths, norm_inputs, sizes, order)
 
-# True when np has descendant paths among inputs.
-_has_input_descendants() {
-    local np="$1" p nq
-    np="$(normalize_path "$np")"
-    for p in "${inputs[@]}"; do
-        nq="${norm_of[$p]}"
-        [[ "$nq" != "$np" ]] && is_proper_prefix "$np" "$nq" && return 0
-    done
-    return 1
-}
 
-# One slim cache read so header-only roots have direct-child sizes for descendants.
-_preload_header_root_children() {
-    local np="$1" cf
-    np="$(normalize_path "$np")"
-    _has_input_descendants "$np" || return 0
-    _cf="$(_cache_path_for_root "$np")"
-    [[ -f "$_cf" ]] || return 0
-    [[ -n "${_slim_loaded_for[$np]+x}" || -n "${_cache_fully_passed[$_cf]+x}" ]] && return 0
-    $verbose && _dus_vstage "preload direct children of $(basename "$np") for nested inputs"
-    _load_cache "$_cf" "$np" || true
-}
+def excluded_basename(path: str, patterns: Sequence[str]) -> bool:
+    base = path.split("/")[-1]
+    return any(fnmatch.fnmatchcase(base, pat) for pat in patterns)
 
-# Prefer GNU du (gdu from homebrew) for --exclude support on macOS.
-DU_BIN="du"
-command -v gdu >/dev/null 2>&1 && DU_BIN="gdu"
 
-# Cache file path for a given root directory.
-_cache_path_for_root() {
-    local root="$1" hash
-    if command -v md5 >/dev/null 2>&1; then
-        hash="$(md5 -q -s "$root")"
-    else
-        hash="$(printf '%s' "$root" | md5sum | cut -c1-32)"
-    fi
-    printf '%s/%s.cache' "$DUS_CACHE_DIR" "$hash"
-}
+def parse_args(argv: Sequence[str]) -> Tuple[Config, List[str]]:
+    parser = argparse.ArgumentParser(prog=PROG, add_help=False)
+    parser.add_argument("--help", action="store_true")
+    parser.add_argument("-h", "--human-readable", action="store_true")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("-c", "--clearcache", "--clear", action="store_true")
+    parser.add_argument("--exclude", action="append", default=[])
+    parser.add_argument("--db", metavar="PATH", default=None)
+    parser.add_argument("paths", nargs="*")
+    ns = parser.parse_args(list(argv))
+    paths = ns.paths
+    if ns.clearcache:
+        cfg = Config()
+        if ns.db:
+            cfg.db_path = Path(ns.db)
+        if os.environ.get("DUS_CACHE_DIR"):
+            cfg.cache_dir = Path(os.environ["DUS_CACHE_DIR"])
+        dbf = cfg.db_file
+        if dbf.exists():
+            dbf.unlink()
+            print(f"{PROG}: cleared cache: {dbf}", file=sys.stderr)
+        else:
+            print(f"{PROG}: no cache to clear: {dbf}", file=sys.stderr)
+        return Config(), []
+    if ns.help:
+        print(
+            f"Usage: {PROG} [-h] [-v] [--no-cache] [--refresh] [-c] "
+            f"[--exclude <pattern>]... [--db PATH] <path> [path ...]",
+            file=sys.stderr,
+        )
+        print("  -h                  Human-readable sizes (B, K, M, G, T)", file=sys.stderr)
+        print(
+            "  -v                  Verbose: du commands, cache decisions, timing on stderr",
+            file=sys.stderr,
+        )
+        print("  --no-cache          Skip reading and writing the cache for this run", file=sys.stderr)
+        print("  --refresh           Ignore cache and rescan (still updates cache)", file=sys.stderr)
+        print("  -c/--clearcache      Delete cached database and exit", file=sys.stderr)
+        print("  --exclude <pat>     Exclude by basename glob (repeatable)", file=sys.stderr)
+        print("  --db PATH           SQLite cache file (default: ~/.dus/dus.db)", file=sys.stderr)
+        sys.exit(0)
+    if not paths:
+        print(f"{PROG}: at least one path required", file=sys.stderr)
+        sys.exit(1)
+    cfg = Config(
+        human=ns.human_readable,
+        verbose=ns.verbose,
+        no_cache=ns.no_cache,
+        refresh=ns.refresh,
+        excludes=list(ns.exclude or []),
+    )
+    if ns.db:
+        cfg.db_path = Path(ns.db)
+    if os.environ.get("DUS_CACHE_DIR"):
+        cfg.cache_dir = Path(os.environ["DUS_CACHE_DIR"])
+    return cfg, paths
 
-# Read one '# field: value' header line from a cache file.
-_cache_header_field() {
-    local cache_file="$1" want="$2" line key val
-    [[ -f "$cache_file" ]] || return 1
-    while IFS= read -r line; do
-        case "$line" in
-            '# '*) key="${line%%:*}"; key="${key#\# }"; val="${line#*: }"
-                   [[ "$key" == "$want" ]] && { printf '%s' "$val"; return 0; } ;;
-            '')     ;;
-            *)      return 1 ;;
-        esac
-    done < "$cache_file"
-    return 1
-}
 
-# Estimated directory count from an existing cache file (0 if unknown).
-_cache_dircount_estimate() {
-    local cache_file="$1" n
-    [[ -f "$cache_file" ]] || return 0
-    n="$(_cache_header_field "$cache_file" dircount)" || return 0
-    [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || return 0
-    printf '%s' "$n"
-}
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    argv = argv if argv is not None else sys.argv[1:]
+    cfg, paths = parse_args(argv)
 
-# Recursive directory count for a path (cache header, else entries in size_map).
-_dircount_lines_in_cache() {
-    local cache_file="$1" np="$2" line path cnt=0
-    [[ -f "$cache_file" ]] || { printf '0'; return; }
-    np="$(normalize_path "$np")"
-    while IFS= read -r line; do
-        case "$line" in
-            '# '*|'') ;;
-            *)
-                IFS=$'\t' read -r _ path <<< "$line"
-                [[ -z "$path" ]] && continue
-                [[ "$path" == "$np" || "$path" == "$np/"* ]] || continue
-                (( ++cnt )) || true
-                ;;
-        esac
-    done < "$cache_file"
-    printf '%s' "$cnt"
-}
+    if not paths:
+        return 0
 
-# One pass over parent cache: populate _dircount_map for each direct child subtree.
-_build_dircount_index() {
-    local cache_file="$1" parent_root="$2" line path rest child prefix
-    $_dircount_index_built && return 0
-    [[ -f "$cache_file" ]] || return 1
-    parent_root="$(normalize_path "$parent_root")"
-    prefix="${parent_root}/"
-    local _t=$SECONDS _lines=0
-    $verbose && _dus_vstage "building dircount index from ${cache_file##*/}..."
-    while IFS= read -r line; do
-        case "$line" in
-            '# '*|'') ;;
-            *)
-                (( ++_lines )) || true
-                IFS=$'\t' read -r _ path <<< "$line"
-                [[ -z "$path" ]] && continue
-                if [[ "$path" == "$parent_root" ]]; then
-                    child="$parent_root"
-                elif [[ "$path" == "$prefix"* ]]; then
-                    rest="${path#"$prefix"}"
-                    if [[ "$rest" == */* ]]; then
-                        child="${parent_root}/${rest%%/*}"
-                    else
-                        child="$path"
-                    fi
-                else
+    norm_paths = {p: normalize_path(p) for p in paths}
+    norm_inputs = list(paths)
+
+    if cfg.no_cache or cfg.refresh:
+        print(f"{PROG}: HOLD ON, SCANNING DIRECTORIES", file=sys.stderr)
+        status_printed = True
+    else:
+        print(f"{PROG}: READING CACHE...", file=sys.stderr)
+        status_printed = False
+
+    cfg.vstage("start")
+    cfg.vstage(f"normalized {len(paths)} input path(s)")
+
+    roots = minimal_scan_roots(list(norm_paths.values()))
+    cfg.vstage(f"{len(roots)} scan root(s)")
+
+    db: Optional[DusDB] = None
+    mem = MemoryCache()
+    store: object
+
+    if not cfg.no_cache:
+        db = DusDB(cfg.db_file)
+        store = db
+    else:
+        store = mem
+
+    sibling_parent: Optional[str] = None
+    sibling_listing = False
+    if len(paths) > 1 and not cfg.no_cache and not cfg.refresh:
+        parents = {str(Path(norm_paths[p]).parent) for p in paths}
+        if len(parents) == 1:
+            sibling_parent = next(iter(parents))
+            sibling_listing = True
+            cfg.vstage(f"sibling prefetch from {progress_label(sibling_parent)}")
+
+    use_postfilter = bool(cfg.excludes) and not cfg.no_cache
+    du = du_bin()
+    du_scan_args: List[str] = []
+    if cfg.no_cache and cfg.excludes and du == "gdu":
+        du_scan_args = [f"--exclude={p}" for p in cfg.excludes]
+    elif cfg.excludes and not cfg.no_cache and du != "gdu":
+        print(
+            f"{PROG}: WARNING: GNU du (gdu) not available; --exclude filters by "
+            "basename at output (sizes of excluded dirs still counted in parents)",
+            file=sys.stderr,
+        )
+
+    to_scan: List[str] = []
+    for root in roots:
+        if cfg.no_cache:
+            to_scan.append(root)
+        elif not os.path.isdir(root):
+            continue
+        elif cfg.refresh:
+            to_scan.append(root)
+        elif isinstance(store, DusDB) and store.get_size(root) is not None:
+            if not sibling_listing:
+                maybe_upgrade_child(cfg, store, root)
+            cfg.vstage(f"cache HIT: {root}")
+        elif isinstance(store, DusDB) and store.has_scan(root):
+            if is_scan_stale(cfg, store, root, header_only=True):
+                store.delete_scan(root)
+                to_scan.append(root)
+            else:
+                cfg.vstage(f"cache HIT (metadata): {progress_label(root)}")
+        else:
+            to_scan.append(root)
+
+    # Collapse sibling misses to parent scan
+    if len(to_scan) > 1 and len(to_scan) == len(roots):
+        common_parent = str(Path(to_scan[0]).parent)
+        if all(str(Path(r).parent) == common_parent for r in to_scan):
+            still_missing: List[str] = []
+            for r in to_scan:
+                if isinstance(store, DusDB) and store.get_size(r) is not None:
                     continue
-                fi
-                _dircount_map["$child"]=$(( ${_dircount_map[$child]:-0} + 1 ))
-                ;;
-        esac
-    done < "$cache_file"
-    _dircount_index_built=true
-    $verbose && _dus_vstage "dircount index done: ${_lines} lines, ${#_dircount_map[@]} children, $(( SECONDS - _t ))s"
-}
+                still_missing.append(r)
+            if not still_missing:
+                to_scan = []
+            elif isinstance(store, DusDB) and store.has_scan(common_parent):
+                cfg.vstage(
+                    f"retry parent scan for {len(still_missing)} missing sibling(s)"
+                )
+                to_scan = []
+                for r in still_missing:
+                    if store.get_size(r) is None:
+                        to_scan.append(r)
+            elif len(to_scan) == len(roots):
+                to_scan = [common_parent]
 
-# Build parent dircount index once when needed.
-_ensure_dircount_index() {
-    local parent_root="$1" pcf
-    parent_root="$(normalize_path "$parent_root")"
-    $_dircount_index_built && return 0
-    pcf="$(_cache_path_for_root "$parent_root")"
-    [[ -f "$pcf" ]] || return 1
-    _build_dircount_index "$pcf" "$parent_root"
-}
+    if not status_printed:
+        if not to_scan:
+            print(f"{PROG}: ALL DATA IS CACHED", file=sys.stderr)
+        else:
+            print(f"{PROG}: HOLD ON, SCANNING DIRECTORIES", file=sys.stderr)
 
-# True when np's dircount is available without building a parent index.
-_dircount_resolvable() {
-    local np="$1" cf n
-    [[ -d "$np" ]] || return 0
-    np="$(normalize_path "$np")"
-    cf="$(_cache_path_for_root "$np")"
-    if [[ -f "$cf" ]]; then
-        n="$(_cache_header_field "$cf" dircount)" || true
-        [[ "$n" =~ ^[0-9]+$ ]] && return 0
-    fi
-    [[ -n "${_dircount_map[$np]+x}" ]] && return 0
-    return 1
-}
+    if to_scan:
+        cfg.vstage(f"scanning {len(to_scan)} root(s)")
 
-# True when at least one directory input still needs a parent dircount index.
-_dircount_index_needed() {
-    local p np
-    $_dircount_index_built && return 1
-    for p in "${inputs[@]}"; do
-        np="${norm_of[$p]}"
-        _dircount_resolvable "$np" || return 0
-    done
-    return 1
-}
+    for root in to_scan:
+        if cfg.no_cache:
+            cfg.vlog(f"+ {du} -k {' '.join(du_scan_args)} {root}")
+            rootsize, dircount, rows = run_du_scan(cfg, root, du, du_scan_args)
+            for path, _parent, _root, sz in rows:
+                mem.sizes[path] = sz
+        else:
+            assert db is not None
+            cfg.vlog(f"cache MISS: {root}")
+            rootsize, dircount, rows = run_du_scan(cfg, root, du, [])
+            if dircount >= 500:
+                cfg.status(f"{progress_label(root)} processing {dircount} entries...")
+            scanned_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+            db.store_scan(root, scanned_at, rootsize, dircount, rows)
+            if dircount >= 500:
+                cfg.status(f"{progress_label(root)} cache saved")
 
-_invalidate_child_index() { _child_index_built=false; }
+    if db:
+        store = db
 
-_children_append() {
-    local parent="$1" child="$2"
-    [[ -n "$parent" && -n "$child" ]] || return 0
-    if [[ -n "${_children_of[$parent]+x}" ]]; then
-        _children_of[$parent]+=" $child"
-    else
-        _children_of[$parent]="$child"
-    fi
-}
+    out_sz: Dict[str, int] = {}
+    out_dc: Dict[str, int] = {}
+    out_orig: Dict[str, str] = {}
 
-_children_note() {
-    local path="$1"
-    _children_append "$(dirname "$path")" "$path"
-}
+    cfg.vstage(f"preparing output ({len(paths)} path(s))...")
+    for i, p in enumerate(paths, 1):
+        np = norm_paths[p]
+        cfg.vstage(f"output {i}/{len(paths)}: {progress_label(p)}...")
+        skip_reconcile = sibling_listing and sibling_parent and (
+            str(Path(np).parent) == sibling_parent
+        )
+        sz = resolve_size(cfg, store, np, sibling_parent, skip_reconcile)
+        if skip_reconcile:
+            cfg.vstage(f"output: using parent cache size for {progress_label(np)}")
+        out_sz[np] = sz
+        out_dc[np] = dircount_from_store(store, np)
+        out_orig[np] = p
 
-_ensure_child_index() {
-    local path parent
-    $_child_index_built && return 0
-    for path in "${!size_map[@]}"; do
-        parent="$(dirname "$path")"
-        _children_append "$parent" "$path"
-    done
-    _child_index_built=true
-    $verbose && _dus_vstage "child index built: ${#_children_of[@]} parent(s)"
-}
+    froots = forest_roots(norm_paths, norm_inputs)
+    froots.sort(key=lambda k: out_sz.get(k, -1))
+    print_order: List[str] = []
+    for np in froots:
+        collect_preorder(np, norm_paths, norm_inputs, out_sz, print_order)
+    printed = set(print_order)
+    orphans = [norm_paths[p] for p in paths if norm_paths[p] not in printed]
+    orphans.sort(key=lambda k: out_sz.get(k, -1))
+    print_order.extend(orphans)
+    if not print_order:
+        print_order = [norm_paths[p] for p in paths]
 
-_dircount_for_path() {
-    local np="$1" cf n path cnt=0
-    [[ -d "$np" ]] || { printf '0'; return; }
-    np="$(normalize_path "$np")"
-    cf="$(_cache_path_for_root "$np")"
-    if [[ -f "$cf" ]]; then
-        n="$(_cache_header_field "$cf" dircount)" || true
-        if [[ "$n" =~ ^[0-9]+$ ]]; then
-            printf '%s' "$n"
-            return
-        fi
-    fi
-    if [[ -n "${_dircount_map[$np]+x}" ]]; then
-        printf '%s' "${_dircount_map[$np]}"
+    for np in print_order:
+        if use_postfilter and excluded_basename(np, cfg.excludes):
+            continue
+        orig = out_orig[np]
+        sz = out_sz[np]
+        dc = out_dc[np]
+        if cfg.human:
+            print(f"{hr_size(sz)}\t{dc}\t{orig}")
+        else:
+            print(f"{sz}\t{dc}\t{orig}")
+
+    cfg.vstage(f"done: {len(paths)} output")
+    if db:
+        db.close()
+    return 0
+
+
+def maybe_upgrade_child(cfg: Config, db: DusDB, np: str) -> None:
+    if not os.path.isdir(np):
         return
-    fi
-    _ensure_child_index
-    if [[ -n "${_children_of[$np]+x}" || -n "${size_map[$np]+x}" ]]; then
-        cnt=0
-        [[ -n "${size_map[$np]+x}" ]] && (( ++cnt )) || true
-        for path in ${_children_of[$np]:-}; do
-            [[ -n "$path" ]] && (( ++cnt )) || true
-        done
-        if (( cnt > 1 )); then
-            printf '%s' "$cnt"
-            return
-        fi
-    fi
-    _ensure_dircount_index "$(dirname "$np")" || true
-    if [[ -n "${_dircount_map[$np]+x}" ]]; then
-        printf '%s' "${_dircount_map[$np]}"
+    parent = str(Path(np).parent)
+    pmeta = db.scan_meta(parent)
+    cmeta = db.scan_meta(np)
+    if not pmeta or not cmeta:
         return
-    fi
-    if [[ -f "$cf" ]]; then
-        printf '%s' "$(_dircount_lines_in_cache "$cf" "$np")"
-        return
-    fi
-    printf '%s' "$cnt"
-}
+    pscanned, _, _ = pmeta
+    cscanned, csize, _ = cmeta
+    if cscanned > pscanned:
+        old = db.get_size(np)
+        if old != csize:
+            # update entry from child scan root metadata
+            row = db.conn.execute(
+                "SELECT size_kb FROM entries WHERE path = ?", (np,)
+            ).fetchone()
+            if row:
+                db.conn.execute(
+                    "UPDATE entries SET size_kb = ? WHERE path = ?", (csize, np)
+                )
+                db.conn.commit()
+            cfg.vstage(
+                f"upgraded {progress_label(np)} from child scan: {old} -> {csize}"
+            )
 
-# Short label for progress (basename of scan root or current du path).
-_dus_progress_label() {
-    local p="${1%/}"
-    [[ -n "$p" ]] || return 0
-    if [[ ${#p} -le 48 ]]; then
-        printf '%s' "${p##*/}"
-    else
-        printf '…/%s' "${p##*/}"
-    fi
-}
 
-# Live scan progress on stderr (bar when prior dircount known, else count only).
-# Args: count, estimate, scan-root name, optional current path from du.
-_dus_scan_progress() {
-    local n="$1" est="$2" root_name="${3:-}" cur_path="${4:-}" elapsed pct filled bar="" i msg cur_label=""
-    elapsed=$(( SECONDS - _dus_t0 ))
-    [[ -n "$cur_path" ]] && cur_label="$(_dus_progress_label "$cur_path")"
-    if [[ -n "$est" && "$est" -gt 0 ]]; then
-        pct=$(( n * 100 / est ))
-        (( pct > 100 )) && pct=100
-        filled=$(( n * 20 / est ))
-        (( filled > 20 )) && filled=20
-        for (( i = 0; i < 20; i++ )); do
-            if (( i < filled )); then
-                bar+='='
-            elif (( i == filled && filled < 20 )); then
-                bar+='>'
-            else
-                bar+=' '
-            fi
-        done
-        if [[ -n "$root_name" && -n "$cur_label" ]]; then
-            msg=$(printf '%s: %s [%s] %d/%d dirs (%d%%) at %s +%ds' \
-                "$prog" "$root_name" "$bar" "$n" "$est" "$pct" "$cur_label" "$elapsed")
-        elif [[ -n "$root_name" ]]; then
-            msg=$(printf '%s: %s [%s] %d/%d dirs (%d%%) +%ds' \
-                "$prog" "$root_name" "$bar" "$n" "$est" "$pct" "$elapsed")
-        else
-            msg=$(printf '%s: [%s] %d/%d dirs (%d%%) +%ds' "$prog" "$bar" "$n" "$est" "$pct" "$elapsed")
-        fi
-    else
-        if [[ -n "$root_name" && -n "$cur_label" ]]; then
-            msg=$(printf '%s: %s scanned %d directories at %s +%ds' \
-                "$prog" "$root_name" "$n" "$cur_label" "$elapsed")
-        elif [[ -n "$root_name" ]]; then
-            msg=$(printf '%s: %s scanned %d directories +%ds' "$prog" "$root_name" "$n" "$elapsed")
-        else
-            msg=$(printf '%s: scanned %d directories +%ds' "$prog" "$n" "$elapsed")
-        fi
-    fi
-    if [[ -t 2 ]]; then
-        printf '\r%s' "$msg" >&2
-    elif (( n == 1 || n % 5000 == 0 )); then
-        printf '%s\n' "$msg" >&2
-    fi
-}
-
-_dus_scan_progress_done() {
-    local n="$1" est="$2" root_name="${3:-}" elapsed=$(( SECONDS - _dus_t0 ))
-    [[ -t 2 ]] && printf '\n' >&2
-    if [[ -n "$root_name" ]]; then
-        if [[ -n "$est" && "$est" -gt 0 ]]; then
-            printf '%s: %s scanned %d directories (est. was %d) +%ds\n' \
-                "$prog" "$root_name" "$n" "$est" "$elapsed" >&2
-        else
-            printf '%s: %s scanned %d directories +%ds\n' \
-                "$prog" "$root_name" "$n" "$elapsed" >&2
-        fi
-    elif [[ -n "$est" && "$est" -gt 0 ]]; then
-        printf '%s: scanned %d directories (est. was %d) +%ds\n' "$prog" "$n" "$est" "$elapsed" >&2
-    else
-        printf '%s: scanned %d directories +%ds\n' "$prog" "$n" "$elapsed" >&2
-    fi
-}
-_dev_id() {
-    local p="$1" id
-    if id="$(stat -c %d "$p" 2>/dev/null)"; then
-        printf '%s' "$id"; return 0
-    fi
-    if id="$(stat -f %d "$p" 2>/dev/null)"; then
-        printf '%s' "$id"; return 0
-    fi
-    return 1
-}
-
-# Drop size_map entries for np and everything beneath it.
-_purge_cache_entries_for_root() {
-    local np="$1" path
-    declare -A _keep=()
-    for path in "${!size_map[@]}"; do
-        [[ "$path" == "$np" || "$path" == "$np/"* ]] && continue
-        _keep["$path"]="${size_map[$path]}"
-    done
-    size_map=()
-    for path in "${!_keep[@]}"; do
-        size_map["$path"]="${_keep[$path]}"
-    done
-    _invalidate_child_index
-}
-
-# True when a direct child has its own newer cache with a different size.
-_stale_vs_child_caches() {
-    local np="$1" parent_scanned="$2"
-    local child nchild cf cscanned csize psize _n=0
-    [[ -n "$parent_scanned" && -d "$np" ]] || return 1
-    $verbose && _dus_vstage "stale check: scanning child caches under $(basename "$np")"
-    for child in "$np"/* "$np"/.[!.]* "$np"/..?*; do
-        [[ -e "$child" ]] || continue
-        [[ -d "$child" ]] || continue
-        (( ++_n )) || true
-        nchild="$(normalize_path "$child")"
-        cf="$(_cache_path_for_root "$nchild")"
-        [[ -f "$cf" ]] || continue
-        cscanned="$(_cache_header_field "$cf" scanned)" || continue
-        [[ "$cscanned" > "$parent_scanned" ]] || continue
-        csize="$(_cache_header_field "$cf" rootsize)" || continue
-        psize="$(_lookup_size "$nchild" || true)"
-        if [[ -z "$psize" || "$csize" != "$psize" ]]; then
-            $verbose && _dus_vstage "stale: newer child cache $(basename "$nchild") (child=$csize parent_map=${psize:-missing})"
-            return 0
-        fi
-    done
-    $verbose && _dus_vstage "stale check: ${_n} dirs, no newer child cache"
-    return 1
-}
-
-# True when a cached direct child exceeds root on the same filesystem (impossible unless stale).
-_oversized_same_fs_child() {
-    local np="$1" rsz="$2" pdev path csz cdev
-    [[ -n "$rsz" ]] || return 1
-    pdev="$(_dev_id "$np")" || return 1
-    _ensure_child_index
-    for path in ${_children_of[$np]:-}; do
-        [[ -n "$path" ]] || continue
-        csz=${size_map[$path]:-0}
-        (( csz <= rsz )) && continue
-        [[ -d "$path" ]] || continue
-        cdev="$(_dev_id "$path")" || continue
-        [[ "$cdev" == "$pdev" ]] && return 0
-    done
-    return 1
-}
-
-# True when a loaded cache for np should be discarded and rescanned.
-_is_cache_stale() {
-    local np="$1" cf="$2" header_only="${3:-false}" scanned rsz
-    scanned="$(_cache_header_field "$cf" scanned)" || return 1
-    rsz="$(_lookup_size "$np" || true)"
-    if _stale_vs_child_caches "$np" "$scanned"; then
-        return 0
-    fi
-    if ! $header_only && _oversized_same_fs_child "$np" "$rsz"; then
-        $verbose && _dus_vstage "stale: same-fs child larger than root for $(basename "$np")"
-        return 0
-    fi
-    return 1
-}
-
-# True when an oversized direct child sits on a different filesystem (mount).
-_has_cross_fs_oversized_child() {
-    local np="$1" rsz="$2" pdev path csz cdev
-    [[ -n "$rsz" ]] || return 1
-    pdev="$(_dev_id "$np")" || return 1
-    _ensure_child_index
-    for path in ${_children_of[$np]:-}; do
-        [[ -n "$path" ]] || continue
-        csz=${size_map[$path]:-0}
-        (( csz <= rsz )) && continue
-        [[ -d "$path" ]] || continue
-        cdev="$(_dev_id "$path")" || continue
-        [[ "$cdev" != "$pdev" ]] && return 0
-    done
-    return 1
-}
-
-# Load cache into size_map. Optional 2nd arg: only direct children of that root.
-# When filter_root is set, also builds _dircount_map in the same pass.
-_load_cache() {
-    local cache_file="$1" filter_root="${2:-}" root="" sz path rest
-    local _lines=0 _kept=0 _t=$SECONDS build_dircount=false
-    [[ -f "$cache_file" ]] || return 1
-    [[ -n "$filter_root" ]] && filter_root="$(normalize_path "$filter_root")"
-    [[ -n "$filter_root" ]] && build_dircount=true
-    [[ -n "$filter_root" ]] && _invalidate_child_index
-    $verbose && _dus_vstage "cache read: ${cache_file##*/}${filter_root:+ (direct children of $(basename "$filter_root"))}${build_dircount:+ + dircount index}"
-
-    while IFS= read -r line; do
-        case "$line" in
-            '# root:'*) root="$(normalize_path "${line#*: }")" ;;
-            '# '*)       ;;
-            '')
-                ;;
-            *)
-                (( ++_lines )) || true
-                IFS=$'\t' read -r sz path <<< "$line"
-                [[ -z "$path" ]] && return 1
-                if $build_dircount && [[ -n "$root" ]]; then
-                    _dircount_bump_child "$root" "$path"
-                fi
-                if [[ -n "$filter_root" ]]; then
-                    if [[ "$path" == "$filter_root" ]]; then
-                        path="$filter_root"
-                    elif [[ "$path" == "$filter_root/"* ]]; then
-                        rest="${path#"$filter_root"/}"
-                        [[ "$rest" == */* ]] && continue
-                        if [[ -z "${_known_norm_paths[$path]+x}" ]]; then
-                            path="$(normalize_path "$path")"
-                        fi
-                    else
-                        continue
-                    fi
-                fi
-                size_map["$path"]="$sz"
-                _children_note "$path"
-                (( ++_kept )) || true
-                ;;
-        esac
-    done < "$cache_file"
-
-    [[ -n "$root" && -d "$root" ]] || return 1
-    [[ ${#size_map[@]} -gt 0 ]] || return 1
-    _cache_fully_passed["$cache_file"]=1
-    if $build_dircount; then
-        _dircount_index_built=true
-        $verbose && _dus_vstage "dircount index built during cache read: ${#_dircount_map[@]} child bucket(s)"
-    fi
-    if [[ -n "$filter_root" ]]; then
-        _slim_loaded_for["$filter_root"]=1
-    else
-        _child_index_built=true
-    fi
-    $verbose && _dus_vstage "cache read done: ${_lines} data lines, ${_kept} kept, ${#size_map[@]} in map, $(( SECONDS - _t ))s"
-    return 0
-}
-
-# Find size for np in size_map; tolerate du/cache path prefix differences.
-_lookup_size() {
-    local np="$1"
-    if [[ -n "${size_map[$np]+x}" ]]; then
-        printf '%s' "${size_map[$np]}"
-        return 0
-    fi
-    # Prefetched siblings should hit exactly; avoid O(n) scan over a huge map.
-    if $_dus_sibling_listing && [[ -n "$_sib_parent" && "$(dirname "$np")" == "$_sib_parent" ]]; then
-        return 1
-    fi
-    local parent="${np%/*}" base="${np##*/}" key
-    for key in "${!size_map[@]}"; do
-        [[ "$(basename "$key")" == "$base" && "${key%/$base}" == "$parent" ]] || continue
-        printf '%s' "${size_map[$key]}"
-        return 0
-    done
-    return 1
-}
-
-# One pass over direct children: sets _DUS_MAX_CHILD and _DUS_SUM_CHILD for np.
-_direct_child_stats() {
-    local np="$1" path csz
-    _DUS_MAX_CHILD=0
-    _DUS_SUM_CHILD=0
-    _DUS_CHILD_STATS_NP="$np"
-    _ensure_child_index
-    for path in ${_children_of[$np]:-}; do
-        [[ -n "$path" ]] || continue
-        csz=${size_map[$path]:-0}
-        (( csz > _DUS_MAX_CHILD )) && _DUS_MAX_CHILD=$csz
-        _DUS_SUM_CHILD=$(( _DUS_SUM_CHILD + csz ))
-    done
-}
-
-# Largest direct-child size under np in size_map (0 if none).
-_max_direct_child_size() {
-    _direct_child_stats "$1"
-    printf '%s' "$_DUS_MAX_CHILD"
-}
-
-# When du(.) skips a mount, parent total can be less than sum(children); prefer sum.
-# Uses _DUS_MAX_CHILD / _DUS_SUM_CHILD when already computed by _direct_child_stats.
-_reconcile_dir_size() {
-    local np="$1" sz="$2" path csz pdev cdev
-    [[ -d "$np" ]] || { printf '%s' "$sz"; return; }
-    [[ "${_DUS_CHILD_STATS_NP:-}" == "$np" ]] || _direct_child_stats "$np"
-    (( _DUS_MAX_CHILD == 0 )) && { printf '%s' "$sz"; return; }
-    (( _DUS_MAX_CHILD <= sz )) && { printf '%s' "$sz"; return; }
-    pdev="$(_dev_id "$np")" || { printf '%s' "$sz"; return; }
-    _ensure_child_index
-    for path in ${_children_of[$np]:-}; do
-        [[ -n "$path" ]] || continue
-        csz=${size_map[$path]:-0}
-        (( csz <= sz )) && continue
-        [[ -d "$path" ]] || continue
-        cdev="$(_dev_id "$path")" || continue
-        [[ "$cdev" != "$pdev" ]] && { printf '%s' "$_DUS_SUM_CHILD"; return; }
-    done
-    printf '%s' "$sz"
-}
-
-# True when mount reconciliation may change the reported size for np.
-_needs_reconcile() {
-    local np="$1" p nq
-    if [[ -n "${_header_only_root[$np]+x}" ]]; then
-        for p in "${inputs[@]}"; do
-            nq="${norm_of[$p]}"
-            [[ "$nq" != "$np" ]] && is_proper_prefix "$np" "$nq" && return 0
-        done
-        return 1
-    fi
-    return 0
-}
-
-# Load cache for np only when this directory was the scan root (not an ancestor).
-_try_load_exact_cache() {
-    local np="$1" cf="$(_cache_path_for_root "$np")"
-
-    [[ -d "$np" ]] || return 1
-
-    # Already satisfied (e.g. sibling prefetch from parent cache).
-    if _lookup_size "$np" >/dev/null; then
-        ! $_dus_sibling_listing && _maybe_upgrade_from_child_cache "$np"
-        return 0
-    fi
-
-    $refresh_cache && return 1
-    $verbose && _dus_vstage "cache load full: $(basename "$np")"
-    _load_cache "$cf" || return 1
-    _lookup_size "$np" >/dev/null || return 1
-    if _is_cache_stale "$np" "$cf"; then
-        _dus_vlog "cache STALE: $np"
-        _purge_cache_entries_for_root "$np"
-        return 1
-    fi
-    _dus_vlog "cache HIT:  $np"
-    return 0
-}
-
-# If np has its own newer cache than the parent, use its rootsize (header only).
-_maybe_upgrade_from_child_cache() {
-    local np="$1" cf pcf pscanned cscanned csize oldsize
-    [[ -d "$np" ]] || return 0
-    cf="$(_cache_path_for_root "$np")"
-    [[ -f "$cf" ]] || return 0
-    pcf="$(_cache_path_for_root "$(dirname "$np")")"
-    [[ -f "$pcf" ]] || return 0
-    pscanned="$(_cache_header_field "$pcf" scanned)" || return 0
-    cscanned="$(_cache_header_field "$cf" scanned)" || return 0
-    [[ "$cscanned" > "$pscanned" ]] || return 0
-    csize="$(_cache_header_field "$cf" rootsize)" || return 0
-    oldsize="$(_lookup_size "$np" || true)"
-    size_map["$np"]="$csize"
-    $verbose && _dus_vstage "upgraded $(basename "$np") from child cache: ${oldsize:-?} -> $csize"
-}
-
-# Try to load a cache covering np. Returns 0 if np is in size_map afterward.
-# Optional 2nd arg: direct_children_only (only load immediate children of that root).
-_try_load_ancestor_cache() {
-    local np="$1" direct_only="${2:-}"
-    _lookup_size "$np" >/dev/null && return 0
-
-    local dir="$np"
-    while true; do
-        if ! $refresh_cache; then
-            local cf="$(_cache_path_for_root "$dir")"
-            local load_filter=""
-            [[ -n "$direct_only" && "$dir" == "$direct_only" ]] && load_filter="$direct_only"
-            if _load_cache "$cf" "$load_filter"; then
-                _dus_vlog "cache HIT:  $dir"
-                _lookup_size "$np" >/dev/null && return 0
-                $verbose && _dus_vstage "ancestor cache loaded $dir but $(basename "$np") not in map"
-            fi
-        fi
-        [[ "$dir" == "/" ]] && break
-        dir="$(dirname "$dir")"
-    done
-    return 1
-}
-
-# Read # rootsize and # dircount from cache header only (no full load).
-_try_load_cache_header() {
-    local np="$1" cf rsz dc
-    [[ -d "$np" ]] || return 1
-    $refresh_cache && return 1
-    _lookup_size "$np" >/dev/null && return 0
-    np="$(normalize_path "$np")"
-    cf="$(_cache_path_for_root "$np")"
-    [[ -f "$cf" ]] || return 1
-    rsz="$(_cache_header_field "$cf" rootsize)" || return 1
-    [[ "$rsz" =~ ^[0-9]+$ ]] || return 1
-    size_map["$np"]="$rsz"
-    dc="$(_cache_header_field "$cf" dircount)" || true
-    if [[ "$dc" =~ ^[0-9]+$ ]]; then
-        _dircount_map["$np"]="$dc"
-    fi
-    $verbose && _dus_vstage "cache header HIT: $(basename "$np") size=$rsz dircount=${dc:-?}"
-    return 0
-}
-
-# Increment _dircount_map for the direct-child bucket of rebased under scan_root.
-_dircount_bump_child() {
-    local scan_root="$1" rebased="$2" rest child prefix
-    prefix="${scan_root}/"
-    if [[ "$rebased" == "$scan_root" ]]; then
-        child="$scan_root"
-    elif [[ "$rebased" == "$prefix"* ]]; then
-        rest="${rebased#"$prefix"}"
-        if [[ "$rest" == */* ]]; then
-            child="${scan_root}/${rest%%/*}"
-        else
-            child="$rebased"
-        fi
-    else
-        return 0
-    fi
-    _dircount_map["$child"]=$(( ${_dircount_map[$child]:-0} + 1 ))
-}
-
-# True when scan results should keep only direct children in size_map.
-_slim_size_map_for_root() {
-    local root="$1"
-    $_dus_sibling_listing && [[ -n "$_sib_parent" && "$root" == "$_sib_parent" ]]
-}
-
-# Process raw du lines: rebase paths, optional cache body, size_map, dircount_map.
-_du_process_lines() {
-    local root="$1" raw_file="$2" body_file="${3:-}" slim="${4:-false}"
-    local _sz _rawp _rebased _du_root_path="" _n=0 _rootsize="" rest
-    local root_prefix="${root}/"
-
-    [[ -f "$raw_file" ]] || return 1
-    _du_root_path="$(tail -1 "$raw_file" | cut -f2-)"
-    [[ -n "$body_file" ]] && : > "$body_file"
-    while IFS=$'\t' read -r _sz _rawp; do
-        [[ -z "$_rawp" ]] && continue
-        _du_rebase "$root" "$_rawp" "$_du_root_path"
-        _rebased="$_DU_REBASED_PATH"
-        [[ -z "$_rebased" ]] && continue
-        [[ -n "$body_file" ]] && printf '%s\t%s\n' "$_sz" "$_rebased" >> "$body_file"
-        if $slim; then
-            if [[ "$_rebased" == "$root" ]]; then
-                size_map["$_rebased"]="$_sz"
-                _rootsize="$_sz"
-                _children_note "$_rebased"
-            elif [[ "$_rebased" == "$root_prefix"* ]]; then
-                rest="${_rebased#"$root_prefix"}"
-                if [[ "$rest" != */* ]]; then
-                    size_map["$_rebased"]="$_sz"
-                    _children_note "$_rebased"
-                fi
-            fi
-        else
-            size_map["$_rebased"]="$_sz"
-            _children_note "$_rebased"
-            [[ "$_rebased" == "$root" ]] && _rootsize="$_sz"
-        fi
-        _dircount_bump_child "$root" "$_rebased"
-        (( ++_n )) || true
-    done < "$raw_file"
-    _DUS_SCAN_ROOTSIZE="$_rootsize"
-    _DUS_SCAN_DIRCOUNT="$_n"
-    _child_index_built=true
-}
-
-# Run du and capture raw output to a temp file (no giant bash arrays).
-_du_to_raw_file() {
-    local _root="$1" _est=0 _progress_every=250
-    shift
-    local _out_file="$1"
-    shift
-    if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then
-        _est="$1"
-        shift
-    fi
-    local _sz _rawp _n=0 _root_name
-    _root_name="$(_dus_progress_label "$_root")"
-    (( _est > 0 )) && (( _progress_every = _est / 80 + 1 ))
-    $verbose && _dus_vlog "scanning $_root..."
-    : > "$_out_file"
-    while read -r _sz _rawp; do
-        [[ -z "$_rawp" ]] && continue
-        _rawp="${_rawp%/}"
-        [[ -z "$_rawp" ]] && continue
-        printf '%s\t%s\n' "$_sz" "$_rawp" >> "$_out_file"
-        (( ++_n )) || true
-        if (( _n == 1 || _n % _progress_every == 0 )); then
-            _dus_scan_progress "$_n" "$_est" "$_root_name" "$_rawp"
-        fi
-    done < <("$DU_BIN" -k "$@" "$_root" 2>/dev/null)
-    _dus_scan_progress "$_n" "$_est" "$_root_name" "$_root"
-    _dus_scan_progress_done "$_n" "$_est" "$_root_name"
-    $verbose && _dus_vlog "scanned $_n directories"
-    _DUS_SCAN_DIRCOUNT="$_n"
-}
-
-# Rebase a single du path to the canonical root path.
-# Result stored in global _DU_REBASED_PATH.
-_du_rebase() {
-    local canonical_root="$1" rawp="$2" du_root_path="$3"
-    if [[ -n "$du_root_path" && \
-          ( "$rawp" == "$du_root_path" || "$rawp" == "$du_root_path/"* ) ]]; then
-        _DU_REBASED_PATH="${canonical_root}${rawp#$du_root_path}"
-    else
-        _DU_REBASED_PATH="$rawp"
-    fi
-}
-
-# Scan root with du (no --exclude, so cache is exclude-agnostic), write cache,
-# then load results into size_map.
-_scan_and_cache() {
-    local root="$1" cache_file="$2"
-    local tmp_file="${cache_file}.tmp.$$"
-    local raw_file="${cache_file}.raw.$$"
-    local body_file="${cache_file}.body.$$"
-    local _est _label _slim=false _rootsize _dircount
-
-    root="$(normalize_path "$root")"
-    mkdir -p "$DUS_CACHE_DIR"
-    _slim=false
-    if _slim_size_map_for_root "$root"; then
-        _slim=true
-    fi
-    _label="$(_dus_progress_label "$root")"
-    vlog "$DU_BIN" -k "$root"
-    _est="$(_cache_dircount_estimate "$cache_file" 2>/dev/null || true)"
-    _du_to_raw_file "$root" "$raw_file" "$_est"
-
-    _dircount="${_DUS_SCAN_DIRCOUNT:-0}"
-    if (( _dircount >= 500 )); then
-        _dus_status "$_label processing $_dircount entries..."
-    fi
-    _du_process_lines "$root" "$raw_file" "$body_file" "$_slim"
-    rm -f "$raw_file"
-    _rootsize="${_DUS_SCAN_ROOTSIZE:-}"
-    _dircount="${_DUS_SCAN_DIRCOUNT:-0}"
-
-    if $_slim; then
-        _dircount_index_built=true
-    fi
-
-    {
-        printf '# root: %s\n' "$root"
-        printf '# scanned: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')"
-        printf '# dircount: %s\n' "$_dircount"
-        printf '# rootsize: %s\n' "$_rootsize"
-        cat "$body_file"
-    } > "$tmp_file"
-    rm -f "$body_file"
-    mv -- "$tmp_file" "$cache_file"
-    if (( _dircount >= 500 )); then
-        _dus_status "$_label cache saved"
-    fi
-}
-
-# When caching is active we always scan without --exclude so the cache is
-# exclude-agnostic; exclusions are applied as a post-filter after loading.
-# Only use gdu --exclude when --no-cache is set (proper size exclusion, no cache).
-du_exclude_args=()
-use_postfilter=false
-if [[ ${#excludes[@]} -gt 0 ]]; then
-    if ! $no_cache; then
-        use_postfilter=true
-    elif [[ "$DU_BIN" == "gdu" ]]; then
-        for pat in "${excludes[@]}"; do du_exclude_args+=("--exclude=$pat"); done
-    else
-        echo "$prog: WARNING: GNU du (gdu) not available; --exclude filters by basename after scanning (sizes of excluded dirs still counted in parent totals)" >&2
-        use_postfilter=true
-    fi
-fi
-
-# Normalize all input paths.
-_dus_t0=$SECONDS
-_dus_early_feedback
-$verbose && _dus_vstage "start"
-declare -a inputs=()
-declare -A norm_of=()
-for p in "$@"; do
-    inputs+=("$p")
-    norm_of["$p"]="$(normalize_path "$p")"
-done
-$verbose && _dus_vstage "normalized ${#inputs[@]} input path(s)"
-
-# Find the minimal set of root paths to scan: a path is a root if no other
-# input is a proper prefix of it (so we don't scan any subtree more than once).
-declare -a roots=()
-declare -A root_seen=()
-for p in "${inputs[@]}"; do
-    np="${norm_of[$p]}"
-    covered=false
-    for q in "${inputs[@]}"; do
-        [[ "$p" == "$q" ]] && continue
-        if is_proper_prefix "${norm_of[$q]}" "$np"; then
-            covered=true; break
-        fi
-    done
-    if ! $covered && [[ -z "${root_seen[$np]+x}" ]]; then
-        roots+=("$np")
-        root_seen[$np]=1
-    fi
-done
-$verbose && _dus_vstage "${#roots[@]} scan root(s)"
-
-declare -A size_map=()
-
-# When all inputs are siblings (e.g. dus *), prefetch the parent directory cache
-# created by an earlier "dus ." in the same directory.
-if [[ ${#inputs[@]} -gt 1 ]] && ! $no_cache && ! $refresh_cache; then
-    _sib_parent="$(dirname "${norm_of[${inputs[0]}]}")"
-    _all_share_parent=true
-    for p in "${inputs[@]}"; do
-        if [[ "$(dirname "${norm_of[$p]}")" != "$_sib_parent" ]]; then
-            _all_share_parent=false
-            break
-        fi
-    done
-    if $_all_share_parent; then
-        _dus_sibling_listing=true
-        for p in "${inputs[@]}"; do
-            _known_norm_paths["${norm_of[$p]}"]=1
-        done
-        $verbose && _dus_vstage "sibling prefetch from $(basename "$_sib_parent")"
-        for p in "${inputs[@]}"; do
-            _try_load_cache_header "${norm_of[$p]}" || true
-        done
-        _try_load_ancestor_cache "$_sib_parent" "$_sib_parent" || true
-    fi
-fi
-
-# Resolve what still needs scanning. Use cached subtrees when available; only
-# collapse siblings to their parent when every sibling missed cache (e.g. video/*).
-declare -a to_scan=()
-_dus_v_resolve=0 _dus_v_map_hits=0
-for root in "${roots[@]}"; do
-    (( ++_dus_v_resolve )) || true
-    if $no_cache; then
-        to_scan+=("$root")
-    elif [[ ! -d "$root" ]]; then
-        :
-    elif _lookup_size "$root" >/dev/null; then
-        (( ++_dus_v_map_hits )) || true
-        ! $_dus_sibling_listing && _maybe_upgrade_from_child_cache "$root"
-    elif ! $use_postfilter && ! $refresh_cache && [[ -d "$root" ]] && _try_load_cache_header "$root"; then
-        cf="$(_cache_path_for_root "$root")"
-        if _is_cache_stale "$root" "$cf" true; then
-            unset 'size_map[$root]'
-            unset '_dircount_map[$root]'
-            to_scan+=("$root")
-        else
-            (( ++_dus_v_map_hits )) || true
-            _header_only_root["$root"]=1
-            $verbose && _dus_vstage "header HIT (no full load): $(_dus_progress_label "$root")"
-        fi
-    elif _try_load_exact_cache "$root"; then
-        :
-    else
-        to_scan+=("$root")
-    fi
-    if $verbose && ((_dus_v_resolve % 100 == 0)); then
-        _dus_vstage "resolve progress: $_dus_v_resolve/${#roots[@]} roots, ${#to_scan[@]} to scan, ${#size_map[@]} in map"
-    fi
-done
-$verbose && _dus_vstage "resolve done: $_dus_v_map_hits map hits, ${#to_scan[@]} to scan, ${#size_map[@]} in map"
-
-if [[ ${#to_scan[@]} -gt 1 && ${#to_scan[@]} -eq ${#roots[@]} ]]; then
-    _common_parent="$(dirname "${to_scan[0]}")"
-    _all_same_parent=true
-    for r in "${to_scan[@]}"; do
-        if [[ "$(dirname "$r")" != "$_common_parent" ]]; then
-            _all_same_parent=false
-            break
-        fi
-    done
-    if $_all_same_parent; then
-        _parent_cf="$(_cache_path_for_root "$_common_parent")"
-        declare -a _still_missing=()
-        for r in "${to_scan[@]}"; do
-            if _lookup_size "$r" >/dev/null || _try_load_cache_header "$r"; then
-                :
-            else
-                _still_missing+=("$r")
-            fi
-        done
-        if [[ ${#_still_missing[@]} -eq 0 ]]; then
-            to_scan=()
-        elif [[ -f "$_parent_cf" ]]; then
-            $verbose && _dus_vstage "retry parent cache for ${#_still_missing[@]} missing sibling(s)"
-            _load_cache "$_parent_cf" "$_common_parent" || true
-            to_scan=()
-            for r in "${_still_missing[@]}"; do
-                _lookup_size "$r" >/dev/null || to_scan+=("$r")
-            done
-        elif [[ ${#to_scan[@]} -eq ${#roots[@]} ]]; then
-            to_scan=("$_common_parent")
-        fi
-    fi
-fi
-
-_dus_print_run_status
-
-if [[ ${#to_scan[@]} -gt 0 ]]; then
-    $verbose && _dus_vstage "scanning ${#to_scan[@]} root(s): ${to_scan[*]##*/}"
-fi
-
-for root in "${to_scan[@]}"; do
-    if $no_cache; then
-        vlog "$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root"
-        _est="$(_cache_dircount_estimate "$(_cache_path_for_root "$root")" 2>/dev/null || true)"
-        _raw_nc="${DUS_CACHE_DIR}/nocache.raw.$$"
-        _du_to_raw_file "$root" "$_raw_nc" "$_est" "${du_exclude_args[@]+"${du_exclude_args[@]}"}"
-        _du_process_lines "$(normalize_path "$root")" "$_raw_nc" "" false
-        rm -f "$_raw_nc"
-    else
-        _dus_vlog "cache MISS: $root"
-        cache_file="$(_cache_path_for_root "$root")"
-        _scan_and_cache "$root" "$cache_file"
-    fi
-done
-
-# Apply post-filter: remove excluded entries from size_map by basename.
-if $use_postfilter; then
-    declare -A _filtered=()
-    for path in "${!size_map[@]}"; do
-        bname="$(basename "$path")"
-        excluded=false
-        for pat in "${excludes[@]}"; do
-            # shellcheck disable=SC2254
-            case "$bname" in $pat) excluded=true; break ;; esac
-        done
-        if ! $excluded; then
-            _filtered["$path"]="${size_map[$path]}"
-        fi
-    done
-    size_map=()
-    for path in "${!_filtered[@]}"; do
-        size_map["$path"]="${_filtered[$path]}"
-    done
-    _invalidate_child_index
-fi
-
-# Resolve size/dircount for every input, then print in preorder (parent before children,
-# siblings at each level sorted smallest-to-largest by size).
-declare -A _out_sz=() _out_dc=() _out_orig=()
-_dus_v_out=0 _dus_v_du_fallback=0 _dus_out_total=${#inputs[@]}
-if $_dus_sibling_listing && [[ -n "$_sib_parent" ]] && _dircount_index_needed; then
-    _ensure_dircount_index "$_sib_parent" || true
-fi
-for np in "${!_header_only_root[@]}"; do
-    _preload_header_root_children "$np"
-done
-$verbose && _dus_vstage "preparing output (${_dus_out_total} path(s), ${#size_map[@]} cached entries)..."
-set +e
-for p in "${inputs[@]}"; do
-    np="${norm_of[$p]}"
-    (( ++_dus_v_out )) || true
-    $verbose && _dus_vstage "output ${_dus_v_out}/${_dus_out_total}: $(_dus_progress_label "$p")..."
-    sz="$(_lookup_size "$np" || true)"
-    if [[ -z "$sz" && -d "$np" ]]; then
-        $verbose && _dus_vstage "output miss: $p — trying parent cache"
-        _try_load_ancestor_cache "$np" "$(dirname "$np")" || true
-        sz="$(_lookup_size "$np" || true)"
-    fi
-    if [[ -z "$sz" ]]; then
-        (( ++_dus_v_du_fallback )) || true
-        vlog "$DU_BIN" -sk "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$np"
-        sz="$("$DU_BIN" -sk "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$np" 2>/dev/null | cut -f1)" || true
-        [[ -z "$sz" ]] && sz=0
-        if [[ -d "$np" ]]; then
-            echo "$prog: WARNING: $p not found in cache; ran du directly" >&2
-        fi
-    fi
-    # Sibling listings (dus *) already have authoritative sizes from parent cache;
-    # skip per-entry child-cache loads used only for mount reconciliation.
-    if ! $_dus_sibling_listing || [[ "$(dirname "$np")" != "$_sib_parent" || -z "$sz" ]]; then
-        if _needs_reconcile "$np"; then
-            _direct_child_stats "$np"
-            if [[ -d "$np" && _DUS_MAX_CHILD -eq 0 ]]; then
-                _cf="$(_cache_path_for_root "$np")"
-                if [[ -f "$_cf" && -z "${_slim_loaded_for[$np]+x}" ]]; then
-                    if [[ -z "${_cache_fully_passed[$_cf]+x}" ]]; then
-                        $verbose && _dus_vstage "output: loading direct children of $(basename "$np")"
-                        _load_cache "$_cf" "$np" || true
-                    fi
-                    _direct_child_stats "$np"
-                fi
-            fi
-            _sz_before="$sz"
-            sz="$(_reconcile_dir_size "$np" "$sz")"
-            if [[ "$sz" != "$_sz_before" ]]; then
-                $verbose && _dus_vstage "output: reconciled $p $_sz_before -> $sz"
-            fi
-        else
-            $verbose && _dus_vstage "output: skipping reconcile for $(basename "$np") (header-only)"
-        fi
-    else
-        $verbose && _dus_vstage "output: using parent cache size for $(basename "$np")"
-    fi
-    _out_sz["$np"]="$sz"
-    _out_dc["$np"]="$( _dircount_for_path "$np" || printf '0' )"
-    _out_orig["$np"]="$p"
-    if $verbose && ((_dus_v_out % 100 == 0)); then
-        _dus_vstage "output progress: $_dus_v_out path(s), $_dus_v_du_fallback du fallback(s)"
-    fi
-done
-set -e
-
-declare -a _forest_roots=() _print_order=()
-declare -A _printed_np=()
-for p in "${inputs[@]}"; do
-    np="${norm_of[$p]}"
-    _is_root=true
-    for q in "${inputs[@]}"; do
-        nq="${norm_of[$q]}"
-        [[ "$np" == "$nq" ]] && continue
-        if is_proper_prefix "$nq" "$np"; then
-            _is_root=false
-            break
-        fi
-    done
-    $_is_root && _forest_roots+=("$np")
-done
-_dus_sort_nps_by_sz _forest_roots
-for np in "${_forest_roots[@]}"; do
-    _dus_collect_preorder "$np"
-done
-for np in "${_print_order[@]}"; do
-    _printed_np["$np"]=1
-done
-declare -a _orphans=()
-for p in "${inputs[@]}"; do
-    np="${norm_of[$p]}"
-    [[ -z "${_printed_np[$np]+x}" ]] && _orphans+=("$np")
-done
-if [[ ${#_orphans[@]} -gt 0 ]]; then
-    _dus_sort_nps_by_sz _orphans
-    for np in "${_orphans[@]}"; do
-        _print_order+=("$np")
-    done
-fi
-if [[ ${#_print_order[@]} -eq 0 ]]; then
-    for p in "${inputs[@]}"; do
-        _print_order+=("${norm_of[$p]}")
-    done
-fi
-
-for np in "${_print_order[@]}"; do
-    p="${_out_orig[$np]}"
-    if $human_readable; then
-        printf '%s\t%s\t%s\n' "$(hr_size "${_out_sz[$np]}")" "${_out_dc[$np]}" "$p"
-    else
-        printf '%s\t%s\t%s\n' "${_out_sz[$np]}" "${_out_dc[$np]}" "$p"
-    fi
-done
-$verbose && _dus_vstage "done: $_dus_v_out output, $_dus_v_du_fallback du fallback(s)" || true
-true
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print(f"\n{PROG}: interrupted", file=sys.stderr)
+        sys.exit(130)
