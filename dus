@@ -87,6 +87,9 @@ _dus_vstage() { $verbose && _dus_vlog "$@" || true; }
 _dus_status_printed=false
 _dus_sibling_listing=false
 _sib_parent=""
+_dircount_index_built=false
+declare -A _dircount_map=()
+declare -A _known_norm_paths=()
 
 _dus_early_feedback() {
     if $no_cache || $refresh_cache; then
@@ -201,7 +204,6 @@ _dircount_lines_in_cache() {
             *)
                 IFS=$'\t' read -r _ path <<< "$line"
                 [[ -z "$path" ]] && continue
-                path="$(normalize_path "$path")"
                 [[ "$path" == "$np" || "$path" == "$np/"* ]] || continue
                 (( ++cnt )) || true
                 ;;
@@ -210,8 +212,54 @@ _dircount_lines_in_cache() {
     printf '%s' "$cnt"
 }
 
+# One pass over parent cache: populate _dircount_map for each direct child subtree.
+_build_dircount_index() {
+    local cache_file="$1" parent_root="$2" line path rest child prefix
+    $_dircount_index_built && return 0
+    [[ -f "$cache_file" ]] || return 1
+    parent_root="$(normalize_path "$parent_root")"
+    prefix="${parent_root}/"
+    local _t=$SECONDS _lines=0
+    $verbose && _dus_vstage "building dircount index from ${cache_file##*/}..."
+    while IFS= read -r line; do
+        case "$line" in
+            '# '*|'') ;;
+            *)
+                (( ++_lines )) || true
+                IFS=$'\t' read -r _ path <<< "$line"
+                [[ -z "$path" ]] && continue
+                if [[ "$path" == "$parent_root" ]]; then
+                    child="$parent_root"
+                elif [[ "$path" == "$prefix"* ]]; then
+                    rest="${path#"$prefix"}"
+                    if [[ "$rest" == */* ]]; then
+                        child="${parent_root}/${rest%%/*}"
+                    else
+                        child="$path"
+                    fi
+                else
+                    continue
+                fi
+                _dircount_map["$child"]=$(( ${_dircount_map[$child]:-0} + 1 ))
+                ;;
+        esac
+    done < "$cache_file"
+    _dircount_index_built=true
+    $verbose && _dus_vstage "dircount index done: ${_lines} lines, ${#_dircount_map[@]} children, $(( SECONDS - _t ))s"
+}
+
+# Build parent dircount index once when needed.
+_ensure_dircount_index() {
+    local parent_root="$1" pcf
+    parent_root="$(normalize_path "$parent_root")"
+    $_dircount_index_built && return 0
+    pcf="$(_cache_path_for_root "$parent_root")"
+    [[ -f "$pcf" ]] || return 1
+    _build_dircount_index "$pcf" "$parent_root"
+}
+
 _dircount_for_path() {
-    local np="$1" cf n path cnt=0 pcf
+    local np="$1" cf n path cnt=0
     [[ -d "$np" ]] || { printf '0'; return; }
     np="$(normalize_path "$np")"
     cf="$(_cache_path_for_root "$np")"
@@ -222,6 +270,10 @@ _dircount_for_path() {
             return
         fi
     fi
+    if [[ -n "${_dircount_map[$np]+x}" ]]; then
+        printf '%s' "${_dircount_map[$np]}"
+        return
+    fi
     for path in "${!size_map[@]}"; do
         [[ "$path" == "$np" || "$path" == "$np/"* ]] || continue
         (( ++cnt )) || true
@@ -230,13 +282,13 @@ _dircount_for_path() {
         printf '%s' "$cnt"
         return
     fi
-    if [[ -f "$cf" ]]; then
-        printf '%s' "$(_dircount_lines_in_cache "$cf" "$np")"
+    _ensure_dircount_index "$(dirname "$np")" || true
+    if [[ -n "${_dircount_map[$np]+x}" ]]; then
+        printf '%s' "${_dircount_map[$np]}"
         return
     fi
-    pcf="$(_cache_path_for_root "$(dirname "$np")")"
-    if [[ -f "$pcf" ]]; then
-        printf '%s' "$(_dircount_lines_in_cache "$pcf" "$np")"
+    if [[ -f "$cf" ]]; then
+        printf '%s' "$(_dircount_lines_in_cache "$cf" "$np")"
         return
     fi
     printf '%s' "$cnt"
@@ -438,11 +490,13 @@ _load_cache() {
                 [[ -z "$path" ]] && return 1
                 if [[ -n "$filter_root" ]]; then
                     if [[ "$path" == "$filter_root" ]]; then
-                        path="$(normalize_path "$path")"
+                        path="$filter_root"
                     elif [[ "$path" == "$filter_root/"* ]]; then
                         rest="${path#"$filter_root"/}"
                         [[ "$rest" == */* ]] && continue
-                        path="$(normalize_path "$path")"
+                        if [[ -z "${_known_norm_paths[$path]+x}" ]]; then
+                            path="$(normalize_path "$path")"
+                        fi
                     else
                         continue
                     fi
@@ -589,26 +643,105 @@ _try_load_ancestor_cache() {
     return 1
 }
 
-# Collect raw du output. Strips trailing slashes; skips blank lines.
-# Optional 2nd arg: estimated directory count (from prior cache) for progress bar.
-# Sets globals _DU_RAW and _DU_ROOT_PATH (du's path for the root, from last line).
-_du_collect() {
+# Read # rootsize and # dircount from cache header only (no full load).
+_try_load_cache_header() {
+    local np="$1" cf rsz dc
+    [[ -d "$np" ]] || return 1
+    $refresh_cache && return 1
+    _lookup_size "$np" >/dev/null && return 0
+    np="$(normalize_path "$np")"
+    cf="$(_cache_path_for_root "$np")"
+    [[ -f "$cf" ]] || return 1
+    rsz="$(_cache_header_field "$cf" rootsize)" || return 1
+    [[ "$rsz" =~ ^[0-9]+$ ]] || return 1
+    size_map["$np"]="$rsz"
+    dc="$(_cache_header_field "$cf" dircount)" || true
+    if [[ "$dc" =~ ^[0-9]+$ ]]; then
+        _dircount_map["$np"]="$dc"
+    fi
+    $verbose && _dus_vstage "cache header HIT: $(basename "$np") size=$rsz dircount=${dc:-?}"
+    return 0
+}
+
+# Increment _dircount_map for the direct-child bucket of rebased under scan_root.
+_dircount_bump_child() {
+    local scan_root="$1" rebased="$2" rest child prefix
+    prefix="${scan_root}/"
+    if [[ "$rebased" == "$scan_root" ]]; then
+        child="$scan_root"
+    elif [[ "$rebased" == "$prefix"* ]]; then
+        rest="${rebased#"$prefix"}"
+        if [[ "$rest" == */* ]]; then
+            child="${scan_root}/${rest%%/*}"
+        else
+            child="$rebased"
+        fi
+    else
+        return 0
+    fi
+    _dircount_map["$child"]=$(( ${_dircount_map[$child]:-0} + 1 ))
+}
+
+# True when scan results should keep only direct children in size_map.
+_slim_size_map_for_root() {
+    local root="$1"
+    $_dus_sibling_listing && [[ -n "$_sib_parent" && "$root" == "$_sib_parent" ]]
+}
+
+# Process raw du lines: rebase paths, optional cache body, size_map, dircount_map.
+_du_process_lines() {
+    local root="$1" raw_file="$2" body_file="${3:-}" slim="${4:-false}"
+    local _sz _rawp _rebased _du_root_path="" _n=0 _rootsize="" rest
+    local root_prefix="${root}/"
+
+    [[ -f "$raw_file" ]] || return 1
+    _du_root_path="$(tail -1 "$raw_file" | cut -f2-)"
+    [[ -n "$body_file" ]] && : > "$body_file"
+    while IFS=$'\t' read -r _sz _rawp; do
+        [[ -z "$_rawp" ]] && continue
+        _du_rebase "$root" "$_rawp" "$_du_root_path"
+        _rebased="$_DU_REBASED_PATH"
+        [[ -z "$_rebased" ]] && continue
+        [[ -n "$body_file" ]] && printf '%s\t%s\n' "$_sz" "$_rebased" >> "$body_file"
+        if $slim; then
+            if [[ "$_rebased" == "$root" ]]; then
+                size_map["$_rebased"]="$_sz"
+                _rootsize="$_sz"
+            elif [[ "$_rebased" == "$root_prefix"* ]]; then
+                rest="${_rebased#"$root_prefix"}"
+                [[ "$rest" == */* ]] || size_map["$_rebased"]="$_sz"
+            fi
+        else
+            size_map["$_rebased"]="$_sz"
+            [[ "$_rebased" == "$root" ]] && _rootsize="$_sz"
+        fi
+        _dircount_bump_child "$root" "$_rebased"
+        (( ++_n )) || true
+    done < "$raw_file"
+    _DUS_SCAN_ROOTSIZE="$_rootsize"
+    _DUS_SCAN_DIRCOUNT="$_n"
+}
+
+# Run du and capture raw output to a temp file (no giant bash arrays).
+_du_to_raw_file() {
     local _root="$1" _est=0 _progress_every=250
+    shift
+    local _out_file="$1"
     shift
     if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then
         _est="$1"
         shift
     fi
     local _sz _rawp _n=0 _root_name
-    local -a _buf=()
     _root_name="$(_dus_progress_label "$_root")"
     (( _est > 0 )) && (( _progress_every = _est / 80 + 1 ))
     $verbose && _dus_vlog "scanning $_root..."
+    : > "$_out_file"
     while read -r _sz _rawp; do
         [[ -z "$_rawp" ]] && continue
         _rawp="${_rawp%/}"
         [[ -z "$_rawp" ]] && continue
-        _buf+=("$_sz"$'\t'"$_rawp")
+        printf '%s\t%s\n' "$_sz" "$_rawp" >> "$_out_file"
         (( ++_n )) || true
         if (( _n == 1 || _n % _progress_every == 0 )); then
             _dus_scan_progress "$_n" "$_est" "$_root_name" "$_rawp"
@@ -617,16 +750,7 @@ _du_collect() {
     _dus_scan_progress "$_n" "$_est" "$_root_name" "$_root"
     _dus_scan_progress_done "$_n" "$_est" "$_root_name"
     $verbose && _dus_vlog "scanned $_n directories"
-    _DU_RAW=("${_buf[@]+"${_buf[@]}"}")
-    _DU_ROOT_PATH=""
-    local _entry _sz _rawp
-    for _entry in "${_buf[@]+"${_buf[@]}"}"; do
-        IFS=$'\t' read -r _sz _rawp <<< "$_entry"
-        [[ "$_rawp" == "$_root" || "$_rawp" == "${_root%/}" ]] && _DU_ROOT_PATH="$_rawp" && break
-    done
-    if [[ -z "$_DU_ROOT_PATH" && ${#_buf[@]} -gt 0 ]]; then
-        IFS=$'\t' read -r _ _DU_ROOT_PATH <<< "${_buf[$(( ${#_buf[@]} - 1 ))]}"
-    fi
+    _DUS_SCAN_DIRCOUNT="$_n"
 }
 
 # Rebase a single du path to the canonical root path.
@@ -646,56 +770,42 @@ _du_rebase() {
 _scan_and_cache() {
     local root="$1" cache_file="$2"
     local tmp_file="${cache_file}.tmp.$$"
+    local raw_file="${cache_file}.raw.$$"
+    local body_file="${cache_file}.body.$$"
+    local _est _label _slim=false _rootsize _dircount
 
     root="$(normalize_path "$root")"
     mkdir -p "$DUS_CACHE_DIR"
+    _slim=false
+    if _slim_size_map_for_root "$root"; then
+        _slim=true
+    fi
+    _label="$(_dus_progress_label "$root")"
     vlog "$DU_BIN" -k "$root"
     _est="$(_cache_dircount_estimate "$cache_file" 2>/dev/null || true)"
-    _du_collect "$root" "$_est"   # fills _DU_RAW and _DU_ROOT_PATH
+    _du_to_raw_file "$root" "$raw_file" "$_est"
 
-    local _entry _sz _rawp _rootsize="" _dircount=0 _label _total _ri=0 _we
-    declare -a _rebased=()
-    _label="$(_dus_progress_label "$root")"
-    _total=${#_DU_RAW[@]}
-    if (( _total >= 500 )); then
-        _dus_status "$_label indexing $_total entries..."
-    fi
-    _we=$(( _total / 20 + 1 ))
-    for _entry in "${_DU_RAW[@]+"${_DU_RAW[@]}"}"; do
-        IFS=$'\t' read -r _sz _rawp <<< "$_entry"
-        _du_rebase "$root" "$_rawp" "$_DU_ROOT_PATH"
-        [[ -z "$_DU_REBASED_PATH" ]] && continue
-        _rebased+=("$_sz"$'\t'"$_DU_REBASED_PATH")
-        size_map["$_DU_REBASED_PATH"]="$_sz"
-        if [[ "$_DU_REBASED_PATH" == "$root" ]]; then
-            _rootsize="$_sz"
-        fi
-        (( ++_ri )) || true
-        if (( _total >= 500 && (_ri == 1 || _ri % _we == 0) )); then
-            _dus_status "$_label indexing $_ri/$_total..."
-        fi
-    done
-    _dircount=${#_rebased[@]}
-
+    _dircount="${_DUS_SCAN_DIRCOUNT:-0}"
     if (( _dircount >= 500 )); then
-        _dus_status "$_label writing cache ($_dircount entries)..."
+        _dus_status "$_label processing $_dircount entries..."
     fi
-    _we=$(( _dircount / 20 + 1 ))
-    _ri=0
+    _du_process_lines "$root" "$raw_file" "$body_file" "$_slim"
+    rm -f "$raw_file"
+    _rootsize="${_DUS_SCAN_ROOTSIZE:-}"
+    _dircount="${_DUS_SCAN_DIRCOUNT:-0}"
+
+    if $_slim; then
+        _dircount_index_built=true
+    fi
+
     {
         printf '# root: %s\n' "$root"
         printf '# scanned: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')"
         printf '# dircount: %s\n' "$_dircount"
         printf '# rootsize: %s\n' "$_rootsize"
-        local _line
-        for _line in "${_rebased[@]+"${_rebased[@]}"}"; do
-            printf '%s\n' "$_line"
-            (( ++_ri )) || true
-            if (( _dircount >= 500 && (_ri == 1 || _ri % _we == 0) )); then
-                _dus_status "$_label writing cache $_ri/$_dircount..." >&2
-            fi
-        done
+        cat "$body_file"
     } > "$tmp_file"
+    rm -f "$body_file"
     mv -- "$tmp_file" "$cache_file"
     if (( _dircount >= 500 )); then
         _dus_status "$_label cache saved"
@@ -765,7 +875,13 @@ if [[ ${#inputs[@]} -gt 1 ]] && ! $no_cache && ! $refresh_cache; then
     done
     if $_all_share_parent; then
         _dus_sibling_listing=true
+        for p in "${inputs[@]}"; do
+            _known_norm_paths["${norm_of[$p]}"]=1
+        done
         $verbose && _dus_vstage "sibling prefetch from $(basename "$_sib_parent")"
+        for p in "${inputs[@]}"; do
+            _try_load_cache_header "${norm_of[$p]}" || true
+        done
         _try_load_ancestor_cache "$_sib_parent" "$_sib_parent" || true
     fi
 fi
@@ -783,6 +899,8 @@ for root in "${roots[@]}"; do
     elif _lookup_size "$root" >/dev/null; then
         (( ++_dus_v_map_hits )) || true
         ! $_dus_sibling_listing && _maybe_upgrade_from_child_cache "$root"
+    elif $_dus_sibling_listing && [[ "$(dirname "$root")" == "$_sib_parent" ]] && _try_load_cache_header "$root"; then
+        (( ++_dus_v_map_hits )) || true
     elif _try_load_exact_cache "$root"; then
         :
     else
@@ -805,19 +923,24 @@ if [[ ${#to_scan[@]} -gt 1 && ${#to_scan[@]} -eq ${#roots[@]} ]]; then
     done
     if $_all_same_parent; then
         _parent_cf="$(_cache_path_for_root "$_common_parent")"
-        if [[ -f "$_parent_cf" ]]; then
-            # Parent was scanned by "dus ."; read direct-child rows only — never rescan.
-            $verbose && _dus_vstage "retry parent cache for ${#to_scan[@]} missing sibling(s)"
+        declare -a _still_missing=()
+        for r in "${to_scan[@]}"; do
+            if _lookup_size "$r" >/dev/null || _try_load_cache_header "$r"; then
+                :
+            else
+                _still_missing+=("$r")
+            fi
+        done
+        if [[ ${#_still_missing[@]} -eq 0 ]]; then
+            to_scan=()
+        elif [[ -f "$_parent_cf" ]]; then
+            $verbose && _dus_vstage "retry parent cache for ${#_still_missing[@]} missing sibling(s)"
             _load_cache "$_parent_cf" "$_common_parent" || true
-            declare -a _still_missing=()
-            for r in "${to_scan[@]}"; do
-                if _try_load_exact_cache "$r"; then
-                    :
-                else
-                    _still_missing+=("$r")
-                fi
+            _ensure_dircount_index "$_common_parent" || true
+            to_scan=()
+            for r in "${_still_missing[@]}"; do
+                _lookup_size "$r" >/dev/null || to_scan+=("$r")
             done
-            to_scan=("${_still_missing[@]+"${_still_missing[@]}"}")
         elif [[ ${#to_scan[@]} -eq ${#roots[@]} ]]; then
             to_scan=("$_common_parent")
         fi
@@ -834,12 +957,10 @@ for root in "${to_scan[@]}"; do
     if $no_cache; then
         vlog "$DU_BIN" -k "${du_exclude_args[@]+"${du_exclude_args[@]}"}" "$root"
         _est="$(_cache_dircount_estimate "$(_cache_path_for_root "$root")" 2>/dev/null || true)"
-        _du_collect "$root" "$_est" "${du_exclude_args[@]+"${du_exclude_args[@]}"}"
-        for _nc_entry in "${_DU_RAW[@]+"${_DU_RAW[@]}"}"; do
-            IFS=$'\t' read -r _nc_sz _nc_rawp <<< "$_nc_entry"
-            _du_rebase "$root" "$_nc_rawp" "$_DU_ROOT_PATH"
-            [[ -n "$_DU_REBASED_PATH" ]] && size_map["$_DU_REBASED_PATH"]="$_nc_sz"
-        done
+        _raw_nc="${DUS_CACHE_DIR}/nocache.raw.$$"
+        _du_to_raw_file "$root" "$_raw_nc" "$_est" "${du_exclude_args[@]+"${du_exclude_args[@]}"}"
+        _du_process_lines "$(normalize_path "$root")" "$_raw_nc" "" false
+        rm -f "$_raw_nc"
     else
         _dus_vlog "cache MISS: $root"
         cache_file="$(_cache_path_for_root "$root")"
@@ -890,6 +1011,9 @@ done < <(_dus_order_lines "${_group_sort_keys[@]+"${_group_sort_keys[@]}"}")
 
 # For each group: collect (size, original_path) pairs, sort by size ascending, print.
 _dus_v_out=0 _dus_v_du_fallback=0 _dus_out_total=${#inputs[@]}
+if $_dus_sibling_listing && [[ -n "$_sib_parent" ]]; then
+    _ensure_dircount_index "$_sib_parent" || true
+fi
 $verbose && _dus_vstage "preparing output (${_dus_out_total} path(s), ${#size_map[@]} cached entries)..."
 for parent in "${group_order[@]}"; do
     pair_lines=()
