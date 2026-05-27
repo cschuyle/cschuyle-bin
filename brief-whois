@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+
+verbose=0
+if [ "$1" = "-v" ]; then
+  verbose=1
+  shift
+fi
+
+for d in "$@"; do
+  user_agent="brief-whois/1.0 (+https://github.com/cschuyle/cschuyle-bin)"
+  # Sleep for a random interval between 100 and 666 ms before the request
+  sleep_ms=$((RANDOM % 567 + 100))
+  sleep $(awk "BEGIN {print $sleep_ms/1000}")
+  data=$(curl -A "$user_agent" -sL "https://rdap.org/domain/$d")
+  if [ $? -ne 0 ] || [ -z "$data" ]; then
+    if [ $verbose -eq 1 ]; then
+      echo "=== $d ==="
+      echo "Error: Failed to fetch data for $d"
+      echo
+    else
+      echo -e "$d\tError"
+    fi
+    continue
+  fi
+
+  # Try parsing with jq, catch parse errors
+  parse_and_print() {
+    echo "$1" | jq -e -r '
+      def get_event($type):
+        [.events[]? | select(.eventAction == $type) | .eventDate] | first;
+
+      "Registrar: " + (.entities[]?.vcardArray[1][] | select(.[0]=="fn") | .[3] // "N/A"),
+      "Created:   " + (get_event("registration") // "N/A"),
+      "Updated:   " + (get_event("last changed") // "N/A"),
+      "Expires:   " + (get_event("expiration") // "N/A"),
+      "Nameservers:",
+      (.nameservers[]?.ldhName // empty | "  - " + .)
+    ' 2>/dev/null
+    return $?
+  }
+
+  if [ $verbose -eq 1 ]; then
+    echo "=== $d ==="
+    parse_and_print "$data"
+    jq_status=$?
+    if [ $jq_status -ne 0 ]; then
+      if echo "$data" | grep -q "error code: 1015"; then
+        echo "Rate-limit - sleeping and trying again"
+        sleep 1
+        sleep_ms=$((RANDOM % 567 + 100))
+        sleep $(awk "BEGIN {print $sleep_ms/1000}")
+        data2=$(curl -A "$user_agent" -sL "https://rdap.org/domain/$d")
+        parse_and_print "$data2"
+        jq_status2=$?
+        if [ $jq_status2 -ne 0 ]; then
+          if echo "$data2" | grep -q "error code: 1015"; then
+            echo "Rate-limit - giving up after sleeping"
+          else
+            echo "Error: Failed to parse data for $d (invalid domain or parse error)"
+            echo "Offending string:"
+            echo "$data2"
+          fi
+        fi
+      else
+        echo "Error: Failed to parse data for $d (invalid domain or parse error)"
+        echo "Offending string:"
+        echo "$data"
+      fi
+    fi
+    echo
+  else
+    # Not verbose: just print <domain>\t<status>
+    # Try to determine registration status
+    echo "$data" | jq -e '.objectClassName == "domain"' >/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+      echo -e "$d\tRegistered"
+    else
+      # Try to detect not registered (rdap.org returns 404 JSON with errorCode 404)
+      echo "$data" | jq -e '.errorCode == 404' >/dev/null 2>&1
+      if [ $? -eq 0 ]; then
+        echo -e "$d\tNot Registered"
+      else
+        echo -e "$d\tError"
+      fi
+    fi
+  fi
+done
