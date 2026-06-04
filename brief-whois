@@ -6,19 +6,101 @@ if [ "$1" = "-v" ]; then
   shift
 fi
 
-for d in "$@"; do
+is_valid_domain() {
+  local d=$1
+  # Overall length limit per DNS.
+  [ ${#d} -le 253 ] || return 1
+  # Must look like label(.label)+ with a final alphabetic TLD.
+  # Labels: 1-63 chars, alphanumerics/hyphen, no leading/trailing hyphen.
+  # This rejects empty labels (e.g. "a..b"), leading/trailing dots, and
+  # bare hostnames without a dot.
+  [[ $d =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] || return 1
+  return 0
+}
+
+brief_error_detail() {
+  local data=$1
+  local http_code=$2
+  local curl_status=$3
+
+  if [ "$curl_status" -ne 0 ]; then
+    echo "fetch failed (curl exit $curl_status)"
+    return
+  fi
+  if [ -z "$data" ]; then
+    echo "empty response (HTTP ${http_code:-unknown})"
+    return
+  fi
+  if echo "$data" | grep -q "error code: 1015"; then
+    echo "rate limited"
+    return
+  fi
+  local detail
+  detail=$(echo "$data" | jq -r '
+    if .errorCode then
+      "RDAP \(.errorCode)\(if .title then ": " + .title else "" end)\(if .description then " — " + .description else "" end)"
+    else
+      empty
+    end
+  ' 2>/dev/null)
+  if [ -n "$detail" ] && [ "$detail" != "null" ]; then
+    echo "$detail"
+    return
+  fi
+  local snippet
+  snippet=$(printf '%s' "$data" | tr '\n' ' ' | head -c 100)
+  echo "unparseable response (HTTP ${http_code:-?}): ${snippet}"
+}
+
+# Collect domains from positional args; if none, read them from stdin
+# (one per line, ignoring blank lines and surrounding whitespace) so the
+# script can be fed a list via a pipe or file redirection.
+domains=("$@")
+if [ ${#domains[@]} -eq 0 ] && [ ! -t 0 ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] && domains+=("$line")
+  done
+fi
+
+for d in "${domains[@]}"; do
   user_agent="brief-whois/1.0 (+https://github.com/cschuyle/cschuyle-bin)"
+
+  if ! is_valid_domain "$d"; then
+    if [ $verbose -eq 1 ]; then
+      echo "=== $d ==="
+      echo "Error: '$d' is not a valid domain name"
+      echo
+    else
+      echo -e "$d\tError: malformed domain name"
+    fi
+    continue
+  fi
+
   # Sleep for a random interval between 100 and 666 ms before the request
   sleep_ms=$((RANDOM % 567 + 100))
   sleep $(awk "BEGIN {print $sleep_ms/1000}")
-  data=$(curl -A "$user_agent" -sL "https://rdap.org/domain/$d")
-  if [ $? -ne 0 ] || [ -z "$data" ]; then
-    if [ $verbose -eq 1 ]; then
+  tmp=$(mktemp)
+  http_code=$(curl -A "$user_agent" -sL -w "%{http_code}" -o "$tmp" "https://rdap.org/domain/$d")
+  curl_status=$?
+  data=$(cat "$tmp")
+  rm -f "$tmp"
+  if [ "$curl_status" -ne 0 ] || [ -z "$data" ]; then
+    if [ "$curl_status" -eq 0 ] && [ -z "$data" ] && [ "$http_code" = "404" ]; then
+      if [ $verbose -eq 1 ]; then
+        echo "=== $d ==="
+        echo "Not Registered (HTTP 404, empty body)"
+        echo
+      else
+        echo -e "$d\tNot Registered"
+      fi
+    elif [ $verbose -eq 1 ]; then
       echo "=== $d ==="
-      echo "Error: Failed to fetch data for $d"
+      echo "Error: Failed to fetch data for $d ($(brief_error_detail "$data" "$http_code" "$curl_status"))"
       echo
     else
-      echo -e "$d\tError"
+      echo -e "$d\tError: $(brief_error_detail "$data" "$http_code" "$curl_status")"
     fi
     continue
   fi
@@ -49,7 +131,10 @@ for d in "$@"; do
         sleep 1
         sleep_ms=$((RANDOM % 567 + 100))
         sleep $(awk "BEGIN {print $sleep_ms/1000}")
-        data2=$(curl -A "$user_agent" -sL "https://rdap.org/domain/$d")
+        tmp2=$(mktemp)
+        http_code2=$(curl -A "$user_agent" -sL -w "%{http_code}" -o "$tmp2" "https://rdap.org/domain/$d")
+        data2=$(cat "$tmp2")
+        rm -f "$tmp2"
         parse_and_print "$data2"
         jq_status2=$?
         if [ $jq_status2 -ne 0 ]; then
@@ -80,7 +165,7 @@ for d in "$@"; do
       if [ $? -eq 0 ]; then
         echo -e "$d\tNot Registered"
       else
-        echo -e "$d\tError"
+        echo -e "$d\tError: $(brief_error_detail "$data" "$http_code" 0)"
       fi
     fi
   fi
