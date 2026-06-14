@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
+[[ -z "$DRAGNON_SYNOLOGY_IP" ]] && { echo "DRAGNON_SYNOLOGY_IP is not set. Try 
+On mac         set-secret DRAGNON_SYNOLOGY_IP 192,168.1.XXX
+Or on non-mac  export DRAGNON_SYNOLOGY_IP=192.168.1.XXX"; exit 1; }
+
 # SetProfile changes iTerm’s session profile but does not update $ITERM_PROFILE in the shell.
 iterm_set_profile() {
   [[ "$TERM_PROGRAM" != "iTerm.app" ]] && return
