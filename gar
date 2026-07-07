@@ -554,6 +554,32 @@ mac_read_defaults_setting() {
     printf '%s\n' "$value"
 }
 
+mac_controlcenter_sound_always() {
+    local sound visible_cc visible_legacy major
+
+    sound=$(defaults -currentHost read com.apple.controlcenter Sound 2>/dev/null || true)
+    if [[ -n "$sound" ]]; then
+        major=$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)
+        if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 26 )); then
+            [[ "$sound" == 16 ]]
+            return
+        fi
+        [[ "$sound" == 18 ]]
+        return
+    fi
+
+    visible_cc=$(defaults read com.apple.controlcenter "NSStatusItem VisibleCC Sound" 2>/dev/null || true)
+    case "$visible_cc" in
+        1|true|TRUE|YES|yes) return 0 ;;
+    esac
+
+    visible_legacy=$(defaults read com.apple.controlcenter "NSStatusItem Visible Sound" 2>/dev/null || true)
+    case "$visible_legacy" in
+        1|true|TRUE|YES|yes) return 0 ;;
+    esac
+    return 1
+}
+
 gar_setting_matches() {
     local actual="$1" expected="$2" compare="${3:-eq}"
     case "$compare" in
@@ -576,6 +602,14 @@ check_mac_settings() {
         actual=""
 
         case "$kind" in
+            sound-menu-bar-always)
+                if mac_controlcenter_sound_always; then
+                    report_ok "Setting $label"
+                else
+                    report_warn "Setting $label (enable in System Settings → Control Center → Sound → Show in Menu Bar → Always)"
+                fi
+                continue
+                ;;
             json-editor)
                 app_path=$(mac_editor_app_path "$location")
                 if [[ -z "$app_path" || ! -e "$app_path" ]]; then

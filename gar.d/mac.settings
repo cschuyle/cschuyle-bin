@@ -1,9 +1,10 @@
 # Mac settings checks (advisory — mismatches WARN, not MISS).
 # Format: label|kind|location|key|expected[|compare]
-# kind: json-editor (cursor or code), defaults
+# kind: json-editor (cursor or code), defaults, sound-menu-bar-always
 # location: editor id or "global" for NSGlobalDomain
 # compare: eq (default), at_most (numeric actual <= expected)
 Cursor auto-save|json-editor|cursor|files.autoSave|onFocusChange
 VS Code auto-save|json-editor|code|files.autoSave|onFocusChange
 Keyboard repeat speed|defaults|global|KeyRepeat|2|at_most
 Keyboard repeat delay|defaults|global|InitialKeyRepeat|15|at_most
+Always show volume in menu bar|sound-menu-bar-always||||
