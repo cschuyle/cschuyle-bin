@@ -1,0 +1,447 @@
+#!/usr/bin/env bash
+# gar (garage): check this machine's configuration against desired state.
+set -o pipefail
+
+GAR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/gar.d" && pwd)"
+
+usage() {
+    cat <<'EOF'
+Usage: gar [-h]
+       gar info <name>
+
+Check the current machine's configuration against the desired state in gar.d/.
+Reports missing or out-of-date elements. Mac checks are implemented; other
+platforms are detected but not yet audited.
+
+  info <name>   Show how to install a tracked item (name match is case-insensitive)
+
+Exit status: 0 if everything looks good, 1 if anything is missing.
+EOF
+}
+
+gar_name_eq() {
+    [[ "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" == \
+       "$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" ]]
+}
+
+lookup_install_hint() {
+    local query="$1" name hint
+    while IFS='|' read -r name hint; do
+        if gar_name_eq "$query" "$name"; then
+            printf '%s\n' "$hint"
+            return 0
+        fi
+    done < <(read_manifest "$GAR_DIR/mac.install-hints")
+    return 1
+}
+
+lookup_app_entry() {
+    local query="$1" entry name path
+    while IFS= read -r entry; do
+        name="${entry%%|*}"
+        path="${entry#*|}"
+        if gar_name_eq "$query" "$name"; then
+            printf '%s|%s\n' "$name" "$path"
+            return 0
+        fi
+    done < <(read_manifest "$GAR_DIR/mac.apps")
+    return 1
+}
+
+lookup_brew_hint() {
+    local query="$1" line name
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^brew[[:space:]]+\"([^\"]+)\" ]]; then
+            name="${BASH_REMATCH[1]}"
+            if gar_name_eq "$query" "$name"; then
+                printf 'brew install %s\n' "$name"
+                return 0
+            fi
+        elif [[ "$line" =~ ^cask[[:space:]]+\"([^\"]+)\" ]]; then
+            name="${BASH_REMATCH[1]}"
+            if gar_name_eq "$query" "$name"; then
+                printf 'brew install --cask %s\n' "$name"
+                return 0
+            fi
+        fi
+    done < <(read_manifest "$GAR_DIR/mac.Brewfile")
+    return 1
+}
+
+cmd_info() {
+    local query="$1" app_entry canonical path hint
+
+    if [[ -z "$query" ]]; then
+        echo "Usage: gar info <name>" >&2
+        exit 2
+    fi
+
+    if app_entry=$(lookup_app_entry "$query"); then
+        canonical="${app_entry%%|*}"
+        path="${app_entry#*|}"
+        printf '%s (app)\n' "$canonical"
+        printf 'Expected path: %s\n' "$path"
+        if [[ -e "$path" ]]; then
+            printf 'Status: installed\n'
+        else
+            printf 'Status: not installed\n'
+        fi
+        if hint=$(lookup_install_hint "$query"); then
+            printf 'Install: %s\n' "$hint"
+        else
+            printf 'Install: download from the vendor or App Store\n'
+        fi
+        exit 0
+    fi
+
+    if hint=$(lookup_install_hint "$query"); then
+        printf '%s\n' "$query"
+        printf 'Install: %s\n' "$hint"
+        exit 0
+    fi
+
+    if hint=$(lookup_brew_hint "$query"); then
+        printf '%s (brew)\n' "$query"
+        printf 'Install: %s\n' "$hint"
+        exit 0
+    fi
+
+    echo "No gar entry for: $query" >&2
+    exit 1
+}
+
+detect_platform() {
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+        printf '%s\n' wsl
+    elif [[ "$(uname -s)" == "Darwin" ]]; then
+        printf '%s\n' mac
+    elif [[ "$(uname -a)" == *[Ss]ynology* ]]; then
+        printf '%s\n' synology
+    elif [[ "$(uname -s)" == "Linux" ]]; then
+        printf '%s\n' linux
+    else
+        printf '%s\n' unknown
+    fi
+}
+
+read_manifest() {
+    local file="$1"
+    [[ -f "$file" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -n "$line" ]] || continue
+        printf '%s\n' "$line"
+    done <"$file"
+}
+
+report_ok() {
+    printf 'OK   %s\n' "$1"
+}
+
+report_miss() {
+    printf 'MISS %s\n' "$1" >&2
+    issues=$((issues + 1))
+}
+
+mac_secret_exists() {
+    security find-generic-password -a "$USER" -s "$1" >/dev/null 2>&1
+}
+
+check_mac_homebrew() {
+    local brew_bin=""
+    if command -v brew >/dev/null 2>&1; then
+        brew_bin=$(command -v brew)
+    elif [[ -x /opt/homebrew/bin/brew ]]; then
+        brew_bin=/opt/homebrew/bin/brew
+    elif [[ -x /usr/local/bin/brew ]]; then
+        brew_bin=/usr/local/bin/brew
+    fi
+
+    if [[ -z "$brew_bin" ]]; then
+        report_miss "Homebrew (not installed)"
+        return
+    fi
+    report_ok "Homebrew ($brew_bin)"
+
+    local brewfile="$GAR_DIR/mac.Brewfile"
+    if [[ ! -f "$brewfile" ]]; then
+        report_miss "Homebrew manifest ($brewfile missing)"
+        return
+    fi
+
+    local missing=()
+    while IFS= read -r line; do
+        [[ "$line" == →* ]] || continue
+        missing+=("${line#→ }")
+    done < <("$brew_bin" bundle check --file="$brewfile" --verbose 2>&1 || true)
+
+    if ((${#missing[@]} == 0)); then
+        report_ok "Homebrew taps/formulae/casks (Brewfile satisfied)"
+        return
+    fi
+
+    local item
+    for item in "${missing[@]}"; do
+        report_miss "Homebrew: $item"
+    done
+}
+
+check_mac_secrets() {
+    local key
+    while IFS= read -r key; do
+        if mac_secret_exists "$key"; then
+            report_ok "Secret $key"
+        else
+            report_miss "Secret $key (set with: set-secret $key VALUE)"
+        fi
+    done < <(read_manifest "$GAR_DIR/mac.secrets")
+}
+
+check_mac_env() {
+    local name val
+    while IFS= read -r name; do
+        val="${!name-}"
+        if [[ -n "$val" ]]; then
+            report_ok "Env $name"
+        else
+            report_miss "Env $name (not set in this shell)"
+        fi
+    done < <(read_manifest "$GAR_DIR/mac.env")
+}
+
+check_mac_java() {
+    local sdkman_init="$HOME/.sdkman/bin/sdkman-init.sh"
+    local has_sdkman=0
+    local has_java=0
+
+    if [[ -s "$sdkman_init" ]]; then
+        has_sdkman=1
+        report_ok "SDKMAN"
+        # shellcheck disable=SC1090
+        source "$sdkman_init"
+        if sdk current java >/dev/null 2>&1; then
+            has_java=1
+            report_ok "Java ($(sdk current java 2>/dev/null | tr -d '\r'))"
+        fi
+    else
+        report_miss "SDKMAN (install from https://sdkman.io, then: sdk install java)"
+    fi
+
+    if java -version >/dev/null 2>&1; then
+        has_java=1
+        if (( has_sdkman == 0 )); then
+            report_ok "Java ($(java -version 2>&1 | head -n1))"
+        fi
+    elif (( has_java == 0 )); then
+        if (( has_sdkman == 1 )); then
+            report_miss "Java (no SDKMAN candidate; run: sdk install java)"
+        else
+            report_miss "Java (no runtime; prefer SDKMAN: sdk install java)"
+        fi
+    fi
+}
+
+check_mac_commands() {
+    local cmd hint
+    while IFS= read -r cmd; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            report_ok "Command $cmd"
+        else
+            hint=$(lookup_install_hint "$cmd" 2>/dev/null || true)
+            if [[ -n "$hint" ]]; then
+                report_miss "Command $cmd ($hint)"
+            else
+                report_miss "Command $cmd (not on PATH)"
+            fi
+        fi
+    done < <(read_manifest "$GAR_DIR/mac.commands")
+}
+
+check_mac_apps() {
+    local entry name path
+    while IFS= read -r entry; do
+        name="${entry%%|*}"
+        path="${entry#*|}"
+        if [[ "$name" == "$entry" || -z "$path" ]]; then
+            report_miss "App manifest line (expected name|path): $entry"
+            continue
+        fi
+        if [[ -e "$path" ]]; then
+            report_ok "App $name"
+        else
+            report_miss "App $name ($path)"
+        fi
+    done < <(read_manifest "$GAR_DIR/mac.apps")
+}
+
+mac_browser_app_path() {
+    case "$1" in
+        opera) printf '%s\n' /Applications/Opera.app ;;
+        waterfox) printf '%s\n' /Applications/Waterfox.app ;;
+    esac
+}
+
+mac_chromium_extension_installed() {
+    local support_dir="$1" ext_id="$2" profile_dir
+    for profile_dir in "$support_dir"/*/Extensions/"$ext_id"; do
+        [[ -d "$profile_dir" ]] && return 0
+    done
+    return 1
+}
+
+mac_gecko_extension_installed() {
+    local support_dir="$1" ext_id="$2"
+    python3 - "$support_dir" "$ext_id" <<'PY'
+import configparser
+import json
+import sys
+from pathlib import Path
+
+base = Path(sys.argv[1]).expanduser()
+addon_id = sys.argv[2]
+profile_dirs = []
+
+profiles_ini = base / "profiles.ini"
+if profiles_ini.exists():
+    cp = configparser.RawConfigParser()
+    cp.read(profiles_ini)
+    for section in cp.sections():
+        if not cp.has_option(section, "Path"):
+            continue
+        rel = cp.get(section, "Path")
+        is_relative = cp.get(section, "IsRelative", fallback="1") == "1"
+        profile = (base / rel) if is_relative else Path(rel)
+        if profile.is_dir():
+            profile_dirs.append(profile)
+else:
+    profiles = base / "Profiles"
+    if profiles.is_dir():
+        profile_dirs = [p for p in profiles.iterdir() if p.is_dir()]
+
+for profile in profile_dirs:
+    ext_json = profile / "extensions.json"
+    if not ext_json.exists():
+        continue
+    data = json.loads(ext_json.read_text())
+    for addon in data.get("addons", []):
+        if addon.get("id") == addon_id and addon.get("type") == "extension":
+            raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+mac_browser_extension_installed() {
+    local browser="$1" ext_id="$2"
+    case "$browser" in
+        opera)
+            mac_chromium_extension_installed \
+                "$HOME/Library/Application Support/com.operasoftware.Opera" \
+                "$ext_id"
+            ;;
+        waterfox)
+            mac_gecko_extension_installed \
+                "$HOME/Library/Application Support/Waterfox" \
+                "$ext_id"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+check_mac_browser_extensions() {
+    local entry browser ext_id label app_path
+    while IFS='|' read -r browser ext_id label; do
+        if [[ -z "$browser" || -z "$ext_id" || -z "$label" ]]; then
+            report_miss "Browser extension manifest line (expected browser|id|name): $browser|$ext_id|$label"
+            continue
+        fi
+
+        app_path=$(mac_browser_app_path "$browser")
+        if [[ -z "$app_path" || ! -e "$app_path" ]]; then
+            continue
+        fi
+
+        if mac_browser_extension_installed "$browser" "$ext_id"; then
+            report_ok "Extension $browser/$label"
+        else
+            report_miss "Extension $browser/$label ($ext_id)"
+        fi
+    done < <(read_manifest "$GAR_DIR/mac.browser-extensions")
+}
+
+run_mac_checks() {
+    printf '\nHomebrew\n'
+    check_mac_homebrew
+
+    printf '\nSecrets\n'
+    check_mac_secrets
+
+    printf '\nEnvironment\n'
+    check_mac_env
+
+    printf '\nJava\n'
+    check_mac_java
+
+    printf '\nCommands\n'
+    check_mac_commands
+
+    printf '\nApplications\n'
+    check_mac_apps
+
+    printf '\nBrowser extensions\n'
+    check_mac_browser_extensions
+}
+
+main() {
+    local platform
+    issues=0
+
+    if [[ "${1:-}" == "info" ]]; then
+        shift
+        cmd_info "${1:-}"
+        return
+    fi
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    platform=$(detect_platform)
+    printf 'gar: platform %s\n' "$platform"
+
+    case "$platform" in
+        mac)
+            run_mac_checks
+            ;;
+        synology|wsl|linux)
+            printf '\nOnly mac checks are implemented so far.\n' >&2
+            issues=$((issues + 1))
+            ;;
+        *)
+            report_miss "Unknown platform"
+            ;;
+    esac
+
+    printf '\n'
+    if (( issues > 0 )); then
+        printf '%s issue(s)\n' "$issues" >&2
+        exit 1
+    fi
+    printf 'All checks passed\n'
+}
+
+main "$@"

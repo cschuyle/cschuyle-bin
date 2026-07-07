@@ -1,0 +1,16 @@
+# Apps installed outside Homebrew (App Store or vendor site).
+# Format: display name|path
+Opera|/Applications/Opera.app
+Waterfox|/Applications/Waterfox.app
+Cursor|/Applications/Cursor.app
+WhatsApp|/Applications/WhatsApp.app
+1Password|/Applications/1Password.app
+ChatGPT|/Applications/ChatGPT.app
+Roam Research|/Applications/Roam Research.app
+iTerm|/Applications/iTerm.app
+ProtonVPN|/Applications/ProtonVPN.app
+Flycut|/Applications/Flycut.app
+Rectangle|/Applications/Rectangle.app
+Docker|/Applications/Docker.app
+qBittorrent|/Applications/qbittorrent.app
+VS Code|/Applications/Visual Studio Code.app

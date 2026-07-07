@@ -1,0 +1,12 @@
+# Install hints for gar info (case-insensitive name match).
+# Format: name|hint
+Flycut|Download from https://github.com/TermiT/Flycut/releases and drag Flycut.app to /Applications
+Rectangle|Download from https://rectangleapp.com and drag Rectangle.app to /Applications
+Docker|Download from https://www.docker.com/products/docker-desktop/ and drag Docker.app to /Applications
+qBittorrent|Download from https://www.qbittorrent.org/download; if macOS blocks it: xattr -dr com.apple.quarantine /Applications/qbittorrent.app
+VS Code|Download from https://code.visualstudio.com/ and drag Visual Studio Code.app to /Applications
+Cursor|Download from https://cursor.com/ and drag Cursor.app to /Applications
+code|In VS Code: Cmd-Shift-P → Shell Command: Install 'code' command in PATH
+cursor|In Cursor: Cmd-Shift-P → Shell Command: Install 'cursor' command in PATH
+gsed|brew install gnu-sed
+csvformat|brew install csvkit

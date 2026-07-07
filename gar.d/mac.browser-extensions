@@ -1,0 +1,20 @@
+# Expected browser extensions. Format: browser|extension-id|display name
+# browser is opera or waterfox. IDs from Chrome Web Store / AMO.
+#
+# Chromium (Opera) — see mac-setup/scripts/opt-in/cschuyle.sh
+opera|gejiddohjgogedgjnonbofjigllpkmbf|1Password Nightly
+opera|hmbhamadknmmkapmhbldodoajkcggcml|Go to Playing Tab
+opera|bcjindcccaagfpapjjmafapmmgkkhgoa|JSON Formatter
+opera|hponfflfgcjikmehlcdcnpapicnljkkc|Roam Highlighter
+opera|fmkadmapgofadopljbjfkapdkoienihi|React Developer Tools
+opera|mphdppdgoagghpmmhodmfajjlloijnbd|Pinboard Plus
+opera|kgcjekpmcjjogibpjebkhaanilehneje|Karakeep
+#
+# Gecko (Waterfox)
+waterfox|{d634138d-c276-4fc8-924b-40a0ea21d284}|1Password
+waterfox|{c52f9e9f-dbe3-4ee4-9515-4cec6a51b551}|Go to Playing Tab
+waterfox|{db8ff575-504f-4f3d-a910-07702998d21d}|JSON Formatter
+waterfox|{ecdeca5f-93eb-4757-8cad-9c4ab7568649}|Link Text and Location Copier
+waterfox|@react-devtools|React Developer Tools
+waterfox|{981c6263-af64-47c6-8c6d-c3289444fdf9}|Pinboard Pin
+waterfox|addon@karakeep.app|Karakeep
