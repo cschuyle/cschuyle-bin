@@ -277,8 +277,27 @@ gar_repo_main_unpushed_count() {
     printf '%s\n' "$ahead"
 }
 
+gar_repo_main_behind_count() {
+    local repo="$1" behind
+    [[ -d "$repo/.git" ]] || return 1
+    git -C "$repo" rev-parse --verify main >/dev/null 2>&1 || return 1
+    git -C "$repo" rev-parse --verify origin/main >/dev/null 2>&1 || return 1
+    behind=$(git -C "$repo" rev-list --count main..origin/main 2>/dev/null) || return 1
+    (( behind > 0 )) || return 1
+    printf '%s\n' "$behind"
+}
+
+gar_repo_try_fetch_main() {
+    local repo="$1"
+    [[ -d "$repo/.git" ]] || return 1
+    git -C "$repo" rev-parse --verify main >/dev/null 2>&1 || return 1
+    git -C "$repo" remote get-url origin >/dev/null 2>&1 || return 1
+    git -C "$repo" fetch --quiet origin main 2>/dev/null || return 1
+    git -C "$repo" rev-parse --verify origin/main >/dev/null 2>&1
+}
+
 check_mac_machine_env_repo() {
-    local name="$1" path="$2" issues_found=0 ahead
+    local name="$1" path="$2" issues_found=0 ahead behind fetched=0
     if [[ ! -d "$path" ]]; then
         report_miss "Machine env repo $name ($path missing)"
         return
@@ -291,11 +310,22 @@ check_mac_machine_env_repo() {
         report_warn "Machine env repo $name (uncommitted changes in $path)"
         issues_found=1
     fi
+    if gar_repo_try_fetch_main "$path"; then
+        fetched=1
+    fi
     if ahead=$(gar_repo_main_unpushed_count "$path" 2>/dev/null); then
         if (( ahead == 1 )); then
             report_warn "Machine env repo $name (1 unpushed commit on main)"
         else
             report_warn "Machine env repo $name ($ahead unpushed commits on main)"
+        fi
+        issues_found=1
+    fi
+    if (( fetched )) && behind=$(gar_repo_main_behind_count "$path" 2>/dev/null); then
+        if (( behind == 1 )); then
+            report_warn "Machine env repo $name (pull would update main; 1 commit behind origin/main)"
+        else
+            report_warn "Machine env repo $name (pull would update main; $behind commits behind origin/main)"
         fi
         issues_found=1
     fi
