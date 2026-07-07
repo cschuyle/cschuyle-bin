@@ -13,3 +13,13 @@ gsed|brew install gnu-sed
 csvformat|brew install csvkit
 gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
 gdubw/gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
+1Password Nightly|Install in Opera from https://chromewebstore.google.com/detail/1password-nightly-%E2%80%93-passw/gejiddohjgogedgjnonbofjigllpkmbf
+Go to Playing Tab|Opera: https://chromewebstore.google.com/detail/go-to-playing-tab/hmbhamadknmmkapmhbldodoajkcggcml — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/go-to-playing-tab-2/
+JSON Formatter|Opera: https://chromewebstore.google.com/detail/json-formatter/bcjindcccaagfpapjjmafapmmgkkhgoa — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/json_formatter/
+Roam Highlighter|Install in Opera from https://chromewebstore.google.com/detail/roam-highlighter/hponfflfgcjikmehlcdcnpapicnljkkc
+React Developer Tools|Opera: https://chromewebstore.google.com/detail/react-developer-tools/fmkadmapgofadopljbjfkapdkoienihi — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/react-devtools/
+Pinboard Plus|Install in Opera from https://chromewebstore.google.com/detail/pinboard-plus/mphdppdgoagghpmmhodmfajjlloijnbd
+Karakeep|Opera: https://chromewebstore.google.com/detail/karakeep/kgcjekpmcjjogibpjebkhaanilehneje — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/karakeep/
+1Password|Install in Waterfox from https://addons.mozilla.org/en-US/firefox/addon/1password-x-password-manager/
+Link Text and Location Copier|Install in Waterfox from https://addons.mozilla.org/en-US/firefox/addon/link-text-and-location-copier/
+Pinboard Pin|Install in Waterfox from https://addons.mozilla.org/en-US/firefox/addon/pinboard-pin/ (https://github.com/Cito/Pinboard-Pin)

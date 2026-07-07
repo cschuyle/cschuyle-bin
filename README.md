@@ -50,7 +50,7 @@ Scan a tree for paths that may break on exFAT or Windows: reserved names, invali
 
 ### gar
 
-Audit Mac machine configuration against manifests in `gar.d/` (Homebrew, secrets, env, Java, apps, browser extensions, commands, machine environment repos). `gar apps` lists tracked GUI apps; `gar info NAME` shows how to install an item.
+Audit Mac machine configuration against manifests in `gar.d/` (Homebrew, secrets, env, Java, apps, browser extensions, commands, machine environment repos, settings). `gar apps` lists tracked GUI apps; `gar info NAME` shows how to install an item.
 
 ### git-pull-repos.sh
 

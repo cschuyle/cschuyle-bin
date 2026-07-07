@@ -71,6 +71,30 @@ lookup_app_entry() {
     return 1
 }
 
+gar_normalize_ext_id() {
+    local id="$1"
+    id="${id#\{}"
+    id="${id%\}}"
+    printf '%s\n' "$id"
+}
+
+lookup_browser_extension_entry() {
+    local query="$1" browser ext_id label query_id ext_id_norm
+    query_id=$(gar_normalize_ext_id "$query")
+    while IFS='|' read -r browser ext_id label; do
+        if gar_name_eq "$query" "$label" || gar_name_eq "$query" "$browser/$label"; then
+            printf '%s|%s|%s\n' "$browser" "$ext_id" "$label"
+            return 0
+        fi
+        ext_id_norm=$(gar_normalize_ext_id "$ext_id")
+        if gar_name_eq "$query" "$ext_id" || gar_name_eq "$query_id" "$ext_id_norm"; then
+            printf '%s|%s|%s\n' "$browser" "$ext_id" "$label"
+            return 0
+        fi
+    done < <(read_manifest "$GAR_DIR/mac.browser-extensions")
+    return 1
+}
+
 lookup_brew_hint() {
     local query="$1" line name
     while IFS= read -r line; do
@@ -101,7 +125,7 @@ brew_miss_hint() {
 }
 
 cmd_info() {
-    local query="$1" app_entry canonical path hint
+    local query="$1" app_entry canonical path hint ext_entry browser ext_id label app_path
 
     if [[ -z "$query" ]]; then
         echo "Usage: gar info <name>" >&2
@@ -122,6 +146,31 @@ cmd_info() {
             printf 'Install: %s\n' "$hint"
         else
             printf 'Install: download from the vendor or App Store\n'
+        fi
+        exit 0
+    fi
+
+    if ext_entry=$(lookup_browser_extension_entry "$query"); then
+        browser="${ext_entry%%|*}"
+        ext_id="${ext_entry#*|}"
+        ext_id="${ext_id%%|*}"
+        label="${ext_entry##*|}"
+        printf '%s (%s extension)\n' "$label" "$browser"
+        printf 'Extension ID: %s\n' "$ext_id"
+        app_path=$(mac_browser_app_path "$browser")
+        if [[ -z "$app_path" || ! -e "$app_path" ]]; then
+            printf 'Status: browser not installed'
+            [[ -n "$app_path" ]] && printf ' (%s)' "$app_path"
+            printf '\n'
+        elif mac_browser_extension_installed "$browser" "$ext_id"; then
+            printf 'Status: installed\n'
+        else
+            printf 'Status: not installed\n'
+        fi
+        if hint=$(lookup_install_hint "$label"); then
+            printf 'Install: %s\n' "$hint"
+        else
+            printf 'Install: install from the browser extension store\n'
         fi
         exit 0
     fi
@@ -255,6 +304,132 @@ check_mac_machine_env_repos() {
         seen+=("$setup_dir")
         check_mac_machine_env_repo "$(basename "$setup_dir")" "$setup_dir"
     done
+}
+
+mac_editor_settings_path() {
+    case "$1" in
+        cursor) printf '%s\n' "$HOME/Library/Application Support/Cursor/User/settings.json" ;;
+        code) printf '%s\n' "$HOME/Library/Application Support/Code/User/settings.json" ;;
+    esac
+}
+
+mac_editor_app_path() {
+    case "$1" in
+        cursor) printf '%s\n' /Applications/Cursor.app ;;
+        code) printf '%s\n' "/Applications/Visual Studio Code.app" ;;
+    esac
+}
+
+mac_read_json_setting() {
+    local file="$1" key="$2"
+    [[ -f "$file" ]] || return 1
+    python3 - "$file" "$key" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+text = path.read_text()
+text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+text = re.sub(r"//.*?$", "", text, flags=re.M)
+text = re.sub(r",\s*([}\]])", r"\1", text)
+try:
+    data = json.loads(text)
+except json.JSONDecodeError:
+    raise SystemExit(3)
+if key in data:
+    value = data[key]
+else:
+    value = data
+    for part in key.split("."):
+        if not isinstance(value, dict) or part not in value:
+            raise SystemExit(2)
+        value = value[part]
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif value is None:
+    print("")
+else:
+    print(value)
+PY
+}
+
+mac_read_defaults_setting() {
+    local domain="$1" key="$2" value
+    if [[ "$domain" == global ]]; then
+        value=$(defaults read -g "$key" 2>/dev/null) || return 1
+    else
+        domain=$(gar_expand_home "$domain")
+        value=$(defaults read "$domain" "$key" 2>/dev/null) || return 1
+    fi
+    printf '%s\n' "$value"
+}
+
+gar_setting_matches() {
+    local actual="$1" expected="$2" compare="${3:-eq}"
+    case "$compare" in
+        eq)
+            [[ "$actual" == "$expected" ]]
+            ;;
+        at_most)
+            [[ "$actual" =~ ^[0-9]+$ && "$expected" =~ ^[0-9]+$ && "$actual" -le "$expected" ]]
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+check_mac_settings() {
+    local label kind location key expected compare actual settings_path app_path read_status=0
+    while IFS='|' read -r label kind location key expected compare; do
+        compare="${compare:-eq}"
+        actual=""
+
+        case "$kind" in
+            json-editor)
+                app_path=$(mac_editor_app_path "$location")
+                if [[ -z "$app_path" || ! -e "$app_path" ]]; then
+                    continue
+                fi
+                settings_path=$(mac_editor_settings_path "$location")
+                if [[ ! -f "$settings_path" ]]; then
+                    report_warn "Setting $label (not set; want $expected)"
+                    continue
+                fi
+                read_status=0
+                actual=$(mac_read_json_setting "$settings_path" "$key" 2>/dev/null) || read_status=$?
+                if (( read_status != 0 )); then
+                    if (( read_status == 2 )); then
+                        report_warn "Setting $label (not set; want $expected)"
+                    elif (( read_status == 3 )); then
+                        report_warn "Setting $label (could not parse $settings_path)"
+                    else
+                        report_warn "Setting $label (could not read $settings_path)"
+                    fi
+                    continue
+                fi
+                ;;
+            defaults)
+                if ! actual=$(mac_read_defaults_setting "$location" "$key" 2>/dev/null); then
+                    report_warn "Setting $label (could not read $location $key)"
+                    continue
+                fi
+                ;;
+            *)
+                report_warn "Setting $label (unknown kind: $kind)"
+                continue
+                ;;
+        esac
+
+        if gar_setting_matches "$actual" "$expected" "$compare"; then
+            report_ok "Setting $label ($actual)"
+        else
+            report_warn "Setting $label (is $actual; want $expected)"
+        fi
+    done < <(read_manifest "$GAR_DIR/mac.settings")
 }
 
 mac_secret_exists() {
@@ -513,6 +688,9 @@ run_mac_checks() {
 
     gar_section_begin "Machine environment repos"
     check_mac_machine_env_repos
+
+    gar_section_begin "Settings"
+    check_mac_settings
 }
 
 main() {
