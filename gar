@@ -335,8 +335,17 @@ gar_repo_try_fetch_main() {
     git -C "$repo" rev-parse --verify origin/main >/dev/null 2>&1
 }
 
+gar_machine_env_skip_name() {
+    local skip_manifest="$1" want="$2" name
+    [[ -n "$skip_manifest" && -f "$skip_manifest" ]] || return 1
+    while IFS= read -r name; do
+        [[ "$name" == "$want" ]] && return 0
+    done < <(read_manifest "$skip_manifest")
+    return 1
+}
+
 gar_machine_env_list_repos() {
-    local repos_manifest="$1" entry name path setup_dir seen=()
+    local repos_manifest="$1" skip_manifest="${2:-}" entry name path setup_dir setup_name seen=()
     while IFS='|' read -r name path; do
         path=$(gar_expand_home "$path")
         if gar_path_seen "$path" "${seen[@]}"; then
@@ -349,11 +358,15 @@ gar_machine_env_list_repos() {
     for setup_dir in "$HOME"/Yew/*-setup; do
         [[ -d "$setup_dir" ]] || continue
         [[ -d "$setup_dir/.git" ]] || continue
+        setup_name=$(basename "$setup_dir")
+        if gar_machine_env_skip_name "$skip_manifest" "$setup_name"; then
+            continue
+        fi
         if gar_path_seen "$setup_dir" "${seen[@]}"; then
             continue
         fi
         seen+=("$setup_dir")
-        printf '%s|%s\n' "$(basename "$setup_dir")" "$setup_dir"
+        printf '%s|%s\n' "$setup_name" "$setup_dir"
     done
 }
 
@@ -396,13 +409,13 @@ gar_machine_env_prefetch_repo() {
 }
 
 gar_machine_env_prefetch_all() {
-    local repos_manifest="$1" name path slug result_file
+    local repos_manifest="$1" skip_manifest="${2:-}" name path slug result_file
     mkdir -p "$gar_tmpdir/repos"
     while IFS='|' read -r name path; do
         slug=$(gar_path_slug "$path")
         result_file="$gar_tmpdir/repos/$slug"
         gar_machine_env_prefetch_repo "$name" "$path" "$result_file" &
-    done < <(gar_machine_env_list_repos "$repos_manifest")
+    done < <(gar_machine_env_list_repos "$repos_manifest" "$skip_manifest")
     wait
 }
 
@@ -450,13 +463,13 @@ report_machine_env_repo() {
 }
 
 check_machine_env_repos() {
-    local repos_manifest="$1" name path slug result_file
-    gar_machine_env_prefetch_all "$repos_manifest"
+    local repos_manifest="$1" skip_manifest="${2:-}" name path slug result_file
+    gar_machine_env_prefetch_all "$repos_manifest" "$skip_manifest"
     while IFS='|' read -r name path; do
         slug=$(gar_path_slug "$path")
         result_file="$gar_tmpdir/repos/$slug"
         report_machine_env_repo "$name" "$path" "$result_file"
-    done < <(gar_machine_env_list_repos "$repos_manifest")
+    done < <(gar_machine_env_list_repos "$repos_manifest" "$skip_manifest")
 }
 
 check_git_config() {
@@ -996,8 +1009,9 @@ run_mac_checks() {
 }
 
 run_synology_checks() {
-    local repos_manifest commands_manifest git_config_manifest hints_file
+    local repos_manifest skip_manifest commands_manifest git_config_manifest hints_file
     repos_manifest=$(gar_resolve_manifest synology machine-env-repos)
+    skip_manifest=$(gar_resolve_manifest synology machine-env-skip)
     commands_manifest=$(gar_resolve_manifest synology commands)
     git_config_manifest=$(gar_resolve_manifest synology git-config)
     hints_file="$GAR_DIR/synology.install-hints"
@@ -1008,7 +1022,7 @@ run_synology_checks() {
     check_commands "$commands_manifest" "$hints_file"
 
     gar_section_begin "Machine environment repos"
-    check_machine_env_repos "$repos_manifest"
+    check_machine_env_repos "$repos_manifest" "$skip_manifest"
 
     gar_section_begin "Git config"
     check_git_config "$git_config_manifest" "$hints_file"
