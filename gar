@@ -74,6 +74,20 @@ lookup_install_hint() {
     return 1
 }
 
+gar_hint_is_multiline() {
+    [[ "$1" == *'\n'* ]]
+}
+
+gar_print_install_hint() {
+    local label="$1" hint="$2"
+    if gar_hint_is_multiline "$hint"; then
+        printf '%s\n' "${label% }"
+        printf '%b\n' "$hint"
+    else
+        printf '%s%s\n' "$label" "$hint"
+    fi
+}
+
 lookup_app_entry() {
     local query="$1" entry name path
     while IFS= read -r entry; do
@@ -159,7 +173,7 @@ cmd_info() {
             printf 'Status: not installed\n'
         fi
         if hint=$(lookup_install_hint "$query"); then
-            printf 'Install: %s\n' "$hint"
+            gar_print_install_hint 'Install: ' "$hint"
         else
             printf 'Install: download from the vendor or App Store\n'
         fi
@@ -184,7 +198,7 @@ cmd_info() {
             printf 'Status: not installed\n'
         fi
         if hint=$(lookup_install_hint "$label"); then
-            printf 'Install: %s\n' "$hint"
+            gar_print_install_hint 'Install: ' "$hint"
         else
             printf 'Install: install from the browser extension store\n'
         fi
@@ -193,7 +207,7 @@ cmd_info() {
 
     if hint=$(lookup_install_hint "$query"); then
         printf '%s\n' "$query"
-        printf 'Install: %s\n' "$hint"
+        gar_print_install_hint 'Install: ' "$hint"
         exit 0
     fi
 
@@ -434,6 +448,27 @@ check_mac_machine_env_repos() {
         result_file="$gar_tmpdir/repos/$slug"
         report_mac_machine_env_repo "$name" "$path" "$result_file"
     done < <(gar_machine_env_list_repos)
+}
+
+check_mac_git_config() {
+    local key val hint
+    if ! command -v git >/dev/null 2>&1; then
+        report_miss "Git (not on PATH)"
+        return
+    fi
+    while IFS= read -r key; do
+        val=$(git config --global --get "$key" 2>/dev/null || true)
+        if [[ -n "$val" ]]; then
+            report_ok "Git config $key ($val)"
+        else
+            hint=$(lookup_install_hint "$key" 2>/dev/null || true)
+            if [[ -n "$hint" ]]; then
+                report_miss "Git config $key ($hint)"
+            else
+                report_miss "Git config $key (not set; run: git config --global $key VALUE)"
+            fi
+        fi
+    done < <(read_manifest "$GAR_DIR/mac.git-config")
 }
 
 mac_editor_settings_path() {
@@ -707,7 +742,12 @@ check_mac_perl_modules() {
         else
             hint=$(lookup_install_hint "$module" 2>/dev/null || true)
             if [[ -n "$hint" ]]; then
-                report_miss "Perl module $module ($hint)"
+                if gar_hint_is_multiline "$hint"; then
+                    report_miss "Perl module $module:"
+                    printf '%b\n' "$hint"
+                else
+                    report_miss "Perl module $module ($hint)"
+                fi
             else
                 report_miss "Perl module $module (not installed)"
             fi
@@ -933,6 +973,9 @@ run_mac_checks() {
 
     gar_section_begin "Machine environment repos"
     check_mac_machine_env_repos
+
+    gar_section_begin "Git config"
+    check_mac_git_config
 
     gar_section_begin "Settings"
     check_mac_settings

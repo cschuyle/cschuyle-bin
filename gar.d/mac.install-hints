@@ -7,6 +7,7 @@ qBittorrent|Download from https://www.qbittorrent.org/download; if macOS blocks 
 VS Code|Download from https://code.visualstudio.com/ and drag Visual Studio Code.app to /Applications
 Cursor|Download from https://cursor.com/ and drag Cursor.app to /Applications
 Zoom|Download from https://zoom.us/download and drag zoom.us.app to /Applications
+Spotify|brew install --cask spotify
 Rectangle login|System Settings → General → Login Items → add Rectangle
 Flycut login|System Settings → General → Login Items → add Flycut
 Proton VPN login|System Settings → General → Login Items → add ProtonVPN
@@ -17,10 +18,12 @@ aws|brew install awscli
 awscli|brew install awscli
 magick|brew install imagemagick
 imagemagick|brew install imagemagick
-Text::Autoformat|cpan Text::Autoformat
+Text::Autoformat|Try:\n\n        cpan\n\n        (answer 'yes' to the question about setting up if this is the first time you're running cpan)\n        cpan[1]> install Text::Autoformat\n        cpan[2]> exit
 csvformat|brew install csvkit
 gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
 gdubw/gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
+user.name|git config --global user.name "Your Name"
+user.email|git config --global user.email "you@example.com"
 1Password Nightly|Install in Opera from https://chromewebstore.google.com/detail/1password-nightly-%E2%80%93-passw/gejiddohjgogedgjnonbofjigllpkmbf
 Go to Playing Tab|Opera: https://chromewebstore.google.com/detail/go-to-playing-tab/hmbhamadknmmkapmhbldodoajkcggcml — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/go-to-playing-tab-2/
 JSON Formatter|Opera: https://chromewebstore.google.com/detail/json-formatter/bcjindcccaagfpapjjmafapmmgkkhgoa — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/json_formatter/

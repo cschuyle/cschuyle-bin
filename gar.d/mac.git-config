@@ -1,0 +1,3 @@
+# Global git config keys that should be set (git config --global KEY).
+user.name
+user.email
