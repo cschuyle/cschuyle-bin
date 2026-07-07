@@ -3,6 +3,7 @@
 
 tap "gdubw/gng"  # https://github.com/gdubw/gng
 
+brew "awscli"
 brew "csvkit"
 brew "direnv"
 brew "findutils"

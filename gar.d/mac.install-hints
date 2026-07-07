@@ -10,6 +10,8 @@ Zoom|Download from https://zoom.us/download and drag zoom.us.app to /Application
 code|In VS Code: Cmd-Shift-P → Shell Command: Install 'code' command in PATH
 cursor|In Cursor: Cmd-Shift-P → Shell Command: Install 'cursor' command in PATH
 gsed|brew install gnu-sed
+aws|brew install awscli
+awscli|brew install awscli
 csvformat|brew install csvkit
 gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
 gdubw/gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng

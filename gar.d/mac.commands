@@ -1,4 +1,5 @@
 # Commands that should be on PATH.
+aws
 gsed
 csvformat
 gng
