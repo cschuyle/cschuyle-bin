@@ -1,0 +1,10 @@
+# Install hints for gar info on Synology (case-insensitive name match).
+# Format: name|hint
+git|DSM Package Center → Git Server, or: opkg install git
+python3|opkg install python3
+rsync|Usually preinstalled on DSM; otherwise: opkg install rsync
+curl|Usually preinstalled on DSM; otherwise: opkg install curl
+jq|opkg install jq
+tar|Usually preinstalled on DSM
+user.name|git config --global user.name "Your Name"
+user.email|git config --global user.email "you@example.com"

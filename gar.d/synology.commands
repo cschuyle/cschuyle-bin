@@ -1,0 +1,7 @@
+# Commands that should be on PATH (Synology / Entware).
+git
+python3
+rsync
+curl
+jq
+tar
