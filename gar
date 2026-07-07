@@ -580,6 +580,76 @@ mac_controlcenter_sound_always() {
     return 1
 }
 
+mac_name_strip_local_suffix() {
+    local name="$1"
+    name="${name%.local}"
+    printf '%s\n' "$name"
+}
+
+mac_name_normalize_apostrophes() {
+    local name="$1"
+    name="${name//$'\342\200\231'/\'}"
+    printf '%s\n' "$name"
+}
+
+mac_name_looks_system_assigned() {
+    local name="$1"
+    [[ -n "$name" ]] || return 1
+
+    name=$(mac_name_strip_local_suffix "$name")
+
+    if [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9-]*s-(MacBook-Air|MacBook-Pro|Mac-mini|Mac-Studio|Mac-Pro|iMac|MacBook)$ ]]; then
+        return 0
+    fi
+    if [[ "$name" =~ ^(MacBook-Air|MacBook-Pro|Mac-mini|Mac-Studio|Mac-Pro|iMac|MacBook)$ ]]; then
+        return 0
+    fi
+
+    name=$(mac_name_normalize_apostrophes "$name")
+    local model
+    for model in \
+        "'s MacBook Air" \
+        "'s MacBook Pro" \
+        "'s Mac mini" \
+        "'s Mac Studio" \
+        "'s Mac Pro" \
+        "'s iMac" \
+        "'s MacBook"; do
+        if [[ "$name" == *"$model" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+mac_machine_name_primary() {
+    local lh cn host
+    lh=$(scutil --get LocalHostName 2>/dev/null) || lh=""
+    cn=$(scutil --get ComputerName 2>/dev/null) || cn=""
+    host=$(hostname 2>/dev/null) || host=""
+    if [[ -n "$lh" ]]; then
+        printf '%s\n' "$lh"
+    elif [[ -n "$cn" ]]; then
+        printf '%s\n' "$cn"
+    elif [[ -n "$host" ]]; then
+        mac_name_strip_local_suffix "$host"
+    fi
+}
+
+mac_machine_name_is_system_assigned() {
+    local cn lh hn host val
+    cn=$(scutil --get ComputerName 2>/dev/null) || cn=""
+    lh=$(scutil --get LocalHostName 2>/dev/null) || lh=""
+    hn=$(scutil --get HostName 2>/dev/null) || hn=""
+    host=$(hostname 2>/dev/null) || host=""
+    for val in "$cn" "$lh" "$hn" "$host"; do
+        if mac_name_looks_system_assigned "$val"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 gar_setting_matches() {
     local actual="$1" expected="$2" compare="${3:-eq}"
     case "$compare" in
@@ -607,6 +677,19 @@ check_mac_settings() {
                     report_ok "Setting $label"
                 else
                     report_warn "Setting $label (enable in System Settings → Control Center → Sound → Show in Menu Bar → Always)"
+                fi
+                continue
+                ;;
+            machine-name-not-default)
+                actual=$(mac_machine_name_primary 2>/dev/null || true)
+                if mac_machine_name_is_system_assigned; then
+                    if [[ -n "$actual" ]]; then
+                        report_warn "Setting $label (is $actual; rename in System Settings → General → About → Name)"
+                    else
+                        report_warn "Setting $label (rename in System Settings → General → About → Name)"
+                    fi
+                else
+                    report_ok "Setting $label${actual:+ ($actual)}"
                 fi
                 continue
                 ;;
