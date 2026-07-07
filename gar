@@ -6,6 +6,22 @@ GAR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/gar.d" && pwd)"
 gar_show_all=0
 gar_section_name=""
 gar_section_header_printed=0
+gar_tmpdir=""
+
+gar_init_workdir() {
+    gar_tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/gar.XXXXXX")
+    trap '[[ -n "$gar_tmpdir" ]] && rm -rf "$gar_tmpdir"' EXIT
+}
+
+gar_path_slug() {
+    printf '%s' "$1" | shasum | awk '{print $1}'
+}
+
+gar_result_get() {
+    local file="$1" key="$2"
+    [[ -f "$file" ]] || return 1
+    awk -F= -v k="$key" '$1 == k { print $2; exit }' "$file"
+}
 
 usage() {
     cat <<'EOF'
@@ -296,24 +312,98 @@ gar_repo_try_fetch_main() {
     git -C "$repo" rev-parse --verify origin/main >/dev/null 2>&1
 }
 
-check_mac_machine_env_repo() {
-    local name="$1" path="$2" issues_found=0 ahead behind fetched=0
-    if [[ ! -d "$path" ]]; then
-        report_miss "Machine env repo $name ($path missing)"
-        return
-    fi
-    if [[ ! -d "$path/.git" ]]; then
-        report_miss "Machine env repo $name ($path not a git repo)"
-        return
-    fi
-    if gar_repo_dirty "$path"; then
+gar_machine_env_list_repos() {
+    local entry name path setup_dir seen=()
+    while IFS='|' read -r name path; do
+        path=$(gar_expand_home "$path")
+        if gar_path_seen "$path" "${seen[@]}"; then
+            continue
+        fi
+        seen+=("$path")
+        printf '%s|%s\n' "$name" "$path"
+    done < <(read_manifest "$GAR_DIR/mac.machine-env-repos")
+
+    for setup_dir in "$HOME"/Yew/*-setup; do
+        [[ -d "$setup_dir" ]] || continue
+        [[ -d "$setup_dir/.git" ]] || continue
+        if gar_path_seen "$setup_dir" "${seen[@]}"; then
+            continue
+        fi
+        seen+=("$setup_dir")
+        printf '%s|%s\n' "$(basename "$setup_dir")" "$setup_dir"
+    done
+}
+
+gar_machine_env_prefetch_repo() {
+    local name="$1" path="$2" result_file="$3" ahead behind fetched=0
+    {
+        printf 'name=%s\npath=%s\n' "$name" "$path"
+        if [[ ! -d "$path" ]]; then
+            printf 'status=missing\n'
+            exit 0
+        fi
+        if [[ ! -d "$path/.git" ]]; then
+            printf 'status=not-git\n'
+            exit 0
+        fi
+        printf 'status=ok\n'
+        if gar_repo_dirty "$path"; then
+            printf 'dirty=1\n'
+        else
+            printf 'dirty=0\n'
+        fi
+        if gar_repo_try_fetch_main "$path"; then
+            fetched=1
+            printf 'fetched=1\n'
+        else
+            printf 'fetched=0\n'
+        fi
+        if ahead=$(gar_repo_main_unpushed_count "$path" 2>/dev/null); then
+            printf 'ahead=%s\n' "$ahead"
+        else
+            printf 'ahead=0\n'
+        fi
+        behind=0
+        if (( fetched )) && behind=$(gar_repo_main_behind_count "$path" 2>/dev/null); then
+            printf 'behind=%s\n' "$behind"
+        else
+            printf 'behind=0\n'
+        fi
+    } >"$result_file"
+}
+
+gar_machine_env_prefetch_all() {
+    local name path slug result_file
+    mkdir -p "$gar_tmpdir/repos"
+    while IFS='|' read -r name path; do
+        slug=$(gar_path_slug "$path")
+        result_file="$gar_tmpdir/repos/$slug"
+        gar_machine_env_prefetch_repo "$name" "$path" "$result_file" &
+    done < <(gar_machine_env_list_repos)
+    wait
+}
+
+report_mac_machine_env_repo() {
+    local name="$1" path="$2" result_file="$3"
+    local status dirty ahead behind fetched issues_found=0
+    status=$(gar_result_get "$result_file" status)
+    case "$status" in
+        missing)
+            report_miss "Machine env repo $name ($path missing)"
+            return
+            ;;
+        not-git)
+            report_miss "Machine env repo $name ($path not a git repo)"
+            return
+            ;;
+    esac
+    dirty=$(gar_result_get "$result_file" dirty)
+    if [[ "$dirty" == 1 ]]; then
         report_warn "Machine env repo $name (uncommitted changes in $path)"
         issues_found=1
     fi
-    if gar_repo_try_fetch_main "$path"; then
-        fetched=1
-    fi
-    if ahead=$(gar_repo_main_unpushed_count "$path" 2>/dev/null); then
+    ahead=$(gar_result_get "$result_file" ahead)
+    if [[ "$ahead" =~ ^[0-9]+$ && "$ahead" -gt 0 ]]; then
         if (( ahead == 1 )); then
             report_warn "Machine env repo $name (1 unpushed commit on main)"
         else
@@ -321,7 +411,9 @@ check_mac_machine_env_repo() {
         fi
         issues_found=1
     fi
-    if (( fetched )) && behind=$(gar_repo_main_behind_count "$path" 2>/dev/null); then
+    fetched=$(gar_result_get "$result_file" fetched)
+    behind=$(gar_result_get "$result_file" behind)
+    if [[ "$fetched" == 1 && "$behind" =~ ^[0-9]+$ && "$behind" -gt 0 ]]; then
         if (( behind == 1 )); then
             report_warn "Machine env repo $name (pull would update main; 1 commit behind origin/main)"
         else
@@ -335,25 +427,13 @@ check_mac_machine_env_repo() {
 }
 
 check_mac_machine_env_repos() {
-    local entry name path setup_dir seen=()
+    local name path slug result_file
+    gar_machine_env_prefetch_all
     while IFS='|' read -r name path; do
-        path=$(gar_expand_home "$path")
-        if gar_path_seen "$path" "${seen[@]}"; then
-            continue
-        fi
-        seen+=("$path")
-        check_mac_machine_env_repo "$name" "$path"
-    done < <(read_manifest "$GAR_DIR/mac.machine-env-repos")
-
-    for setup_dir in "$HOME"/Yew/*-setup; do
-        [[ -d "$setup_dir" ]] || continue
-        [[ -d "$setup_dir/.git" ]] || continue
-        if gar_path_seen "$setup_dir" "${seen[@]}"; then
-            continue
-        fi
-        seen+=("$setup_dir")
-        check_mac_machine_env_repo "$(basename "$setup_dir")" "$setup_dir"
-    done
+        slug=$(gar_path_slug "$path")
+        result_file="$gar_tmpdir/repos/$slug"
+        report_mac_machine_env_repo "$name" "$path" "$result_file"
+    done < <(gar_machine_env_list_repos)
 }
 
 mac_editor_settings_path() {
@@ -530,14 +610,29 @@ check_mac_homebrew() {
 }
 
 check_mac_secrets() {
-    local key
+    local key keys=() i=0 result status
+    mkdir -p "$gar_tmpdir/secrets"
     while IFS= read -r key; do
-        if mac_secret_exists "$key"; then
+        keys+=("$key")
+        (
+            if mac_secret_exists "$key"; then
+                printf 'ok\n' >"$gar_tmpdir/secrets/$i"
+            else
+                printf 'miss\n' >"$gar_tmpdir/secrets/$i"
+            fi
+        ) &
+        i=$((i + 1))
+    done < <(read_manifest "$GAR_DIR/mac.secrets")
+    wait
+    for i in "${!keys[@]}"; do
+        key="${keys[$i]}"
+        status=$(<"$gar_tmpdir/secrets/$i")
+        if [[ "$status" == ok ]]; then
             report_ok "Secret $key"
         else
             report_miss "Secret $key (set with: set-secret $key VALUE)"
         fi
-    done < <(read_manifest "$GAR_DIR/mac.secrets")
+    done
 }
 
 check_mac_env() {
@@ -694,27 +789,65 @@ mac_browser_extension_installed() {
 }
 
 check_mac_browser_extensions() {
-    local entry browser ext_id label app_path
+    local entry browser ext_id label app_path i=0 status
+    local browsers=() ext_ids=() labels=()
+    mkdir -p "$gar_tmpdir/extensions"
     while IFS='|' read -r browser ext_id label; do
         if [[ -z "$browser" || -z "$ext_id" || -z "$label" ]]; then
-            report_miss "Browser extension manifest line (expected browser|id|name): $browser|$ext_id|$label"
+            browsers+=("$browser")
+            ext_ids+=("$ext_id")
+            labels+=("$label")
+            printf 'bad\n' >"$gar_tmpdir/extensions/$i"
+            i=$((i + 1))
             continue
         fi
 
         app_path=$(mac_browser_app_path "$browser")
         if [[ -z "$app_path" || ! -e "$app_path" ]]; then
+            browsers+=("$browser")
+            ext_ids+=("$ext_id")
+            labels+=("$label")
+            printf 'skip\n' >"$gar_tmpdir/extensions/$i"
+            i=$((i + 1))
             continue
         fi
 
-        if mac_browser_extension_installed "$browser" "$ext_id"; then
-            report_ok "Extension $browser/$label"
-        else
-            report_miss "Extension $browser/$label ($ext_id)"
-        fi
+        browsers+=("$browser")
+        ext_ids+=("$ext_id")
+        labels+=("$label")
+        (
+            if mac_browser_extension_installed "$browser" "$ext_id"; then
+                printf 'ok\n' >"$gar_tmpdir/extensions/$i"
+            else
+                printf 'miss\n' >"$gar_tmpdir/extensions/$i"
+            fi
+        ) &
+        i=$((i + 1))
     done < <(read_manifest "$GAR_DIR/mac.browser-extensions")
+    wait
+    for i in "${!browsers[@]}"; do
+        browser="${browsers[$i]}"
+        ext_id="${ext_ids[$i]}"
+        label="${labels[$i]}"
+        status=$(<"$gar_tmpdir/extensions/$i")
+        case "$status" in
+            skip) continue ;;
+            bad)
+                report_miss "Browser extension manifest line (expected browser|id|name): $browser|$ext_id|$label"
+                ;;
+            ok)
+                report_ok "Extension $browser/$label"
+                ;;
+            miss)
+                report_miss "Extension $browser/$label ($ext_id)"
+                ;;
+        esac
+    done
 }
 
 run_mac_checks() {
+    gar_init_workdir
+
     gar_section_begin "Homebrew"
     check_mac_homebrew
 
