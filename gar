@@ -695,6 +695,26 @@ check_mac_commands() {
     done < <(read_manifest "$GAR_DIR/mac.commands")
 }
 
+mac_perl_module_installed() {
+    perl -M"$1" -e1 2>/dev/null
+}
+
+check_mac_perl_modules() {
+    local module hint
+    while IFS= read -r module; do
+        if mac_perl_module_installed "$module"; then
+            report_ok "Perl module $module"
+        else
+            hint=$(lookup_install_hint "$module" 2>/dev/null || true)
+            if [[ -n "$hint" ]]; then
+                report_miss "Perl module $module ($hint)"
+            else
+                report_miss "Perl module $module (not installed)"
+            fi
+        fi
+    done < <(read_manifest "$GAR_DIR/mac.perl-modules")
+}
+
 check_mac_apps() {
     local entry name path
     while IFS= read -r entry; do
@@ -898,6 +918,9 @@ run_mac_checks() {
 
     gar_section_begin "Commands"
     check_mac_commands
+
+    gar_section_begin "Perl modules"
+    check_mac_perl_modules
 
     gar_section_begin "Applications"
     check_mac_apps

@@ -1,0 +1,2 @@
+# Perl modules that should be installed (checked with perl -MModule -e1).
+Text::Autoformat

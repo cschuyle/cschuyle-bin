@@ -17,6 +17,7 @@ aws|brew install awscli
 awscli|brew install awscli
 magick|brew install imagemagick
 imagemagick|brew install imagemagick
+Text::Autoformat|cpan Text::Autoformat
 csvformat|brew install csvkit
 gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
 gdubw/gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
