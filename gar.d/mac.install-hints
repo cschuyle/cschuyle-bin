@@ -12,6 +12,8 @@ cursor|In Cursor: Cmd-Shift-P → Shell Command: Install 'cursor' command in PAT
 gsed|brew install gnu-sed
 aws|brew install awscli
 awscli|brew install awscli
+magick|brew install imagemagick
+imagemagick|brew install imagemagick
 csvformat|brew install csvkit
 gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
 gdubw/gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
