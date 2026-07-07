@@ -6,6 +6,7 @@ Docker|Download from https://www.docker.com/products/docker-desktop/ and drag Do
 qBittorrent|Download from https://www.qbittorrent.org/download; if macOS blocks it: xattr -dr com.apple.quarantine /Applications/qbittorrent.app
 VS Code|Download from https://code.visualstudio.com/ and drag Visual Studio Code.app to /Applications
 Cursor|Download from https://cursor.com/ and drag Cursor.app to /Applications
+Zoom|Download from https://zoom.us/download and drag zoom.us.app to /Applications
 code|In VS Code: Cmd-Shift-P → Shell Command: Install 'code' command in PATH
 cursor|In Cursor: Cmd-Shift-P → Shell Command: Install 'cursor' command in PATH
 gsed|brew install gnu-sed

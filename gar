@@ -169,7 +169,7 @@ report_ok() {
 }
 
 report_miss() {
-    printf 'MISS %s\n' "$1" >&2
+    printf 'MISS %s\n' "$1"
     issues=$((issues + 1))
 }
 
@@ -465,7 +465,7 @@ main() {
             run_mac_checks
             ;;
         synology|wsl|linux)
-            printf '\nOnly mac checks are implemented so far.\n' >&2
+            printf '\nOnly mac checks are implemented so far.\n'
             issues=$((issues + 1))
             ;;
         *)
@@ -475,7 +475,7 @@ main() {
 
     printf '\n'
     if (( issues > 0 )); then
-        printf '%s issue(s)\n' "$issues" >&2
+        printf '%s issue(s)\n' "$issues"
         exit 1
     fi
     printf 'All checks passed\n'
