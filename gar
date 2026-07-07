@@ -267,8 +267,18 @@ gar_repo_dirty() {
     [[ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]]
 }
 
+gar_repo_main_unpushed_count() {
+    local repo="$1" ahead
+    [[ -d "$repo/.git" ]] || return 1
+    git -C "$repo" rev-parse --verify main >/dev/null 2>&1 || return 1
+    git -C "$repo" rev-parse --verify origin/main >/dev/null 2>&1 || return 1
+    ahead=$(git -C "$repo" rev-list --count origin/main..main 2>/dev/null) || return 1
+    (( ahead > 0 )) || return 1
+    printf '%s\n' "$ahead"
+}
+
 check_mac_machine_env_repo() {
-    local name="$1" path="$2"
+    local name="$1" path="$2" issues_found=0 ahead
     if [[ ! -d "$path" ]]; then
         report_miss "Machine env repo $name ($path missing)"
         return
@@ -279,7 +289,17 @@ check_mac_machine_env_repo() {
     fi
     if gar_repo_dirty "$path"; then
         report_warn "Machine env repo $name (uncommitted changes in $path)"
-    else
+        issues_found=1
+    fi
+    if ahead=$(gar_repo_main_unpushed_count "$path" 2>/dev/null); then
+        if (( ahead == 1 )); then
+            report_warn "Machine env repo $name (1 unpushed commit on main)"
+        else
+            report_warn "Machine env repo $name ($ahead unpushed commits on main)"
+        fi
+        issues_found=1
+    fi
+    if (( issues_found == 0 )); then
         report_ok "Machine env repo $name"
     fi
 }
