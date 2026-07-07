@@ -87,6 +87,15 @@ lookup_brew_hint() {
     return 1
 }
 
+brew_miss_hint() {
+    local item="$1"
+    if [[ "$item" == *gdubw/gng* || "$item" == *"Formula gng"* ]]; then
+        printf 'https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng\n'
+        return 0
+    fi
+    return 1
+}
+
 cmd_info() {
     local query="$1" app_entry canonical path hint
 
@@ -201,9 +210,13 @@ check_mac_homebrew() {
         return
     fi
 
-    local item
+    local item hint
     for item in "${missing[@]}"; do
-        report_miss "Homebrew: $item"
+        if hint=$(brew_miss_hint "$item"); then
+            report_miss "Homebrew: $item ($hint)"
+        else
+            report_miss "Homebrew: $item"
+        fi
     done
 }
 

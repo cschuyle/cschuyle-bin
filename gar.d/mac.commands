@@ -1,5 +1,6 @@
 # Commands that should be on PATH.
 gsed
 csvformat
+gng
 code
 cursor
