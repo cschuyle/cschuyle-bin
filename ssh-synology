@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -e
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: ssh-synology
+
+SSH to the Synology NAS (port 4546) using DRAGNON_SYNOLOGY_IP. Switches iTerm to
+the Caution profile for the session.
+EOF
+  exit 0
+fi
+
 [[ -z "$DRAGNON_SYNOLOGY_IP" ]] && { echo "DRAGNON_SYNOLOGY_IP is not set. Try 
 On mac         set-secret DRAGNON_SYNOLOGY_IP 192.168.1.XXX
 Or on non-mac  export DRAGNON_SYNOLOGY_IP=192.168.1.XXX"; exit 1; }

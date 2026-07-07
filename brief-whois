@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: brief-whois [-v] [domain ...]
+
+Look up domains via RDAP (rdap.org). Default output is one tab-separated line per
+domain; -v prints a multi-line report. With no arguments, reads domains from stdin.
+EOF
+  exit 0
+fi
+
 verbose=0
 if [ "$1" = "-v" ]; then
   verbose=1

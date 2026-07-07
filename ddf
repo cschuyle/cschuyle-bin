@@ -4,6 +4,15 @@ set -o pipefail
 script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 script_file=$(basename "$0")
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<EOF
+Usage: $script_file
+
+Show disk availability for each directory in CS_DF_DATA_DIRS (from config.sh).
+EOF
+  exit 0
+fi
+
 source "$script_dir/config.sh"
 
 if [[ -z "$CS_DF_DATA_DIRS" ]] ; then

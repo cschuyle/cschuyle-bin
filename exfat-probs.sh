@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: exfat-probs.sh [ROOT]
+
+Scan ROOT (default: .) for paths that may break on exFAT or Windows (reserved names,
+invalid characters, trailing dots/spaces, long paths, case collisions).
+EOF
+  exit 0
+fi
+
 root="${1:-.}"
 root="${root%/}"   # strip trailing slash
 

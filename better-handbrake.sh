@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: better-handbrake.sh [-l|-ll] [-c|--continue] [-o OUT] [-p PRESET] [-P PATTERN] INPUT
+
+Batch-encode video with HandBrakeCLI. INPUT is a file or directory; -P filters files in
+a directory. -l lists presets. Uses BH_* environment variables when set.
+EOF
+  exit 0
+fi
+
 _bh_now() { date '+%Y-%m-%d %H:%M:%S'; }
 
 trap 'printf "%s: ERROR line %s: %s\n" "$(_bh_now)" "$LINENO" "$BASH_COMMAND" >&2' ERR

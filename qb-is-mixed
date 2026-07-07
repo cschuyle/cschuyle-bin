@@ -7,6 +7,16 @@ script_file=$(basename "$0")
 # Done, but only non-MP4 video files
 
 # Check if at least one directory was provided
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: qb-is-mixed <dir1> [dir2 ...]
+
+For finished torrent folders containing both MP4/M4V and MKV/AVI, print shell commands
+to move them into _MIXED.
+EOF
+  exit 0
+fi
+
 if [ $# -eq 0 ]; then
   echo "Usage: $0 <dir1> [dir2 ... dirN]"
   exit 1

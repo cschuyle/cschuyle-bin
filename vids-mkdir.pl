@@ -1,4 +1,9 @@
 #!/usr/bin/env perl
+if (@ARGV && ($ARGV[0] eq '-h' || $ARGV[0] eq '--help')) {
+  print "Usage: vids-mkdir.pl\n";
+  print "Read video filenames from stdin; print mkdir/mv commands to group files by year.\n";
+  exit 0;
+}
 while(<>) {
   chomp;
   $orig = $_;

@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: case-insensitive-dups.sh [DIR]
+
+Report top-level files in DIR (default: .) whose names collide when compared
+case-insensitively. Exits 1 if any duplicates are found.
+EOF
+  exit 0
+fi
+
 dir="${1:-.}"
 dir="${dir%/}"
 

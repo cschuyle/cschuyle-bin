@@ -124,10 +124,21 @@ split() {
 case "$1" in
     status) "$@"; exit;;
     split) "$@"; exit;;
+    -h|--help)
+      cat <<EOF
+Usage: $script_file status DIR
+       $script_file split FROM_DIR MP4_DEST [ORIGINALS_DEST]
+
+status — verify a torrent folder is downloaded and ready (no .!qB; MP4 present; no unsplit MKV/AVI).
+split  — move the folder and park non-MP4 originals under _Originals.
+EOF
+      exit 0
+      ;;
 esac
 
 cat <<EOF
 USAGE:
   $script_file status - check status of videos directory (downloaded? split?)
+  $script_file split  - move and split non-MP4 originals out of a clean folder
 EOF
 exit 1

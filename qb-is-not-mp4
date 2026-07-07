@@ -7,6 +7,16 @@ script_file=$(basename "$0")
 # Done, but only non-MP4 video files
 
 # Check if at least one directory was provided
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: qb-is-not-mp4 <dir1> [dir2 ...]
+
+List finished torrent directories that contain only non-MP4 video (MKV/AVI), with no
+active .!qB, MP4, or M4V files.
+EOF
+  exit 0
+fi
+
 if [ $# -eq 0 ]; then
   echo "Usage: $0 <dir1> [dir2 ... dirN]"
   exit 1

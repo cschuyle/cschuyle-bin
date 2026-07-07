@@ -1,3 +1,12 @@
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: move-file-list FILE TARGET_DIR
+
+Move each path listed in FILE (one per line) into TARGET_DIR.
+EOF
+  exit 0
+fi
 file_containing_filenames="$1"
 target_dir="$2"
 cat "$1"|while IFS= read line; do   file=$(printf '%b' "$line");   mv -- "$file" "$target_dir"; done

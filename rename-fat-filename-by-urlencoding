@@ -3,6 +3,15 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: rename-fat-filename-by-urlencoding FILENAME
+
+Rename FILENAME by percent-encoding characters unsafe on FAT/exFAT (quotes, colons, etc.).
+EOF
+  exit 0
+fi
+
 name="$1"
 
 new="$name"

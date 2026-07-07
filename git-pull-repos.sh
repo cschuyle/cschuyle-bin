@@ -3,6 +3,15 @@
 set -u
 shopt -s nullglob
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: git-pull-repos.sh
+
+In the current directory, run git pull -r in every immediate subdirectory that is a git repo.
+EOF
+  exit 0
+fi
+
 err() {
   printf '%s\n' "$*" >&2
 }

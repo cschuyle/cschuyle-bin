@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: ls-hash-tree.sh [ROOT]
+
+Walk ROOT (default: .) and emit a JSON directory tree with per-node total_size and sha256 per file.
+EOF
+  exit 0
+fi
+
 ROOT="${1:-.}"
 JOBS="${JOBS:-$(nproc)}"
 TMP="$(mktemp -d)"

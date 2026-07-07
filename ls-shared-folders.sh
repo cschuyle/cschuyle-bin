@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: ls-shared-folders.sh [SHARE]
+
+List Synology share names and their paths (synoshare). Optional SHARE filters to one name.
+EOF
+  exit 0
+fi
+
 filter="${1:-}"
 
 # List all Synology share names, and their corresponding directories

@@ -2,6 +2,15 @@
 set -o errexit
 set -o pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0 <dir1> [dir2 ... dirN]" >&2
+  echo "  Eligible dirs (no .!qB / .part in progress) are classified:" >&2
+  echo "  • _MP4 — has .mp4 or .m4v, and no .mkv or .avi (MP4 bucket wins over _DONE)." >&2
+  echo "  • _DONE — has .m4v, .mp4, .avi, or .mkv, but not eligible for _MP4." >&2
+  echo "  Prints mkdir/mv commands: _MP4 block first, then _DONE." >&2
+  exit 0
+fi
+
 if [ $# -eq 0 ]; then
   echo "Usage: $0 <dir1> [dir2 ... dirN]" >&2
   echo "  Eligible dirs (no .!qB / .part in progress) are classified:" >&2

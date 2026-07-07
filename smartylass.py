@@ -211,4 +211,8 @@ def main(path):
 
 if __name__ == "__main__":
     import sys
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        print("Usage: smartylass.py [PATH]")
+        print("Classify PATH (default: .) as code, audio, video, TV series, or books and print a short summary.")
+        sys.exit(0)
     main(sys.argv[1] if len(sys.argv) > 1 else ".")

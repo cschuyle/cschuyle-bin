@@ -1,1 +1,10 @@
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: cut-first
+
+Read lines from stdin; print each line with the first whitespace-separated field removed.
+EOF
+  exit 0
+fi
 awk '{$1=""; sub(/^ /,""); print}'

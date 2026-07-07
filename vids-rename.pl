@@ -1,4 +1,9 @@
 #!/usr/bin/env perl
+if (@ARGV && ($ARGV[0] eq '-h' || $ARGV[0] eq '--help')) {
+  print "Usage: vids-rename.pl\n";
+  print "Read video filenames from stdin; print mv commands to normalize names (strip resolution, tidy years).\n";
+  exit 0;
+}
 my $VERBOSE = $ENV{VERBOSE} || 0;
 
 sub print_it {

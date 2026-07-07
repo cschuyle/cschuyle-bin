@@ -1,1 +1,10 @@
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: just-the-meat
+
+Filter directory listings: drop lines containing @, named temp, or named _.
+EOF
+  exit 0
+fi
 grep -v '@' | grep -v '^temp$' | grep -v '@' | grep -v '^_'

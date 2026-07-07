@@ -7,16 +7,35 @@ GAR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/gar.d" && pwd)"
 usage() {
     cat <<'EOF'
 Usage: gar [-h]
+       gar apps
        gar info <name>
 
 Check the current machine's configuration against the desired state in gar.d/.
 Reports missing or out-of-date elements. Mac checks are implemented; other
 platforms are detected but not yet audited.
 
+  apps          List GUI apps tracked in gar.d/mac.apps (App Store or vendor site)
   info <name>   Show how to install a tracked item (name match is case-insensitive)
 
 Exit status: 0 if everything looks good, 1 if anything is missing.
 EOF
+}
+
+cmd_apps() {
+    local entry name path hint
+    printf 'Tracked apps (installed outside Homebrew):\n\n'
+    while IFS= read -r entry; do
+        name="${entry%%|*}"
+        path="${entry#*|}"
+        printf '%s\n' "$name"
+        printf '  Path: %s\n' "$path"
+        if hint=$(lookup_install_hint "$name" 2>/dev/null); then
+            printf '  Install: %s\n' "$hint"
+        else
+            printf '  Install: App Store or vendor site\n'
+        fi
+        printf '\n'
+    done < <(read_manifest "$GAR_DIR/mac.apps")
 }
 
 gar_name_eq() {
@@ -403,6 +422,11 @@ main() {
     if [[ "${1:-}" == "info" ]]; then
         shift
         cmd_info "${1:-}"
+        return
+    fi
+
+    if [[ "${1:-}" == "apps" ]]; then
+        cmd_apps
         return
     fi
 
