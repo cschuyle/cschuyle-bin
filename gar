@@ -712,6 +712,42 @@ check_mac_apps() {
     done < <(read_manifest "$GAR_DIR/mac.apps")
 }
 
+mac_login_items_raw() {
+    osascript -e 'tell application "System Events" to get the name of every login item' 2>/dev/null
+}
+
+mac_login_item_listed() {
+    local want="$1" items_raw="$2" item
+    while IFS= read -r item || [[ -n "${item:-}" ]]; do
+        item="${item#"${item%%[![:space:]]*}"}"
+        item="${item%"${item##*[![:space:]]}"}"
+        [[ -n "$item" && "$item" == "$want" ]] && return 0
+    done < <(printf '%s' "$items_raw" | tr ',' '\n')
+    return 1
+}
+
+check_mac_login_items() {
+    local entry label login_name items_raw read_status=0
+    read_status=0
+    items_raw=$(mac_login_items_raw) || read_status=$?
+    if (( read_status != 0 )); then
+        report_warn "Login items (could not read; allow Terminal or gar to control System Events)"
+        return
+    fi
+
+    while IFS='|' read -r label login_name; do
+        if [[ -z "$label" || -z "$login_name" ]]; then
+            report_miss "Login item manifest line (expected label|name): ${label}|${login_name}"
+            continue
+        fi
+        if mac_login_item_listed "$login_name" "$items_raw"; then
+            report_ok "Login item $label"
+        else
+            report_miss "Login item $label (add $login_name in System Settings → General → Login Items)"
+        fi
+    done < <(read_manifest "$GAR_DIR/mac.login-items")
+}
+
 mac_browser_app_path() {
     case "$1" in
         opera) printf '%s\n' /Applications/Opera.app ;;
@@ -865,6 +901,9 @@ run_mac_checks() {
 
     gar_section_begin "Applications"
     check_mac_apps
+
+    gar_section_begin "Login items"
+    check_mac_login_items
 
     gar_section_begin "Browser extensions"
     check_mac_browser_extensions
