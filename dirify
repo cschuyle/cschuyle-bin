@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: dirify FILE [FILE ...]
+
+Create a directory in the current working directory named after the first
+file (basename, extension removed), then move all listed files into it.
+EOF
+  exit 0
+fi
+
+if [[ $# -eq 0 ]]; then
+  echo "Usage: dirify FILE [FILE ...]" >&2
+  exit 1
+fi
+
+first="$1"
+base=$(basename -- "$first")
+name="${base%.*}"
+if [[ -z "$name" || "$name" == "$base" ]]; then
+  name="$base"
+fi
+
+for f in "$@"; do
+  if [[ ! -e "$f" ]]; then
+    echo "dirify: not found: $f" >&2
+    exit 1
+  fi
+done
+
+mkdir -p -- "$name"
+mv -- "$@" "$name/"
