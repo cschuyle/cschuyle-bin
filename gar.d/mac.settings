@@ -3,6 +3,9 @@
 # kind: json-editor (cursor or code), defaults, sound-menu-bar-always, machine-name-not-default
 # location: editor id or "global" for NSGlobalDomain
 # compare: eq (default), at_most (numeric actual <= expected)
+# In an interactive terminal gar offers to fix WARNs for json-editor,
+# defaults, and sound-menu-bar-always kinds. machine-name-not-default is
+# advisory only (renaming needs a chosen name and sudo).
 Cursor auto-save|json-editor|cursor|files.autoSave|onFocusChange
 VS Code auto-save|json-editor|code|files.autoSave|onFocusChange
 Keyboard repeat speed|defaults|global|KeyRepeat|2|at_most

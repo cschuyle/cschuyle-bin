@@ -762,6 +762,115 @@ gar_setting_matches() {
     esac
 }
 
+gar_defaults_write() {
+    local location="$1" key="$2" value="$3" flag
+    if [[ "$value" =~ ^-?[0-9]+$ ]]; then
+        flag=-int
+    elif [[ "$value" == true || "$value" == false ]]; then
+        flag=-bool
+    else
+        flag=-string
+    fi
+    if [[ "$location" == global ]]; then
+        defaults write -g "$key" "$flag" "$value"
+    else
+        defaults write "$(gar_expand_home "$location")" "$key" "$flag" "$value"
+    fi
+}
+
+mac_write_json_setting() {
+    local file="$1" key="$2" value="$3"
+    python3 - "$file" "$key" "$value" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+raw = sys.argv[3]
+
+if raw in ("true", "false") or re.fullmatch(r"-?\d+", raw):
+    literal = raw
+else:
+    literal = json.dumps(raw)
+
+text = path.read_text() if path.exists() else ""
+
+if text.strip() == "" or re.fullmatch(r"\s*\{\s*\}\s*", text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{\n    %s: %s\n}\n" % (json.dumps(key), literal))
+    raise SystemExit(0)
+
+# Replace the existing value in place, preserving comments/formatting.
+pattern = re.compile(
+    r'("' + re.escape(key) + r'"\s*:\s*)'
+    r'("(?:[^"\\]|\\.)*"|true|false|null|-?\d+(?:\.\d+)?)'
+)
+new_text, n = pattern.subn(lambda m: m.group(1) + literal, text, count=1)
+if n:
+    path.write_text(new_text)
+    raise SystemExit(0)
+
+# Key absent: insert it right after the opening brace.
+idx = text.find("{")
+if idx == -1:
+    raise SystemExit(1)
+path.write_text(
+    "%s\n    %s: %s,%s" % (text[:idx + 1], json.dumps(key), literal, text[idx + 1:])
+)
+raise SystemExit(0)
+PY
+}
+
+mac_fix_sound_menu_bar() {
+    local major want
+    major=$(sw_vers -productVersion 2>/dev/null | cut -d. -f1)
+    if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 26 )); then
+        want=16
+    else
+        want=18
+    fi
+    defaults -currentHost write com.apple.controlcenter Sound -int "$want" || return 1
+    killall ControlCenter 2>/dev/null || true
+    return 0
+}
+
+offer_fix_mac_setting() {
+    local kind="$1" location="$2" key="$3" expected="$4" label="$5" settings_path
+
+    gar_can_prompt || return 0
+
+    case "$kind" in
+        defaults)
+            gar_prompt_yn "Fix $label: set $key to $expected?" || return 0
+            if gar_defaults_write "$location" "$key" "$expected" >/dev/null 2>&1; then
+                printf 'Set %s to %s (may take effect after logout).\n' "$key" "$expected"
+            else
+                report_warn "Setting $label (could not write $key)"
+            fi
+            ;;
+        json-editor)
+            settings_path=$(mac_editor_settings_path "$location")
+            [[ -n "$settings_path" ]] || return 0
+            gar_prompt_yn "Fix $label: set $key to $expected in $settings_path?" || return 0
+            if mac_write_json_setting "$settings_path" "$key" "$expected"; then
+                printf 'Set %s to %s in %s.\n' "$key" "$expected" "$settings_path"
+            else
+                report_warn "Setting $label (could not update $settings_path)"
+            fi
+            ;;
+        sound-menu-bar-always)
+            gar_prompt_yn "Fix $label: always show volume in the menu bar?" || return 0
+            if mac_fix_sound_menu_bar; then
+                printf 'Enabled always-on volume in the menu bar.\n'
+            else
+                report_warn "Setting $label (could not update Control Center)"
+            fi
+            ;;
+    esac
+}
+
 check_mac_settings() {
     local label kind location key expected compare actual settings_path app_path read_status=0
     while IFS='|' read -r label kind location key expected compare; do
@@ -774,6 +883,7 @@ check_mac_settings() {
                     report_ok "Setting $label"
                 else
                     report_warn "Setting $label (enable in System Settings → Control Center → Sound → Show in Menu Bar → Always)"
+                    offer_fix_mac_setting "$kind" "$location" "$key" "$expected" "$label"
                 fi
                 continue
                 ;;
@@ -798,6 +908,7 @@ check_mac_settings() {
                 settings_path=$(mac_editor_settings_path "$location")
                 if [[ ! -f "$settings_path" ]]; then
                     report_warn "Setting $label (not set; want $expected)"
+                    offer_fix_mac_setting "$kind" "$location" "$key" "$expected" "$label"
                     continue
                 fi
                 read_status=0
@@ -805,6 +916,7 @@ check_mac_settings() {
                 if (( read_status != 0 )); then
                     if (( read_status == 2 )); then
                         report_warn "Setting $label (not set; want $expected)"
+                        offer_fix_mac_setting "$kind" "$location" "$key" "$expected" "$label"
                     elif (( read_status == 3 )); then
                         report_warn "Setting $label (could not parse $settings_path)"
                     else
@@ -816,6 +928,7 @@ check_mac_settings() {
             defaults)
                 if ! actual=$(mac_read_defaults_setting "$location" "$key" 2>/dev/null); then
                     report_warn "Setting $label (could not read $location $key)"
+                    offer_fix_mac_setting "$kind" "$location" "$key" "$expected" "$label"
                     continue
                 fi
                 ;;
@@ -829,6 +942,7 @@ check_mac_settings() {
             report_ok "Setting $label ($actual)"
         else
             report_warn "Setting $label (is $actual; want $expected)"
+            offer_fix_mac_setting "$kind" "$location" "$key" "$expected" "$label"
         fi
     done < <(read_manifest "$GAR_DIR/mac.settings")
 }

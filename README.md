@@ -50,7 +50,7 @@ Scan a tree for paths that may break on exFAT or Windows: reserved names, invali
 
 ### gar
 
-Audit machine configuration against manifests in `gar.d/`. Mac: Homebrew, secrets, env, Java, apps, browser extensions, commands, machine environment repos, settings. Synology: commands, machine environment repos, git config. `gar apps` lists tracked GUI apps; `gar info NAME` shows how to install an item. In an interactive terminal, offers to pull `main` for machine env repos with no uncommitted changes that are behind `origin/main`.
+Audit machine configuration against manifests in `gar.d/`. Mac: Homebrew, secrets, env, Java, apps, browser extensions, commands, machine environment repos, settings. Synology: commands, machine environment repos, git config. `gar apps` lists tracked GUI apps; `gar info NAME` shows how to install an item. In an interactive terminal, offers to pull `main` for machine env repos with no uncommitted changes that are behind `origin/main`, and offers to fix settings warnings it can apply automatically (`defaults` values, Cursor/VS Code `settings.json` keys, and the menu-bar volume toggle).
 
 ### git-pull-repos.sh
 
