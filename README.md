@@ -82,11 +82,11 @@ Mount the Synology `cschuyle` share at `/mnt/z` on WSL (requires `DRAGNON_SYNOLO
 
 ### move-file-list
 
-Move each path listed in a file (one per line) into a target directory. Lines may be quoted (`'…'`, `"…"`), backslash-escaped, or surrounded by whitespace.
+Move each path listed in a file (one per line) into a target directory. Paths may be files or directories. Lines may be quoted (`'…'`, `"…"`), backslash-escaped, or surrounded by whitespace.
 
 ### copy-file-list
 
-Copy each path listed in a file (one per line) into a target directory. Lines may be quoted (`'…'`, `"…"`), backslash-escaped, or surrounded by whitespace.
+Copy each path listed in a file (one per line) into a target directory. Paths may be files or directories. Lines may be quoted (`'…'`, `"…"`), backslash-escaped, or surrounded by whitespace.
 
 ### qb-is-done
 

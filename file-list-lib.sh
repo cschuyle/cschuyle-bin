@@ -55,13 +55,13 @@ file_list_parse_line() {
 
 file_list_run_or_warn() {
   local action="$1"
-  local file="$2"
+  local path="$2"
   local target_dir="$3"
-  local cmd="$4"
+  shift 3
   local err
 
-  if ! err=$("$cmd" -- "$file" "$target_dir" 2>&1); then
-    echo "warning: could not $action '$file' to '$target_dir': $err" >&2
+  if ! err=$("$@" -- "$path" "$target_dir" 2>&1); then
+    echo "warning: could not $action '$path' to '$target_dir': $err" >&2
     return 1
   fi
 }
