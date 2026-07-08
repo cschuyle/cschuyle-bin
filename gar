@@ -306,6 +306,31 @@ gar_repo_dirty() {
     [[ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]]
 }
 
+gar_repo_current_branch() {
+    local repo="$1"
+    [[ -d "$repo/.git" ]] || return 1
+    git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null
+}
+
+gar_repo_pull_main() {
+    local repo="$1"
+    git -C "$repo" pull -r origin main
+}
+
+gar_prompt_yn() {
+    local prompt="$1" reply
+    while true; do
+        printf '%s [Y/n] ' "$prompt" >&2
+        IFS= read -r reply || return 1
+        reply="${reply:-Y}"
+        case "$reply" in
+            [Yy]|[Yy][Ee][Ss]|'') return 0 ;;
+            [Nn]|[Nn][Oo]) return 1 ;;
+            *) printf 'Please answer Y or n.\n' >&2 ;;
+        esac
+    done
+}
+
 gar_repo_main_unpushed_count() {
     local repo="$1" ahead
     [[ -d "$repo/.git" ]] || return 1
@@ -383,6 +408,8 @@ gar_machine_env_prefetch_repo() {
             exit 0
         fi
         printf 'status=ok\n'
+        branch=$(gar_repo_current_branch "$path" 2>/dev/null) || branch=""
+        printf 'branch=%s\n' "$branch"
         if gar_repo_dirty "$path"; then
             printf 'dirty=1\n'
         else
@@ -425,25 +452,25 @@ report_machine_env_repo() {
     status=$(gar_result_get "$result_file" status)
     case "$status" in
         missing)
-            report_miss "Machine env repo $name ($path missing)"
+            report_miss "Machine env repo $name ($path — missing)"
             return
             ;;
         not-git)
-            report_miss "Machine env repo $name ($path not a git repo)"
+            report_miss "Machine env repo $name ($path — not a git repo)"
             return
             ;;
     esac
     dirty=$(gar_result_get "$result_file" dirty)
     if [[ "$dirty" == 1 ]]; then
-        report_warn "Machine env repo $name (uncommitted changes in $path)"
+        report_warn "Machine env repo $name ($path — uncommitted changes)"
         issues_found=1
     fi
     ahead=$(gar_result_get "$result_file" ahead)
     if [[ "$ahead" =~ ^[0-9]+$ && "$ahead" -gt 0 ]]; then
         if (( ahead == 1 )); then
-            report_warn "Machine env repo $name (1 unpushed commit on main)"
+            report_warn "Machine env repo $name ($path — 1 unpushed commit on main)"
         else
-            report_warn "Machine env repo $name ($ahead unpushed commits on main)"
+            report_warn "Machine env repo $name ($path — $ahead unpushed commits on main)"
         fi
         issues_found=1
     fi
@@ -451,14 +478,47 @@ report_machine_env_repo() {
     behind=$(gar_result_get "$result_file" behind)
     if [[ "$fetched" == 1 && "$behind" =~ ^[0-9]+$ && "$behind" -gt 0 ]]; then
         if (( behind == 1 )); then
-            report_warn "Machine env repo $name (pull would update main; 1 commit behind origin/main)"
+            report_warn "Machine env repo $name ($path — pull would update main; 1 commit behind origin/main)"
         else
-            report_warn "Machine env repo $name (pull would update main; $behind commits behind origin/main)"
+            report_warn "Machine env repo $name ($path — pull would update main; $behind commits behind origin/main)"
         fi
         issues_found=1
     fi
     if (( issues_found == 0 )); then
-        report_ok "Machine env repo $name"
+        report_ok "Machine env repo $name ($path)"
+    fi
+}
+
+offer_machine_env_repo_pull() {
+    local name="$1" path="$2" result_file="$3"
+    local status dirty branch fetched behind ahead
+
+    [[ -t 0 ]] || return 0
+
+    status=$(gar_result_get "$result_file" status)
+    [[ "$status" == ok ]] || return 0
+
+    dirty=$(gar_result_get "$result_file" dirty)
+    [[ "$dirty" == 0 ]] || return 0
+
+    branch=$(gar_result_get "$result_file" branch)
+    [[ "$branch" == main ]] || return 0
+
+    fetched=$(gar_result_get "$result_file" fetched)
+    [[ "$fetched" == 1 ]] || return 0
+
+    behind=$(gar_result_get "$result_file" behind)
+    [[ "$behind" =~ ^[0-9]+$ && "$behind" -gt 0 ]] || return 0
+
+    ahead=$(gar_result_get "$result_file" ahead)
+    [[ "$ahead" =~ ^[0-9]+$ && "$ahead" -eq 0 ]] || return 0
+
+    if gar_prompt_yn "Pull $name ($path)?"; then
+        if gar_repo_pull_main "$path"; then
+            printf 'Updated %s (%s)\n' "$name" "$path"
+        else
+            report_warn "Machine env repo $name ($path — pull failed)"
+        fi
     fi
 }
 
@@ -469,6 +529,7 @@ check_machine_env_repos() {
         slug=$(gar_path_slug "$path")
         result_file="$gar_tmpdir/repos/$slug"
         report_machine_env_repo "$name" "$path" "$result_file"
+        offer_machine_env_repo_pull "$name" "$path" "$result_file"
     done < <(gar_machine_env_list_repos "$repos_manifest" "$skip_manifest")
 }
 
