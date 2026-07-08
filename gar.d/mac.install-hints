@@ -9,6 +9,7 @@ Cursor|Download from https://cursor.com/ and drag Cursor.app to /Applications
 Zoom|Download from https://zoom.us/download and drag zoom.us.app to /Applications
 Spotify|brew install --cask spotify
 VLC|Download from https://www.videolan.org/vlc/ and drag VLC.app to /Applications
+Kindle|Download from https://www.amazon.com/kindle-dbs/fd/kcp or the Mac App Store and drag Amazon Kindle.app to /Applications
 Rectangle login|System Settings → General → Login Items → add Rectangle
 Flycut login|System Settings → General → Login Items → add Flycut
 Proton VPN login|System Settings → General → Login Items → add ProtonVPN
