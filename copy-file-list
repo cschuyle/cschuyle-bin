@@ -1,13 +1,67 @@
 #!/usr/bin/env bash
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+verbose=0
+
+usage() {
   cat <<'EOF'
-Usage: copy-file-list FILE TARGET_DIR
+Usage: copy-file-list [-v] FILE TARGET_DIR
 
 Copy each path listed in FILE (one per line) into TARGET_DIR.
 Each path may be a file or directory.
 Lines may be quoted with ', ", or backslash escapes; surrounding whitespace is ignored.
+
+  -v, --verbose  Echo each cp command before running it.
 EOF
-  exit 0
+}
+
+copy_file_list_progress() {
+  local current="$1" total="$2" path="$3"
+  local pct width=20 filled bar="" i
+
+  (( total > 0 )) || return 0
+  pct=$((current * 100 / total))
+  filled=$((current * width / total))
+  for ((i = 0; i < width; i++)); do
+    if (( i < filled )); then
+      bar+='#'
+    else
+      bar+='-'
+    fi
+  done
+  if [[ -t 2 && verbose -eq 0 ]]; then
+    printf '\r[%s] %d/%d (%d%%) %s' "$bar" "$current" "$total" "$pct" "$path" >&2
+  else
+    printf '[%s] %d/%d (%d%%) %s\n' "$bar" "$current" "$total" "$pct" "$path" >&2
+  fi
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    -v | --verbose)
+      verbose=1
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ $# -ne 2 ]]; then
+  usage >&2
+  exit 2
 fi
 
 file_containing_filenames="$1"
@@ -16,10 +70,26 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=file-list-lib.sh
 . "$script_dir/file-list-lib.sh"
 
-errors=0
+paths=()
 while IFS= read -r line || [[ -n "$line" ]]; do
   path="$(file_list_parse_line "$line")" || continue
-  file_list_run_or_warn copy "$path" "$target_dir" cp -a || ((errors++)) || true
+  paths+=("$path")
 done < "$file_containing_filenames"
+
+total=${#paths[@]}
+errors=0
+current=0
+for path in "${paths[@]}"; do
+  current=$((current + 1))
+  if (( verbose )); then
+    printf 'cp -a -- %q %q\n' "$path" "$target_dir"
+  fi
+  copy_file_list_progress "$current" "$total" "$path"
+  file_list_run_or_warn copy "$path" "$target_dir" cp -a || ((errors++)) || true
+done
+
+if [[ -t 2 && verbose -eq 0 && total -gt 0 ]]; then
+  printf '\n' >&2
+fi
 
 (( errors == 0 ))

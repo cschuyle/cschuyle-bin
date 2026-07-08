@@ -86,7 +86,7 @@ Move each path listed in a file (one per line) into a target directory. Paths ma
 
 ### copy-file-list
 
-Copy each path listed in a file (one per line) into a target directory. Paths may be files or directories. Lines may be quoted (`'…'`, `"…"`), backslash-escaped, or surrounded by whitespace.
+Copy each path listed in a file (one per line) into a target directory. Paths may be files or directories. Lines may be quoted (`'…'`, `"…"`), backslash-escaped, or surrounded by whitespace. Shows a progress meter on stderr (`[####------] 2/5 (40%) path`). `-v` / `--verbose` echoes each `cp` command.
 
 ### qb-is-done
 
