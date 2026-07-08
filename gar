@@ -317,14 +317,31 @@ gar_repo_pull_main() {
     git -C "$repo" pull -r origin main
 }
 
+gar_can_prompt() {
+    [[ -r /dev/tty ]] || [[ -t 0 ]]
+}
+
 gar_prompt_yn() {
-    local prompt="$1" reply
+    local prompt="$1" reply input
+    if [[ -r /dev/tty ]]; then
+        input=/dev/tty
+    elif [[ -t 0 ]]; then
+        input=/dev/stdin
+    else
+        return 1
+    fi
+
     while true; do
         printf '%s [Y/n] ' "$prompt" >&2
-        IFS= read -r reply || return 1
-        reply="${reply:-Y}"
+        if ! IFS= read -r reply <"$input"; then
+            return 1
+        fi
+        reply="${reply//$'\r'/}"
+        reply="${reply#"${reply%%[![:space:]]*}"}"
+        reply="${reply%"${reply##*[![:space:]]}"}"
+        [[ -n "$reply" ]] || reply=Y
         case "$reply" in
-            [Yy]|[Yy][Ee][Ss]|'') return 0 ;;
+            [Yy]|[Yy][Ee][Ss]) return 0 ;;
             [Nn]|[Nn][Oo]) return 1 ;;
             *) printf 'Please answer Y or n.\n' >&2 ;;
         esac
@@ -493,7 +510,7 @@ offer_machine_env_repo_pull() {
     local name="$1" path="$2" result_file="$3"
     local status dirty branch fetched behind ahead prompt
 
-    [[ -t 0 || -t 2 ]] || return 0
+    gar_can_prompt || return 0
 
     status=$(gar_result_get "$result_file" status)
     [[ "$status" == ok ]] || return 0
