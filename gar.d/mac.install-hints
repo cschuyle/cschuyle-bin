@@ -10,6 +10,11 @@ Zoom|Download from https://zoom.us/download and drag zoom.us.app to /Application
 Spotify|brew install --cask spotify
 VLC|Download from https://www.videolan.org/vlc/ and drag VLC.app to /Applications
 Kindle|Download from https://www.amazon.com/kindle-dbs/fd/kcp or the Mac App Store and drag Amazon Kindle.app to /Applications
+Ground News|Install from the Mac App Store
+Amphetamine|Install from the Mac App Store
+Mondly Languages|Install from the Mac App Store
+Telegram|Install from the Mac App Store
+Fractals|Install from the Mac App Store
 Rectangle login|System Settings → General → Login Items → add Rectangle
 Flycut login|System Settings → General → Login Items → add Flycut
 Proton VPN login|System Settings → General → Login Items → add ProtonVPN
@@ -32,7 +37,7 @@ JSON Formatter|Opera: https://chromewebstore.google.com/detail/json-formatter/bc
 Roam Highlighter|Install in Opera from https://chromewebstore.google.com/detail/roam-highlighter/hponfflfgcjikmehlcdcnpapicnljkkc
 React Developer Tools|Opera: https://chromewebstore.google.com/detail/react-developer-tools/fmkadmapgofadopljbjfkapdkoienihi — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/react-devtools/
 Pinboard Plus|Install in Opera from https://chromewebstore.google.com/detail/pinboard-plus/mphdppdgoagghpmmhodmfajjlloijnbd
-Karakeep|Opera: https://chromewebstore.google.com/detail/karakeep/kgcjekpmcjjogibpjebkhaanilehneje — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/karakeep/
+Karakeep|App: Mac App Store; extension — Opera: https://chromewebstore.google.com/detail/karakeep/kgcjekpmcjjogibpjebkhaanilehneje — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/karakeep/
 1Password|Install in Waterfox from https://addons.mozilla.org/en-US/firefox/addon/1password-x-password-manager/
 Link Text and Location Copier|Install in Waterfox from https://addons.mozilla.org/en-US/firefox/addon/link-text-and-location-copier/
 Pinboard Pin|Install in Waterfox from https://addons.mozilla.org/en-US/firefox/addon/pinboard-pin/ (https://github.com/Cito/Pinboard-Pin)
