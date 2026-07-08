@@ -4,9 +4,21 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 Usage: move-file-list FILE TARGET_DIR
 
 Move each path listed in FILE (one per line) into TARGET_DIR.
+Lines may be quoted with ', ", or backslash escapes; surrounding whitespace is ignored.
 EOF
   exit 0
 fi
+
 file_containing_filenames="$1"
 target_dir="$2"
-cat "$1"|while IFS= read line; do   file=$(printf '%b' "$line");   mv -- "$file" "$target_dir"; done
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=file-list-lib.sh
+. "$script_dir/file-list-lib.sh"
+
+errors=0
+while IFS= read -r line || [[ -n "$line" ]]; do
+  file="$(file_list_parse_line "$line")" || continue
+  file_list_run_or_warn move "$file" "$target_dir" mv || ((errors++)) || true
+done < "$file_containing_filenames"
+
+(( errors == 0 ))

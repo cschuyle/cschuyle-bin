@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: copy-file-list FILE TARGET_DIR
+
+Copy each path listed in FILE (one per line) into TARGET_DIR.
+Lines may be quoted with ', ", or backslash escapes; surrounding whitespace is ignored.
+EOF
+  exit 0
+fi
+
+file_containing_filenames="$1"
+target_dir="$2"
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=file-list-lib.sh
+. "$script_dir/file-list-lib.sh"
+
+errors=0
+while IFS= read -r line || [[ -n "$line" ]]; do
+  file="$(file_list_parse_line "$line")" || continue
+  file_list_run_or_warn copy "$file" "$target_dir" cp || ((errors++)) || true
+done < "$file_containing_filenames"
+
+(( errors == 0 ))
