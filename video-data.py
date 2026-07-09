@@ -19,7 +19,7 @@ from typing import List
 
 REQUIRED_COMMANDS = ["ffprobe"]  # ffprobe is from the ffmpeg package
 
-VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm"}
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".ogm"}
 
 
 def get_size(path: str) -> int:

@@ -11,7 +11,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
 Usage: qb-is-mixed <dir1> [dir2 ...]
 
-For finished torrent folders containing both MP4/M4V and MKV/AVI, print shell commands
+For finished torrent folders containing both MP4/M4V and MKV/AVI/OGM, print shell commands
 to move them into _MIXED.
 EOF
   exit 0
@@ -56,7 +56,7 @@ for DIR in "$@"; do
   if [[ ! -z "$(find "$DIR" -type f -iname '*.!qB' | grep -v '/._')" ]]; then
 	  continue
   else
-    if [[ ! -z "$(find "$DIR" -type f \( -iname '*.mkv' -o -iname '*.avi' \) | grep -v '/._')" ]]; then
+    if [[ ! -z "$(find "$DIR" -type f \( -iname '*.mkv' -o -iname '*.avi' -o -iname '*.ogm' \) | grep -v '/._')" ]]; then
       has_non_mp4=1
     fi
     if [[ ! -z "$(find "$DIR" -type f \( -iname '*.mp4' -o -iname '*.m4v' \) | grep -v '/._')" ]]; then

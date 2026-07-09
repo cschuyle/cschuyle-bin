@@ -72,7 +72,7 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 VIDEO_EXTENSIONS = {
-    '.mp4', '.m4v', '.mkv', '.avi', '.mov', '.webm', '.wmv', '.mpg', '.mpeg',
+    '.mp4', '.m4v', '.mkv', '.avi', '.mov', '.webm', '.wmv', '.mpg', '.mpeg', '.ogm',
 }
 AUDIO_EXTENSIONS = {
     '.mp3', '.flac', '.wav', '.aac', '.m4a', '.ogg', '.opus', '.wma', '.alac',

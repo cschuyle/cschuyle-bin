@@ -11,7 +11,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
 Usage: qb-is-not-mp4 <dir1> [dir2 ...]
 
-List finished torrent directories that contain only non-MP4 video (MKV/AVI), with no
+List finished torrent directories that contain only non-MP4 video (MKV/AVI/OGM), with no
 active .!qB, MP4, or M4V files.
 EOF
   exit 0
@@ -46,10 +46,10 @@ for DIR in "$@"; do
 
   if is_a_dest_dir "$DIR"; then continue; fi
 
-  # Search recursively for files ending in .mkv, .avi, or .!qB
+  # Search recursively for files ending in .mkv, .avi, .ogm, or .!qB
   if [[ ! -z "$(find "$DIR" -type f \( -iname '*.!qB' -o -iname '*.mp4' -o -iname '*.m4v' \) | grep -v '/._')" ]]; then
 	  continue
-  elif [[ ! -z "$(find "$DIR" -type f \( -iname '*.mkv' -o -iname '*.avi' \) | grep -v '/._')" ]]; then
+  elif [[ ! -z "$(find "$DIR" -type f \( -iname '*.mkv' -o -iname '*.avi' -o -iname '*.ogm' \) | grep -v '/._')" ]]; then
     echo "$DIR # Done, only contains non-MP4 video files"
   else
     [[ ! -z "$VERBOSE" ]] && echo "# No video files in '$DIR'" >&2

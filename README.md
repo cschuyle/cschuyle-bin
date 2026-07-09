@@ -38,7 +38,7 @@ Classify paths as movie, series, album, or ebook using filesystem heuristics. Su
 
 ### dir-fission
 
-Move video files (`.mkv`, `.avi`, `.mov`, `.webm`) from source trees into a destination, preserving directory structure. `.mp4` / `.m4v` are left in place.
+Move video files (`.mkv`, `.avi`, `.mov`, `.webm`, `.ogm`) from source trees into a destination, preserving directory structure. `.mp4` / `.m4v` are left in place.
 
 ### dus
 
@@ -94,7 +94,7 @@ For finished qBittorrent folders, print `mkdir`/`mv` commands to sort into `_MP4
 
 ### qb-is-mixed
 
-For finished folders containing both MP4/M4V and MKV/AVI, print shell commands to move them into `_MIXED`.
+For finished folders containing both MP4/M4V and MKV/AVI/OGM, print shell commands to move them into `_MIXED`.
 
 ### qb-is-not-done
 
@@ -102,7 +102,7 @@ List torrent download directories that still have in-progress `.!qB` partial fil
 
 ### qb-is-not-mp4
 
-List finished torrent directories that contain only non-MP4 video (MKV/AVI), with no active partials or MP4/M4V files.
+List finished torrent directories that contain only non-MP4 video (MKV/AVI/OGM), with no active partials or MP4/M4V files.
 
 ### rename-fat-filename-by-urlencoding
 
@@ -142,7 +142,7 @@ Report video files as JSON: size, duration, resolution, codec, and audio/subtitl
 
 ### vids
 
-`status` checks whether a torrent video folder is downloaded and ready; `split` moves the folder and parks non-MP4 originals under `_Originals`.
+`status` checks whether a torrent video folder is downloaded and ready (no partials; MP4 present; no unsplit MKV/AVI/OGM); `split` moves the folder and parks non-MP4 originals under `_Originals`.
 
 ### vids-mkdir.pl
 

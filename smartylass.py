@@ -13,7 +13,7 @@ MAX_WORKERS = 8
 
 CODE_EXT = {".py",".js",".ts",".java",".c",".cpp",".h",".go",".rs",".cs"}
 AUDIO_EXT = {".mp3",".flac",".m4a",".aac",".wav"}
-VIDEO_EXT = {".mp4",".mkv",".avi",".mov"}
+VIDEO_EXT = {".mp4",".mkv",".avi",".mov",".ogm"}
 BOOK_EXT = {".pdf",".epub",".mobi"}
 
 # --------- UTILS ---------
