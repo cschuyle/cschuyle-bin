@@ -1,7 +1,0 @@
-# Machine environment repos under $HOME/Yew (Synology)
-# Format: name|path (path may use $HOME)
-# *-setup repos are discovered automatically via $HOME/Yew/*-setup
-cschuyle-bin|$HOME/Yew/cschuyle-bin
-dragnon-config|$HOME/Yew/dragnon-config
-datagator|$HOME/Yew/datagator
-My-Data|$HOME/Yew/My-Data

@@ -400,6 +400,9 @@ gar_machine_env_skip_name() {
 gar_machine_env_list_repos() {
     local repos_manifest="$1" skip_manifest="${2:-}" entry name path setup_dir setup_name seen=()
     while IFS='|' read -r name path; do
+        if gar_machine_env_skip_name "$skip_manifest" "$name"; then
+            continue
+        fi
         path=$(gar_expand_home "$path")
         if gar_path_seen "$path" "${seen[@]}"; then
             continue

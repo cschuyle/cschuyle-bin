@@ -1,4 +1,4 @@
-# Machine environment repos under $HOME/Yew
+# Machine environment repos under $HOME/Yew (Mac, Synology, WSL)
 # Format: name|path (path may use $HOME)
 # *-setup repos are discovered automatically via $HOME/Yew/*-setup
 cschuyle-bin|$HOME/Yew/cschuyle-bin
