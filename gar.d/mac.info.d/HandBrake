@@ -1,0 +1,16 @@
+Settings / General / Use same destination folder as source when possible: ENABLED
+Settings / Filename / Automatically name output files: ENABLED
+Settings / Advanced / Add nfo to excluded file extensions
+Settings / Advanced / Decoder / Enable the VideoToolbox hardware decoders (e.g. on Macbook M3)
+Save preset with these settings (name: h264-VideoToolbox CQ=23 peakFR=48 WebOpt all-subs all-audios):
+  Summary: Web Optimized
+  Video:
+    Encoder: H.264 VideoToolbox
+    Constant Quality 23
+    VFR: Peak Framerate 48 fps
+  Audio:
+    Any / All audio
+  Subtitles:
+    Any / All subs
+    Do not burn in any subs.
+  

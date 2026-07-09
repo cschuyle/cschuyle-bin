@@ -35,7 +35,7 @@ implemented; plain Linux is detected but not yet audited.
 
   -a, --all     Show all checks, including OK (default: only MISS and WARN)
   apps          List GUI apps tracked in gar.d/mac.apps (App Store or vendor site)
-  info <name>   Show how to install a tracked item (name match is case-insensitive)
+  info <name>   Show install hints and general info for a tracked item (case-insensitive)
 
 Exit status: 0 if everything looks good, 1 if anything is missing.
 EOF
@@ -92,6 +92,39 @@ gar_hints_file() {
     else
         printf '%s\n' "$GAR_DIR/mac.install-hints"
     fi
+}
+
+gar_info_dir() {
+    local platform="$1" dir
+    if [[ -d "$GAR_DIR/$platform.info.d" ]]; then
+        printf '%s\n' "$GAR_DIR/$platform.info.d"
+        return 0
+    fi
+    if [[ -d "$GAR_DIR/shared.info.d" ]]; then
+        printf '%s\n' "$GAR_DIR/shared.info.d"
+        return 0
+    fi
+    return 1
+}
+
+lookup_general_info() {
+    local query="$1" info_dir file base
+    info_dir=$(gar_info_dir "$(detect_platform)") || return 1
+    for file in "$info_dir"/*; do
+        [[ -f "$file" ]] || continue
+        base=$(basename "$file")
+        if gar_name_eq "$query" "$base"; then
+            cat "$file"
+            return 0
+        fi
+    done
+    return 1
+}
+
+gar_print_general_info() {
+    local info="$1"
+    printf '\nInfo:\n'
+    printf '%s\n' "$info"
 }
 
 gar_hint_is_multiline() {
@@ -175,7 +208,7 @@ brew_miss_hint() {
 }
 
 cmd_info() {
-    local query="$1" app_entry canonical path hint ext_entry browser ext_id label app_path
+    local query="$1" app_entry canonical path hint ext_entry browser ext_id label app_path info
 
     if [[ -z "$query" ]]; then
         echo "Usage: gar info <name>" >&2
@@ -196,6 +229,9 @@ cmd_info() {
             gar_print_install_hint 'Install: ' "$hint"
         else
             printf 'Install: download from the vendor or App Store\n'
+        fi
+        if info=$(lookup_general_info "$query"); then
+            gar_print_general_info "$info"
         fi
         exit 0
     fi
@@ -222,18 +258,33 @@ cmd_info() {
         else
             printf 'Install: install from the browser extension store\n'
         fi
+        if info=$(lookup_general_info "$query"); then
+            gar_print_general_info "$info"
+        fi
         exit 0
     fi
 
     if hint=$(lookup_install_hint "$query"); then
         printf '%s\n' "$query"
         gar_print_install_hint 'Install: ' "$hint"
+        if info=$(lookup_general_info "$query"); then
+            gar_print_general_info "$info"
+        fi
         exit 0
     fi
 
     if hint=$(lookup_brew_hint "$query"); then
         printf '%s (brew)\n' "$query"
         printf 'Install: %s\n' "$hint"
+        if info=$(lookup_general_info "$query"); then
+            gar_print_general_info "$info"
+        fi
+        exit 0
+    fi
+
+    if info=$(lookup_general_info "$query"); then
+        printf '%s\n' "$query"
+        gar_print_general_info "$info"
         exit 0
     fi
 
