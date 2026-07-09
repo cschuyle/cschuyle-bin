@@ -30,8 +30,8 @@ Usage: gar [-ah]
        gar info <name>
 
 Check the current machine's configuration against the desired state in gar.d/.
-Reports missing or out-of-date elements. Mac and Synology checks are
-implemented; other platforms are detected but not yet audited.
+Reports missing or out-of-date elements. Mac, Synology, and WSL checks are
+implemented; plain Linux is detected but not yet audited.
 
   -a, --all     Show all checks, including OK (default: only MISS and WARN)
   apps          List GUI apps tracked in gar.d/mac.apps (App Store or vendor site)
@@ -64,7 +64,7 @@ gar_name_eq() {
 }
 
 lookup_install_hint() {
-    local query="$1" hints_file="${2:-$GAR_DIR/mac.install-hints}" name hint
+    local query="$1" hints_file="${2:-$(gar_hints_file)}" name hint
     while IFS='|' read -r name hint; do
         if gar_name_eq "$query" "$name"; then
             printf '%s\n' "$hint"
@@ -80,6 +80,17 @@ gar_resolve_manifest() {
         printf '%s\n' "$GAR_DIR/$platform.$name"
     elif [[ -f "$GAR_DIR/shared.$name" ]]; then
         printf '%s\n' "$GAR_DIR/shared.$name"
+    fi
+}
+
+gar_hints_file() {
+    local platform manifest
+    platform=$(detect_platform)
+    manifest=$(gar_resolve_manifest "$platform" install-hints)
+    if [[ -n "$manifest" && -f "$manifest" ]]; then
+        printf '%s\n' "$manifest"
+    else
+        printf '%s\n' "$GAR_DIR/mac.install-hints"
     fi
 }
 
@@ -1020,8 +1031,8 @@ check_mac_secrets() {
     done
 }
 
-check_mac_env() {
-    local name val
+check_env() {
+    local env_manifest="$1" name val
     while IFS= read -r name; do
         val="${!name-}"
         if [[ -n "$val" ]]; then
@@ -1029,7 +1040,11 @@ check_mac_env() {
         else
             report_miss "Env $name (not set in this shell)"
         fi
-    done < <(read_manifest "$GAR_DIR/mac.env")
+    done < <(read_manifest "$env_manifest")
+}
+
+check_mac_env() {
+    check_env "$GAR_DIR/mac.env"
 }
 
 check_mac_java() {
@@ -1336,6 +1351,43 @@ run_mac_checks() {
     check_mac_settings
 }
 
+check_wsl_mount() {
+    if [[ -d /mnt/z ]] && mount | grep -qE '[[:space:]]/mnt/z[[:space:]]'; then
+        report_ok "Mount /mnt/z"
+    else
+        report_miss "Mount /mnt/z (run: mount-z; needs DRAGNON_SYNOLOGY_IP)"
+    fi
+}
+
+run_wsl_checks() {
+    local repos_manifest skip_manifest commands_manifest env_manifest git_config_manifest hints_file
+    repos_manifest=$(gar_resolve_manifest wsl machine-env-repos)
+    skip_manifest=$(gar_resolve_manifest wsl machine-env-skip)
+    commands_manifest=$(gar_resolve_manifest wsl commands)
+    env_manifest=$(gar_resolve_manifest wsl env)
+    git_config_manifest=$(gar_resolve_manifest wsl git-config)
+    hints_file=$(gar_hints_file)
+
+    gar_init_workdir
+
+    gar_section_begin "Environment"
+    if [[ -n "$env_manifest" ]]; then
+        check_env "$env_manifest"
+    fi
+
+    gar_section_begin "Mount"
+    check_wsl_mount
+
+    gar_section_begin "Commands"
+    check_commands "$commands_manifest" "$hints_file"
+
+    gar_section_begin "Machine environment repos"
+    check_machine_env_repos "$repos_manifest" "$skip_manifest"
+
+    gar_section_begin "Git config"
+    check_git_config "$git_config_manifest" "$hints_file"
+}
+
 run_synology_checks() {
     local repos_manifest skip_manifest commands_manifest git_config_manifest hints_file
     repos_manifest=$(gar_resolve_manifest synology machine-env-repos)
@@ -1399,8 +1451,11 @@ main() {
         synology)
             run_synology_checks
             ;;
-        wsl|linux)
-            printf '\nOnly mac and synology checks are implemented so far.\n'
+        wsl)
+            run_wsl_checks
+            ;;
+        linux)
+            printf '\nOnly mac, synology, and wsl checks are implemented so far.\n'
             issues=$((issues + 1))
             ;;
         *)

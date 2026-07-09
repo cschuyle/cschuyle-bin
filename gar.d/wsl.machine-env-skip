@@ -1,0 +1,3 @@
+# Skip these repo names when auto-discovering $HOME/Yew/*-setup
+mac-setup
+synology-setup

@@ -1,0 +1,11 @@
+# Install hints for gar info on WSL (case-insensitive name match).
+# Format: name|hint
+git|sudo apt install git
+python3|sudo apt install python3
+rsync|sudo apt install rsync
+curl|Usually preinstalled on Ubuntu WSL; otherwise: sudo apt install curl
+jq|sudo apt install jq
+tar|Usually preinstalled on Ubuntu WSL
+ssh|Usually preinstalled on Ubuntu WSL; otherwise: sudo apt install openssh-client
+user.name|git config --global user.name "Your Name"
+user.email|git config --global user.email "you@example.com"

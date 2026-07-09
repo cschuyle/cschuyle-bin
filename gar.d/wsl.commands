@@ -1,0 +1,8 @@
+# Commands that should be on PATH (WSL).
+git
+python3
+rsync
+curl
+jq
+tar
+ssh
