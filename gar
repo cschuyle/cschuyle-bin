@@ -94,30 +94,27 @@ gar_hints_file() {
     fi
 }
 
-gar_info_dir() {
-    local platform="$1" dir
-    if [[ -d "$GAR_DIR/$platform.info.d" ]]; then
-        printf '%s\n' "$GAR_DIR/$platform.info.d"
-        return 0
-    fi
-    if [[ -d "$GAR_DIR/shared.info.d" ]]; then
-        printf '%s\n' "$GAR_DIR/shared.info.d"
-        return 0
-    fi
-    return 1
+gar_info_dirs() {
+    # Platform-specific info first, then shared info (inherited). A
+    # platform file with the same name shadows the shared one.
+    local platform="$1"
+    [[ -d "$GAR_DIR/$platform.info.d" ]] && printf '%s\n' "$GAR_DIR/$platform.info.d"
+    [[ -d "$GAR_DIR/shared.info.d" ]] && printf '%s\n' "$GAR_DIR/shared.info.d"
 }
 
 lookup_general_info() {
     local query="$1" info_dir file base
-    info_dir=$(gar_info_dir "$(detect_platform)") || return 1
-    for file in "$info_dir"/*; do
-        [[ -f "$file" ]] || continue
-        base=$(basename "$file")
-        if gar_name_eq "$query" "$base"; then
-            cat "$file"
-            return 0
-        fi
-    done
+    while IFS= read -r info_dir; do
+        [[ -n "$info_dir" ]] || continue
+        for file in "$info_dir"/*; do
+            [[ -f "$file" ]] || continue
+            base=$(basename "$file")
+            if gar_name_eq "$query" "$base"; then
+                cat "$file"
+                return 0
+            fi
+        done
+    done < <(gar_info_dirs "$(detect_platform)")
     return 1
 }
 

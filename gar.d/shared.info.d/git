@@ -1,0 +1,9 @@
+To get git to serve the right cert for GitHub-hosted repos
+
+# File ~/.ssh/config
+Host github.com
+    HostName github.com
+    User cschuyle
+    # In the following line use the name of whatever key you added to github.com
+    IdentityFile ~/.ssh/id_ed25519_github
+    IdentitiesOnly yes
