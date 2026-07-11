@@ -4,7 +4,7 @@
 Usage: vids-lint [--json] [-a|--all] [-i|--interactive] [PATH ...]
 
 Walks each PATH and, for every directory that directly contains video and/or
-subtitle files, reports two problems. With no PATH, vids-lint lints the first
+subtitle files, reports three problems. With no PATH, vids-lint lints the first
 eligible item in the current directory: the first non-hidden entry (sorted by
 name, so the choice is deterministic) whose tree contains a video or subtitle
 file. With no PATH and -i, vids-lint processes every non-hidden entry in the
@@ -13,7 +13,7 @@ clean items are skipped silently, dirty items with no automatic fix are noted
 (on stderr) and skipped, and fixable items are reported and offered — advancing
 to the next item even after you fix the current one.
 
-The two problems reported:
+The three problems reported:
 
   1. Unaligned subtitles. A subtitle should be named
      <video-stem>.<suffix>.srt and live in the same folder as its video
@@ -39,6 +39,11 @@ plain output and as a "code" field in --json output.
      not count). This also flags multi-episode folders, which are legitimately
      not single movies — point vids-lint at movie folders.
 
+  3. AppleDouble junk. macOS writes ._<name> sidecar files onto foreign
+     filesystems; these are never counted as videos or subtitles. Their
+     presence is a quiet violation (appledouble-junk-file), reported only with
+     -a/--all. With -i, vids-lint offers to delete them.
+
 Video extensions: mp4, m4v, mkv, avi, mov, webm, wmv, mpg, mpeg, ogm.
 Subtitle extension: srt.
 
@@ -51,10 +56,11 @@ non-sample video in the subtitle's folder or the nearest ancestor folder within
 the scanned path (sample clips are ignored); a subtitle is skipped when there is
 no single main video (zero or several remain), the target already exists, or the
 name equals the video stem with no
-suffix (nothing to move or rename — add a language segment manually). One Y/n
-prompt is asked per directory. Prompts read from the terminal, or from stdin
-when it is piped or redirected, so `yes | vids-lint -i` auto-confirms every fix.
--i cannot be combined with --json.
+suffix (nothing to move or rename — add a language segment manually). It also
+offers to delete AppleDouble junk files. One Y/n prompt is asked per directory
+covering all its changes (moves and deletions). Prompts read from the terminal,
+or from stdin when it is piped or redirected, so `yes | vids-lint -i`
+auto-confirms every change. -i cannot be combined with --json.
 
 Output: one block per dirty directory (plain text), or one JSON object per
 dirty directory with --json. Exit status 0 if everything is clean, 1 if any
@@ -77,6 +83,16 @@ VIDEO_EXTENSIONS = {
 }
 SUBTITLE_EXTENSIONS = {'.srt'}
 MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
+
+
+def is_ignored_name(name: str) -> bool:
+    """True for macOS AppleDouble sidecar files (._Foo), which are never media."""
+    return name.startswith('._')
+
+
+def is_media(name: str, extensions: set) -> bool:
+    """True when name has a media extension and is not an ignored sidecar."""
+    return not is_ignored_name(name) and Path(name).suffix.lower() in extensions
 
 
 def video_stem(name: str) -> str:
@@ -193,12 +209,14 @@ def lint_directory(
 ) -> Optional[Dict[str, object]]:
     """Return a findings dict for one directory, or None when it is clean."""
     videos = sorted(
-        (n for n in filenames if Path(n).suffix.lower() in VIDEO_EXTENSIONS),
+        (n for n in filenames if is_media(n, VIDEO_EXTENSIONS)),
         key=str.lower,
     )
-    srts = [n for n in filenames if Path(n).suffix.lower() in SUBTITLE_EXTENSIONS]
+    srts = [n for n in filenames if is_media(n, SUBTITLE_EXTENSIONS)]
+    # appledouble-junk-file is a quiet violation, reported only with -a/--all.
+    junk = sorted((n for n in filenames if is_ignored_name(n)), key=str.lower) if show_all else []
 
-    if not videos and not srts:
+    if not videos and not srts and not junk:
         return None
 
     # non-identifiable-language-subtitle-file is a quiet violation: there is no
@@ -212,7 +230,7 @@ def lint_directory(
     real_videos = [v for v in videos if not is_sample_video_name(v)]
     multiple = real_videos if len(real_videos) > 1 else []
 
-    if not unaligned and not multiple:
+    if not unaligned and not multiple and not junk:
         return None
 
     return {
@@ -221,16 +239,21 @@ def lint_directory(
         'unaligned_subtitles': [
             {'file': f, 'reason': r, 'code': c} for f, r, c in unaligned
         ],
+        'junk_files': [
+            {'file': f, 'reason': 'macOS AppleDouble sidecar file',
+             'code': 'appledouble-junk-file'}
+            for f in junk
+        ],
     }
 
 
 def path_has_media(path: Path) -> bool:
     """True when path is a video/subtitle file or a tree containing one."""
     if path.is_file():
-        return path.suffix.lower() in MEDIA_EXTENSIONS
+        return is_media(path.name, MEDIA_EXTENSIONS)
     if path.is_dir():
         for _dirpath, _dirnames, filenames in os.walk(path):
-            if any(Path(n).suffix.lower() in MEDIA_EXTENSIONS for n in filenames):
+            if any(is_media(n, MEDIA_EXTENSIONS) for n in filenames):
                 return True
     return False
 
@@ -284,7 +307,7 @@ def find_main_video(sub_path: Path, scan_root: Path) -> Optional[Path]:
         try:
             vids = [
                 p for p in cur.iterdir()
-                if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+                if p.is_file() and is_media(p.name, VIDEO_EXTENSIONS)
             ]
         except OSError:
             vids = []
@@ -387,10 +410,12 @@ def run_interactive(paths: List[str], tty_in: TextIO, show_all: bool = False) ->
         findings.sort(key=lambda r: str(r['dir']))
         dirty_items += 1
         total_issues += sum(
-            (1 if r['multiple_videos'] else 0) + len(r['unaligned_subtitles'])
+            (1 if r['multiple_videos'] else 0)
+            + len(r['unaligned_subtitles'])
+            + len(r['junk_files'])
             for r in findings
         )
-        fixable = any(
+        fixable = any(r['junk_files'] for r in findings) or any(
             plan_subtitle_fix(Path(str(r['dir'])) / str(sub['file']), scan_root)[0]
             for r in findings
             for sub in r['unaligned_subtitles']
@@ -421,10 +446,16 @@ def run_interactive(paths: List[str], tty_in: TextIO, show_all: bool = False) ->
                     planned.append((sub_path, info))  # type: ignore[arg-type]
                 else:
                     print(f'    (not fixable: {info})', flush=True)
-            if not planned:
+            deletions: List[Path] = []
+            for jf in r['junk_files']:
+                print(f'  junk file [{jf["code"]}]: {jf["file"]} — {jf["reason"]}', flush=True)
+                print('    -> delete', flush=True)
+                deletions.append(Path(str(r['dir'])) / str(jf['file']))
+            actions = len(planned) + len(deletions)
+            if actions == 0:
                 continue
-            noun = 'fix' if len(planned) == 1 else 'fixes'
-            if not read_yes_no(f'  apply {len(planned)} {noun} in this directory?', tty_in):
+            noun = 'change' if actions == 1 else 'changes'
+            if not read_yes_no(f'  apply {actions} {noun} in this directory?', tty_in):
                 print('    (left unchanged)', flush=True)
                 continue
             for sub_path, target in planned:
@@ -438,6 +469,14 @@ def run_interactive(paths: List[str], tty_in: TextIO, show_all: bool = False) ->
                     print(f'    (not fixed: move failed: {e})', flush=True)
                     continue
                 print(f'    fixed -> {target}', flush=True)
+                fixed_count += 1
+            for junk_path in deletions:
+                try:
+                    junk_path.unlink()
+                except OSError as e:
+                    print(f'    (not deleted: {e})', flush=True)
+                    continue
+                print(f'    deleted {junk_path.name}', flush=True)
                 fixed_count += 1
 
     if dirty_items == 0:
@@ -534,6 +573,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if r['multiple_videos']:
             total_issues += 1
         total_issues += len(r['unaligned_subtitles'])
+        total_issues += len(r['junk_files'])
 
     if args.json:
         for r in findings:
@@ -550,6 +590,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f'  unaligned subtitle [{sub["code"]}]: {sub["file"]} — {sub["reason"]}',
                 flush=True,
             )
+        for jf in r['junk_files']:
+            print(f'  junk file [{jf["code"]}]: {jf["file"]} — {jf["reason"]}', flush=True)
 
     if findings:
         print(
