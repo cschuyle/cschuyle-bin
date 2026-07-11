@@ -144,6 +144,10 @@ Report video files as JSON: size, duration, resolution, codec, and audio/subtitl
 
 `status` checks whether a torrent video folder is downloaded and ready (no partials; MP4 present; no unsplit MKV/AVI/OGM); `split` moves the folder and parks non-MP4 originals under `_Originals`.
 
+### vids-lint
+
+Scan video directories for "dirty" states: `.srt` subtitles not named `<video-stem>.<suffix>.srt` alongside their video (either no suffix at all, or an orphan whose name matches no video in the folder) and directories that directly contain more than one video file. The suffix is kept verbatim, so `.en`, `.2_English`, and `.eng.forced` are all accepted. With no path argument, lints the first eligible item in the current directory (first non-hidden entry, sorted by name, whose tree contains a video or subtitle file). `--json` emits one object per dirty directory. `-i` / `--interactive` offers to fix each fixable subtitle by moving it into its main video's folder and prepending the video's basename to the original subtitle name (`Subs/2_English.srt` → `Movie.2_English.srt`); subtitles are skipped when there is no single main video, the target already exists, or the name is just the video stem with no suffix. With no path argument, `-i` processes every non-hidden entry in the current directory (as if the argument were `*`), offering fixes and advancing to the next item even after you fix the current one. Exits 1 if anything is flagged (after fixes, in `-i` mode).
+
 ### vids-mkdir.pl
 
 Read video filenames from stdin; print `mkdir`/`mv` commands to group files by year.
