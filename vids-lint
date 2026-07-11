@@ -40,8 +40,10 @@ carries the video stem is only relocated. The main video is the single video
 file in the subtitle's folder, or the single video in the nearest ancestor
 folder within the scanned path; a subtitle is skipped when no single main video
 is found, the target already exists, or the name equals the video stem with no
-suffix (nothing to move or rename — add a language segment manually). -i cannot
-be combined with --json.
+suffix (nothing to move or rename — add a language segment manually). One Y/n
+prompt is asked per directory. Prompts read from the terminal, or from stdin
+when it is piped or redirected, so `yes | vids-lint -i` auto-confirms every fix.
+-i cannot be combined with --json.
 
 Output: one block per dirty directory (plain text), or one JSON object per
 dirty directory with --json. Exit status 0 if everything is clean, 1 if any
@@ -191,8 +193,15 @@ def find_main_video(sub_path: Path, scan_root: Path) -> Optional[Path]:
     return None
 
 
-def open_tty() -> Optional[TextIO]:
-    """Readable terminal for prompts: /dev/tty, else stdin if it is a TTY."""
+def open_prompt_input() -> Optional[TextIO]:
+    """Where to read Y/n answers from.
+
+    Prefers stdin when it is piped or redirected, so `yes | vids-lint -i` works;
+    otherwise uses the controlling terminal (/dev/tty), falling back to a TTY
+    stdin. Returns None only when no input source is available.
+    """
+    if sys.stdin is not None and not sys.stdin.isatty():
+        return sys.stdin
     try:
         return open('/dev/tty', 'r', encoding='utf-8', errors='replace')
     except OSError:
@@ -383,11 +392,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         paths = [str(selected)]
 
     if args.interactive:
-        tty = open_tty()
-        if tty is not None:
-            return run_interactive(paths, tty)
+        prompt_input = open_prompt_input()
+        if prompt_input is not None:
+            return run_interactive(paths, prompt_input)
         print(
-            'vids-lint: -i needs a terminal; reporting without fixing',
+            'vids-lint: -i needs a terminal or piped input; reporting without fixing',
             file=sys.stderr,
             flush=True,
         )
