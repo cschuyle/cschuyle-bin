@@ -1,0 +1,5 @@
+To mount the Synology when it changes IP:
+
+File Explorer / This Pc / Right click / map network drive / \\192.168.1.XXX\cschuyle, mount to Z
+
+Then in a wsl window: sudo mount -t drvfs Z: /mnt/z
