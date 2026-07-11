@@ -759,6 +759,49 @@ mac_controlcenter_sound_always() {
     return 1
 }
 
+mac_karabiner_installed() {
+    [[ -d /Applications/Karabiner-Elements.app ]]
+}
+
+mac_czech_qwerty_enabled() {
+    defaults read com.apple.HIToolbox AppleEnabledInputSources 2>/dev/null \
+        | grep -q 'Czech-QWERTY'
+}
+
+# Print "char keycode modifier enabled" for a com.apple.symbolichotkeys entry:
+# char is parameter 1 (typed character, or 65535 for a keycode-only binding),
+# keycode is parameter 2 (virtual key code), and modifier is parameter 3 (mask;
+# Command is 1048576). Exit 2 when the hotkey has no entry, 1 on parse failure.
+mac_read_symbolic_hotkey() {
+    local hk="$1" tmp rc
+    tmp=$(mktemp) || return 1
+    if ! defaults export com.apple.symbolichotkeys "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+    python3 - "$tmp" "$hk" <<'PY'
+import sys, plistlib
+path, hk = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "rb") as f:
+        data = plistlib.load(f)
+except Exception:
+    raise SystemExit(1)
+entry = (data.get("AppleSymbolicHotKeys") or {}).get(hk)
+if not isinstance(entry, dict):
+    raise SystemExit(2)
+enabled = 1 if entry.get("enabled") else 0
+params = ((entry.get("value") or {}).get("parameters")) or []
+char = params[0] if len(params) > 0 else -1
+keycode = params[1] if len(params) > 1 else -1
+mod = params[2] if len(params) > 2 else -1
+print("%s %s %s %s" % (char, keycode, mod, enabled))
+PY
+    rc=$?
+    rm -f "$tmp"
+    return $rc
+}
+
 mac_name_strip_local_suffix() {
     local name="$1"
     name="${name%.local}"
@@ -918,6 +961,22 @@ mac_fix_sound_menu_bar() {
     return 0
 }
 
+mac_fix_next_window_czech() {
+    # Symbolic hotkey 27 = "Move focus to next window". Bind it to keycode 10
+    # (the key that types < on Czech-QWERTY, after Karabiner's
+    # non_us_backslash/grave swap) with the Command modifier (1048576). The
+    # character is 65535 (none) on purpose: storing the glyph < makes macOS
+    # infer Shift and turn the combo into Command-Shift, so binding by keycode
+    # keeps it a plain Command-<.
+    defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 27 \
+        '{enabled = 1; value = {parameters = (65535, 10, 1048576); type = "standard";};}' \
+        || return 1
+    # Reload shortcut settings so the change takes effect without a full re-login.
+    /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u \
+        2>/dev/null || true
+    return 0
+}
+
 offer_fix_mac_setting() {
     local kind="$1" location="$2" key="$3" expected="$4" label="$5" settings_path
 
@@ -950,16 +1009,45 @@ offer_fix_mac_setting() {
                 report_warn "Setting $label (could not update Control Center)"
             fi
             ;;
+        next-window-czech-qwerty)
+            gar_prompt_yn "Fix $label: map \"Move focus to next window\" to Command-<?" || return 0
+            if mac_fix_next_window_czech; then
+                printf 'Mapped Move focus to next window to Command-< (log out/in if it does not take effect right away).\n'
+            else
+                report_warn "Setting $label (could not update symbolic hotkey)"
+            fi
+            ;;
     esac
 }
 
 check_mac_settings() {
     local label kind location key expected compare actual settings_path app_path read_status=0
+    local hk_char hk_key hk_mod hk_enabled hk_read
     while IFS='|' read -r label kind location key expected compare; do
         compare="${compare:-eq}"
         actual=""
 
         case "$kind" in
+            next-window-czech-qwerty)
+                # Only relevant with Karabiner Elements installed and the
+                # Czech-QWERTY input source enabled; otherwise skip silently.
+                if ! mac_karabiner_installed || ! mac_czech_qwerty_enabled; then
+                    continue
+                fi
+                hk_read=$(mac_read_symbolic_hotkey 27) || hk_read=""
+                read -r hk_char hk_key hk_mod hk_enabled <<<"$hk_read"
+                # Match on keycode 10 (the < key on Czech-QWERTY) with the
+                # Command modifier (1048576). The char is intentionally ignored:
+                # binding by keycode avoids macOS inferring Shift from the
+                # shifted glyph < and turning the combo into Command-Shift.
+                if [[ "$hk_enabled" == 1 && "$hk_key" == 10 && "$hk_mod" == 1048576 ]]; then
+                    report_ok "Setting $label"
+                else
+                    report_warn "Setting $label (map to Command-< under System Settings → Keyboard → Keyboard Shortcuts → Keyboard → Move focus to next window)"
+                    offer_fix_mac_setting "$kind" "$location" "$key" "$expected" "$label"
+                fi
+                continue
+                ;;
             sound-menu-bar-always)
                 if mac_controlcenter_sound_always; then
                     report_ok "Setting $label"

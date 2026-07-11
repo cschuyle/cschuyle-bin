@@ -1,14 +1,22 @@
 # Mac settings checks (advisory — mismatches WARN, not MISS).
 # Format: label|kind|location|key|expected[|compare]
-# kind: json-editor (cursor or code), defaults, sound-menu-bar-always, machine-name-not-default
+# kind: json-editor (cursor or code), defaults, sound-menu-bar-always,
+#       machine-name-not-default, next-window-czech-qwerty
 # location: editor id or "global" for NSGlobalDomain
 # compare: eq (default), at_most (numeric actual <= expected)
 # In an interactive terminal gar offers to fix WARNs for json-editor,
-# defaults, and sound-menu-bar-always kinds. machine-name-not-default is
-# advisory only (renaming needs a chosen name and sudo).
+# defaults, sound-menu-bar-always, and next-window-czech-qwerty kinds.
+# machine-name-not-default is advisory only.
+# next-window-czech-qwerty only applies when Karabiner Elements is installed
+# and the Czech-QWERTY input source is enabled; it checks that "Move focus to
+# next window" (symbolic hotkey 27) is bound to keycode 10 (the < key on
+# Czech-QWERTY after Karabiner's non_us_backslash/grave swap) with the Command
+# modifier. The fix writes parameters (65535, 10, 1048576); the char is 65535
+# (none) so macOS does not infer Shift from the shifted glyph <.
 Cursor auto-save|json-editor|cursor|files.autoSave|onFocusChange
 VS Code auto-save|json-editor|code|files.autoSave|onFocusChange
 Keyboard repeat speed|defaults|global|KeyRepeat|2|at_most
 Keyboard repeat delay|defaults|global|InitialKeyRepeat|15|at_most
 Always show volume in menu bar|sound-menu-bar-always||||
 Machine name|machine-name-not-default||||
+Move focus to next window (Command-<)|next-window-czech-qwerty||||
