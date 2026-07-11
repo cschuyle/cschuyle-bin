@@ -80,6 +80,28 @@ DESTINATION="${SOURCES[$((${#SOURCES[@]}-1))]}"
 unset "SOURCES[$((${#SOURCES[@]}-1))]"
 echo SOURCES: "${SOURCES[@]}"
 echo DESTINATION: $DESTINATION
+
+# rsync prints each file with --out-format='%n' relative to the transfer root,
+# i.e. relative to the parent of each source (or to the source itself if it was
+# given with a trailing slash). The create-side tar must therefore run from that
+# same base directory, otherwise the relative names cannot be stat'd. Compute a
+# single base directory shared by all sources.
+tar_base_of() {
+    local src="$1"
+    if [[ "$src" == */ ]]; then
+        # Trailing slash: names are relative to the source directory itself.
+        printf '%s' "${src%/}"
+    else
+        dirname "$src"
+    fi
+}
+TAR_BASE=$(tar_base_of "${SOURCES[0]}")
+for src in "${SOURCES[@]}"; do
+    if [[ "$(tar_base_of "$src")" != "$TAR_BASE" ]]; then
+        echo "Error: all SOURCE arguments must live in the same parent directory (got base '$TAR_BASE' and '$(tar_base_of "$src")')." >&2
+        exit 1
+    fi
+done
 # Parse destination into host and directory
 if [[ "$DESTINATION" == *:* ]]; then
     DEST_HOST="${DESTINATION%%:*}"
@@ -133,18 +155,18 @@ cat "$TEMP_FILE"
 # Create tar archive and pipe to destination
 if [[ -n "$DEST_HOST" ]]; then
   if [[ "$DRY_RUN" == true ]]; then
-    echo "tar -Sc${Z}vf - -T \"$TEMP_FILE\" | ssh $PORT_ARG \"$DEST_HOST\" \"cd \\\"$DEST_DIR\\\" && tar -x${Z}f -\""
+    echo "tar -C \"$TAR_BASE\" -Sc${Z}vf - -T \"$TEMP_FILE\" | ssh $PORT_ARG \"$DEST_HOST\" \"cd \\\"$DEST_DIR\\\" && tar -x${Z}f -\""
   else
     set -x
-    tar -Sc${Z}vf - -T "$TEMP_FILE" | ssh $PORT_ARG "$DEST_HOST" "cd \"$DEST_DIR\" && tar -x${Z}f -"
+    tar -C "$TAR_BASE" -Sc${Z}vf - -T "$TEMP_FILE" | ssh $PORT_ARG "$DEST_HOST" "cd \"$DEST_DIR\" && tar -x${Z}f -"
     set +x
   fi
 else
   if [[ "$DRY_RUN" == true ]]; then
-    echo "tar -Sc${Z}vf - -T \"$TEMP_FILE\" | (cd \"$DEST_DIR\" && tar -x${Z}f -)"
+    echo "tar -C \"$TAR_BASE\" -Sc${Z}vf - -T \"$TEMP_FILE\" | (cd \"$DEST_DIR\" && tar -x${Z}f -)"
   else
     set -x
-    tar -Sc${Z}vf - -T "$TEMP_FILE" | (cd "$DEST_DIR" && tar -x${Z}f -)
+    tar -C "$TAR_BASE" -Sc${Z}vf - -T "$TEMP_FILE" | (cd "$DEST_DIR" && tar -x${Z}f -)
     set +x
   fi
 fi
