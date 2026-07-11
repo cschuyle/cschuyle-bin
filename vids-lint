@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Lint video directories for common "dirty" states.
 
-Usage: vids-lint [--json] [-i|--interactive] [PATH ...]
+Usage: vids-lint [--json] [-a|--all] [-i|--interactive] [PATH ...]
 
 Walks each PATH and, for every directory that directly contains video and/or
 subtitle files, reports two problems. With no PATH, vids-lint lints the first
@@ -17,12 +17,21 @@ The two problems reported:
 
   1. Unaligned subtitles. A subtitle should be named
      <video-stem>.<suffix>.srt and live in the same folder as its video
-     (e.g. The.Matrix.1999.mp4 -> The.Matrix.1999.en.srt). The suffix is kept
-     verbatim, so descriptors like .2_English or .eng.forced are accepted. A
-     .srt is flagged when it:
-       - matches a video stem but has no suffix at all
-         (The.Matrix.1999.srt), or
-       - does not start with any video stem in the folder (orphan subtitle).
+     (e.g. The.Matrix.1999.mp4 -> The.Matrix.1999.en.srt), where the suffix
+     carries a language segment (an ISO code or language name, e.g. .en /
+     .eng / .2_English). A .srt is flagged when it:
+       - does not start with any video stem in the folder (orphan-subtitle), or
+       - is tied to a video but carries no language segment
+         (non-identifiable-language-subtitle-file), e.g. The.Matrix.1999.srt or
+         The.Matrix.1999.forced.srt next to The.Matrix.1999.mp4.
+     Only the part of the name past the video stem is inspected for a language,
+     so a title word (e.g. The.English.Patient.srt) is not read as a language.
+     non-identifiable-language-subtitle-file is a quiet violation, reported
+     only with -a/--all.
+
+Each reported subtitle carries a violation code: orphan-subtitle or
+non-identifiable-language-subtitle-file. The code is shown in brackets in
+plain output and as a "code" field in --json output.
 
   2. Multiple video files in one directory. A movie folder should hold a single
      video file; two or more real videos directly in the same directory is
@@ -80,6 +89,60 @@ def is_sample_video_name(name: str) -> bool:
     return 'sample' in re.split(r'[\W_]+', Path(name).stem.lower())
 
 
+# Heuristic set of tokens that look like a language: ISO 639-1/2 codes plus
+# common English language names. Not exhaustive (a canonical-language feature
+# will come later); it only decides whether a lone subtitle carries any
+# language-ish hint at all.
+LANGUAGE_TOKENS = frozenset({
+    'en', 'eng', 'english',
+    'es', 'spa', 'spanish', 'esp',
+    'fr', 'fra', 'fre', 'french',
+    'de', 'deu', 'ger', 'german',
+    'it', 'ita', 'italian',
+    'pt', 'por', 'portuguese', 'brazilian',
+    'ru', 'rus', 'russian',
+    'ja', 'jpn', 'japanese',
+    'zh', 'zho', 'chi', 'chinese', 'mandarin', 'cantonese',
+    'ko', 'kor', 'korean',
+    'ar', 'ara', 'arabic',
+    'nl', 'nld', 'dut', 'dutch',
+    'sv', 'swe', 'swedish',
+    'no', 'nor', 'norwegian',
+    'da', 'dan', 'danish',
+    'fi', 'fin', 'finnish',
+    'pl', 'pol', 'polish',
+    'tr', 'tur', 'turkish',
+    'cs', 'ces', 'cze', 'czech',
+    'el', 'ell', 'gre', 'greek',
+    'he', 'heb', 'hebrew',
+    'hi', 'hin', 'hindi',
+    'th', 'tha', 'thai',
+    'vi', 'vie', 'vietnamese',
+    'id', 'ind', 'indonesian',
+    'uk', 'ukr', 'ukrainian',
+    'ro', 'ron', 'rum', 'romanian',
+    'hu', 'hun', 'hungarian',
+    'bg', 'bul', 'bulgarian',
+    'hr', 'hrv', 'croatian',
+    'sr', 'srp', 'serbian',
+    'sk', 'slo', 'slk', 'slovak',
+    'sl', 'slv', 'slovenian',
+    'et', 'est', 'estonian',
+    'lv', 'lav', 'latvian',
+    'lt', 'lit', 'lithuanian',
+    'fa', 'per', 'fas', 'persian', 'farsi',
+})
+
+
+def has_language_like_segment(text: str) -> bool:
+    """True when any alphabetic token in text looks like a language code/name."""
+    return any(
+        tok.lower() in LANGUAGE_TOKENS
+        for tok in re.split(r'[^A-Za-z]+', text)
+        if tok
+    )
+
+
 def choose_main_video(videos: List[Path]) -> Optional[Path]:
     """The feature among a folder's videos, or None if it is ambiguous.
 
@@ -91,27 +154,43 @@ def choose_main_video(videos: List[Path]) -> Optional[Path]:
     return candidates[0] if len(candidates) == 1 else None
 
 
-def lint_subtitles(video_names: List[str], srt_names: List[str]) -> List[Tuple[str, str]]:
-    """Return (srt_name, reason) for each misaligned subtitle in one directory.
+def lint_subtitles(video_names: List[str], srt_names: List[str]) -> List[Tuple[str, str, str]]:
+    """Return (srt_name, reason, code) for each misaligned subtitle in a directory.
 
-    A subtitle is aligned when it lives beside a video and is named
-    <video-stem>.<suffix>.srt (any non-empty suffix, e.g. .en / .2_English /
-    .eng.forced). Flagged cases: the name equals a video stem with no suffix
-    (missing language), or its name matches no video stem in the folder.
+    A subtitle is aligned when it lives beside a video, is named
+    <video-stem>.<suffix>.srt, and the suffix carries a language segment (an
+    ISO code or language name, e.g. .en / .eng / .2_English). Flagged cases and
+    their violation codes:
+      - orphan-subtitle: name matches no video stem in the folder.
+      - non-identifiable-language-subtitle-file: name is tied to a video but
+        carries no language segment (e.g. Movie.srt or Movie.forced.srt beside
+        Movie.mp4). Only the part of the name past the video stem is inspected,
+        so a title word (The.English.Patient.srt) is not read as a language.
     """
     stems = {video_stem(v) for v in video_names}
-    issues: List[Tuple[str, str]] = []
+    issues: List[Tuple[str, str, str]] = []
     for srt in sorted(srt_names, key=str.lower):
         stem = srt[: -len('.srt')]  # srt_names are already known to end in .srt
         if stem in stems:
-            issues.append((srt, f'missing language segment (expected {stem}.<lang>.srt)'))
-            continue
-        if not any(stem.startswith(vs + '.') for vs in stems):
-            issues.append((srt, 'no matching video file in this folder'))
+            annotation = ''
+        else:
+            prefixes = [vs for vs in stems if stem.startswith(vs + '.')]
+            if not prefixes:
+                issues.append((srt, 'no matching video file in this folder', 'orphan-subtitle'))
+                continue
+            annotation = stem[len(max(prefixes, key=len)) + 1:]
+        if not has_language_like_segment(annotation):
+            issues.append((
+                srt,
+                'no identifiable language segment in name',
+                'non-identifiable-language-subtitle-file',
+            ))
     return issues
 
 
-def lint_directory(dirpath: str, filenames: List[str]) -> Optional[Dict[str, object]]:
+def lint_directory(
+    dirpath: str, filenames: List[str], show_all: bool = False
+) -> Optional[Dict[str, object]]:
     """Return a findings dict for one directory, or None when it is clean."""
     videos = sorted(
         (n for n in filenames if Path(n).suffix.lower() in VIDEO_EXTENSIONS),
@@ -122,7 +201,14 @@ def lint_directory(dirpath: str, filenames: List[str]) -> Optional[Dict[str, obj
     if not videos and not srts:
         return None
 
-    unaligned = lint_subtitles(videos, srts)
+    # non-identifiable-language-subtitle-file is a quiet violation: there is no
+    # language to key off, so it is suppressed unless -a/--all.
+    unaligned = [
+        (f, r, c)
+        for (f, r, c) in lint_subtitles(videos, srts)
+        if show_all or c != 'non-identifiable-language-subtitle-file'
+    ]
+
     real_videos = [v for v in videos if not is_sample_video_name(v)]
     multiple = real_videos if len(real_videos) > 1 else []
 
@@ -132,7 +218,9 @@ def lint_directory(dirpath: str, filenames: List[str]) -> Optional[Dict[str, obj
     return {
         'dir': dirpath,
         'multiple_videos': multiple,
-        'unaligned_subtitles': [{'file': f, 'reason': r} for f, r in unaligned],
+        'unaligned_subtitles': [
+            {'file': f, 'reason': r, 'code': c} for f, r, c in unaligned
+        ],
     }
 
 
@@ -268,13 +356,13 @@ def plan_subtitle_fix(sub_path: Path, scan_root: Path) -> Tuple[bool, object]:
     except OSError:
         same = str(target) == str(sub_path)
     if same:
-        return (False, 'missing language segment; rename manually')
+        return (False, 'no identifiable language segment; rename manually')
     if target.exists():
         return (False, f'target already exists: {target}')
     return (True, target)
 
 
-def run_interactive(paths: List[str], tty_in: TextIO) -> int:
+def run_interactive(paths: List[str], tty_in: TextIO, show_all: bool = False) -> int:
     """Process each top-level item in order with live feedback.
 
     Clean items are skipped silently; dirty items with no automatic fix are
@@ -291,7 +379,7 @@ def run_interactive(paths: List[str], tty_in: TextIO) -> int:
         scan_root = root if root.is_dir() else root.parent
         findings: List[Dict[str, object]] = []
         for dirpath, filenames in iter_directories(root):
-            result = lint_directory(dirpath, filenames)
+            result = lint_directory(dirpath, filenames, show_all)
             if result is not None:
                 findings.append(result)
         if not findings:
@@ -322,7 +410,10 @@ def run_interactive(paths: List[str], tty_in: TextIO) -> int:
                 print(f'  multiple video files ({len(mv)}): {", ".join(mv)}', flush=True)
             planned: List[Tuple[Path, Path]] = []
             for sub in r['unaligned_subtitles']:
-                print(f'  unaligned subtitle: {sub["file"]} — {sub["reason"]}', flush=True)
+                print(
+                    f'  unaligned subtitle [{sub["code"]}]: {sub["file"]} — {sub["reason"]}',
+                    flush=True,
+                )
                 sub_path = Path(str(r['dir'])) / str(sub['file'])
                 available, info = plan_subtitle_fix(sub_path, scan_root)
                 if available:
@@ -373,6 +464,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     p.add_argument('--json', action='store_true', help='Emit one JSON object per dirty directory')
     p.add_argument(
+        '-a',
+        '--all',
+        action='store_true',
+        help='Also report non-identifiable-language-subtitle-file violations: a '
+        'subtitle tied to a video but carrying no language segment (e.g. '
+        'Movie.srt next to Movie.mp4). Suppressed by default.',
+    )
+    p.add_argument(
         '-i',
         '--interactive',
         action='store_true',
@@ -410,7 +509,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.interactive:
         prompt_input = open_prompt_input()
         if prompt_input is not None:
-            return run_interactive(paths, prompt_input)
+            return run_interactive(paths, prompt_input, args.all)
         print(
             'vids-lint: -i needs a terminal or piped input; reporting without fixing',
             file=sys.stderr,
@@ -424,7 +523,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f'vids-lint: no such path: {x}', file=sys.stderr, flush=True)
             continue
         for dirpath, filenames in iter_directories(root):
-            result = lint_directory(dirpath, filenames)
+            result = lint_directory(dirpath, filenames, args.all)
             if result is not None:
                 findings.append(result)
 
@@ -447,7 +546,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if mv:
             print(f'  multiple video files ({len(mv)}): {", ".join(mv)}', flush=True)
         for sub in r['unaligned_subtitles']:
-            print(f'  unaligned subtitle: {sub["file"]} — {sub["reason"]}', flush=True)
+            print(
+                f'  unaligned subtitle [{sub["code"]}]: {sub["file"]} — {sub["reason"]}',
+                flush=True,
+            )
 
     if findings:
         print(
