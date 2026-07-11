@@ -15,6 +15,9 @@ Usage: dg-whatis [--json] [-v|--verbose] [-m|--media] [-e|--equivalence]
                          with --json: {"path", "equivalence"} per line).
     -c / --classification  Only paths classified as CLASS. Valid CLASS values: movie, series, album, ebook, unknown. Plain output: one resolved path per matching line. With --json: only matching NDJSON rows.
     -d / --diff  Compare two paths and report which analysis fields are equal vs different.
+                 If PATH_B is a directory containing an entry named like PATH_A's
+                 basename, PATH_A is compared against PATH_B/<basename> (so you can
+                 pass the parent directory of the counterpart instead of retyping it).
 
 Content types (one primary kind per path):
   movie, series, album, ebook, unknown
@@ -1226,7 +1229,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         dest='diff_paths',
         nargs=2,
         metavar=('PATH_A', 'PATH_B'),
-        help='Compare two paths and report equal/different analysis fields.',
+        help=(
+            'Compare two paths and report equal/different analysis fields. '
+            'If PATH_B is a directory containing an entry named like PATH_A basename, '
+            'PATH_A is compared against PATH_B/<basename>.'
+        ),
     )
     args = p.parse_args(argv)
 
@@ -1242,6 +1249,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         left, right = args.diff_paths
         left_path = Path(left).expanduser()
         right_path = Path(right).expanduser()
+        # Convenience: if PATH_B is a directory that contains an entry with the
+        # same name as PATH_A's basename, compare against that entry. This lets
+        # you pass the parent directory of the counterpart instead of retyping
+        # the name (e.g. `--diff /media/The.Matrix /backup` compares against
+        # /backup/The.Matrix when it exists).
+        if left_path.name and right_path.is_dir():
+            candidate = right_path / left_path.name
+            if candidate.exists():
+                right_path = candidate
+                right = str(candidate)
         missing = []
         if not left_path.exists():
             missing.append(left)
