@@ -27,7 +27,7 @@ usage() {
     cat <<'EOF'
 Usage: gar [-ah]
        gar apps
-       gar info <name>
+       gar info [name]
 
 Check the current machine's configuration against the desired state in gar.d/.
 Reports missing or out-of-date elements. Mac, Synology, and WSL checks are
@@ -35,7 +35,9 @@ implemented; plain Linux is detected but not yet audited.
 
   -a, --all     Show all checks, including OK (default: only MISS and WARN)
   apps          List GUI apps tracked in gar.d/mac.apps (App Store or vendor site)
-  info <name>   Show install hints and general info for a tracked item (case-insensitive)
+  info [name]   With no name: show the platform info page (gar.d/<platform>.info;
+                empty by default). With a name: install hints and general info
+                for a tracked item (case-insensitive)
 
 Exit status: 0 if everything looks good, 1 if anything is missing.
 EOF
@@ -100,6 +102,22 @@ gar_info_dirs() {
     local platform="$1"
     [[ -d "$GAR_DIR/$platform.info.d" ]] && printf '%s\n' "$GAR_DIR/$platform.info.d"
     [[ -d "$GAR_DIR/shared.info.d" ]] && printf '%s\n' "$GAR_DIR/shared.info.d"
+}
+
+# Platform default page for `gar info` with no name: gar.d/<platform>.info
+# (missing or empty = no content).
+gar_platform_info_file() {
+    local platform="${1:-$(detect_platform)}"
+    printf '%s\n' "$GAR_DIR/$platform.info"
+}
+
+lookup_platform_info() {
+    local file
+    file=$(gar_platform_info_file)
+    [[ -f "$file" ]] || return 1
+    # Treat empty / whitespace-only as no content.
+    grep -q '[^[:space:]]' "$file" 2>/dev/null || return 1
+    cat "$file"
 }
 
 lookup_general_info() {
@@ -208,8 +226,10 @@ cmd_info() {
     local query="$1" app_entry canonical path hint ext_entry browser ext_id label app_path info
 
     if [[ -z "$query" ]]; then
-        echo "Usage: gar info <name>" >&2
-        exit 2
+        if info=$(lookup_platform_info); then
+            printf '%s\n' "$info"
+        fi
+        exit 0
     fi
 
     if app_entry=$(lookup_app_entry "$query"); then
