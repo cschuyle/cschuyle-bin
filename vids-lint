@@ -25,9 +25,10 @@ The two problems reported:
        - does not start with any video stem in the folder (orphan subtitle).
 
   2. Multiple video files in one directory. A movie folder should hold a single
-     video file; two or more directly in the same directory is flagged (this
-     also flags multi-episode folders, which are legitimately not single
-     movies — point vids-lint at movie folders).
+     video file; two or more real videos directly in the same directory is
+     flagged (sample clips — a delimited "sample" token, e.g. Sample_1.mp4 — do
+     not count). This also flags multi-episode folders, which are legitimately
+     not single movies — point vids-lint at movie folders.
 
 Video extensions: mp4, m4v, mkv, avi, mov, webm, wmv, mpg, mpeg, ogm.
 Subtitle extension: srt.
@@ -36,10 +37,11 @@ With -i/--interactive, vids-lint offers to fix each fixable subtitle by moving
 it into its main video's folder and prepending the video's basename to the
 original subtitle name (e.g. Subs/2_English.srt ->
 Dollars.1971.1080p.WEBRip.x265-RARBG.2_English.srt). A subtitle that already
-carries the video stem is only relocated. The main video is the single video
-file in the subtitle's folder, or the single video in the nearest ancestor
-folder within the scanned path; a subtitle is skipped when no single main video
-is found, the target already exists, or the name equals the video stem with no
+carries the video stem is only relocated. The main video is the single
+non-sample video in the subtitle's folder or the nearest ancestor folder within
+the scanned path (sample clips are ignored); a subtitle is skipped when there is
+no single main video (zero or several remain), the target already exists, or the
+name equals the video stem with no
 suffix (nothing to move or rename — add a language segment manually). One Y/n
 prompt is asked per directory. Prompts read from the terminal, or from stdin
 when it is piped or redirected, so `yes | vids-lint -i` auto-confirms every fix.
@@ -55,6 +57,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -70,6 +73,22 @@ MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
 def video_stem(name: str) -> str:
     """Filename without its (single) extension, e.g. 'A.B.mp4' -> 'A.B'."""
     return name[: -len(Path(name).suffix)] if Path(name).suffix else name
+
+
+def is_sample_video_name(name: str) -> bool:
+    """True when the filename has a delimited 'sample' token (e.g. Sample_1.mp4)."""
+    return 'sample' in re.split(r'[\W_]+', Path(name).stem.lower())
+
+
+def choose_main_video(videos: List[Path]) -> Optional[Path]:
+    """The feature among a folder's videos, or None if it is ambiguous.
+
+    Sample clips are ignored. Returns the video only when exactly one non-sample
+    video remains; with zero or several, returns None (no assumption is made
+    about which is the feature).
+    """
+    candidates = [v for v in videos if not is_sample_video_name(v.name)]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def lint_subtitles(video_names: List[str], srt_names: List[str]) -> List[Tuple[str, str]]:
@@ -104,7 +123,8 @@ def lint_directory(dirpath: str, filenames: List[str]) -> Optional[Dict[str, obj
         return None
 
     unaligned = lint_subtitles(videos, srts)
-    multiple = videos if len(videos) > 1 else []
+    real_videos = [v for v in videos if not is_sample_video_name(v)]
+    multiple = real_videos if len(real_videos) > 1 else []
 
     if not unaligned and not multiple:
         return None
@@ -162,10 +182,10 @@ def iter_directories(root: Path) -> List[Tuple[str, List[str]]]:
 
 
 def find_main_video(sub_path: Path, scan_root: Path) -> Optional[Path]:
-    """The single video for a subtitle: one in its folder, else up to scan_root.
+    """The feature video for a subtitle: in its folder, else up to scan_root.
 
-    Returns None when a folder in that chain holds zero or multiple videos
-    (multiple is ambiguous, so no fix is offered).
+    Sample clips are ignored (see choose_main_video). Returns None when no
+    single non-sample video is found in that chain.
     """
     try:
         root_r = scan_root.resolve()
@@ -174,19 +194,15 @@ def find_main_video(sub_path: Path, scan_root: Path) -> Optional[Path]:
         return None
     while cur == root_r or root_r in cur.parents:
         try:
-            vids = sorted(
-                (
-                    p for p in cur.iterdir()
-                    if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
-                ),
-                key=lambda p: p.name.lower(),
-            )
+            vids = [
+                p for p in cur.iterdir()
+                if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+            ]
         except OSError:
             vids = []
-        if len(vids) == 1:
-            return vids[0]
-        if len(vids) >= 2:
-            return None
+        main = choose_main_video(vids)
+        if main is not None:
+            return main
         if cur == root_r:
             break
         cur = cur.parent
