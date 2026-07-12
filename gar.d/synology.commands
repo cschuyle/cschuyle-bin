@@ -5,3 +5,4 @@ rsync
 curl
 jq
 tar
+HandBrakeCLI

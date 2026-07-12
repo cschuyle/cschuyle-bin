@@ -7,5 +7,6 @@ curl|Usually preinstalled on Ubuntu WSL; otherwise: sudo apt install curl
 jq|sudo apt install jq
 tar|Usually preinstalled on Ubuntu WSL
 ssh|Usually preinstalled on Ubuntu WSL; otherwise: sudo apt install openssh-client
+HandBrakeCLI|sudo apt install handbrake-cli
 user.name|git config --global user.name "Your Name"
 user.email|git config --global user.email "you@example.com"
