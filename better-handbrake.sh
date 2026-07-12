@@ -498,6 +498,34 @@ encoder_run_handbrake() {
 }
 
 ############################
+# READABILITY PROBE
+############################
+
+# True when libav can open the container and read stream info. HandBrake shares the
+# same libav, so "ffmpeg can open it" == "HandBrake can open it". This distinguishes a
+# genuinely corrupt / headerless input (report + skip) from a readable file that merely
+# cannot be MP4 stream-copied (fall through to encode). -t 0 makes ffmpeg open the input
+# and probe streams without processing or writing any data, so it is cheap even on huge
+# files. On failure the last ffmpeg error lines are stored in _BH_INPUT_PROBE_ERR.
+input_readable() {
+  local -
+  set +eE
+  local log st
+  _BH_INPUT_PROBE_ERR=""
+  log="$(mktemp "${TMPDIR:-/tmp}/better-handbrake.XXXXXX")" || return 1
+  ffmpeg -nostdin -hide_banner -loglevel error -nostats \
+    -i "$1" -map 0 -t 0 -c copy -f null - </dev/null >"$log" 2>&1
+  st=$?
+  if (( st == 0 )); then
+    rm -f "$log"
+    return 0
+  fi
+  _BH_INPUT_PROBE_ERR="$(grep -v '^[[:space:]]*$' "$log" | tail -n 40)"
+  rm -f "$log"
+  return 1
+}
+
+############################
 # REMUX TEST
 ############################
 
@@ -606,6 +634,21 @@ process_file() {
     return 1
   fi
 
+  # A file that matched the selection but cannot be opened by libav is corrupt/headerless.
+  # HandBrake's UI silently drops such sources during a folder scan; we report them loudly
+  # (return 2) and let the batch continue with the rest.
+  if ! input_readable "$in"; then
+    emit_status "ERROR: ${_bh_ptag}input should be readable but is not (corrupt / no valid media header): $(path_sq "$in")"
+    if [[ -n "${_BH_INPUT_PROBE_ERR:-}" ]]; then
+      emit_status "INFO: ${_bh_ptag}ffmpeg:"
+      local _pline
+      while IFS= read -r _pline || [[ -n "${_pline:-}" ]]; do
+        emit_status "  $_pline"
+      done <<< "$_BH_INPUT_PROBE_ERR"
+    fi
+    return 2
+  fi
+
   local outdir tmpdir tmpout
   outdir="$(dirname "$out")"
   tmpdir="$outdir/temp"
@@ -646,12 +689,17 @@ process_file() {
   if can_remux "$in"; then
     emit_status "INFO: ${_bh_ptag}MODE=REMUX  (ffmpeg -c copy to MP4; no re-encode)"
 
-    encoder_run ffmpeg -nostdin -hide_banner -loglevel error -nostats -i "$in" \
+    if ! encoder_run ffmpeg -nostdin -hide_banner -loglevel error -nostats -i "$in" \
       -map 0 \
       -c copy \
       -movflags +faststart \
-      "$tmpout" </dev/null
-    mv "$tmpout" "$out"
+      "$tmpout" </dev/null; then
+      return 1
+    fi
+    mv "$tmpout" "$out" || {
+      emit_status "ERROR: ${_bh_ptag}cannot move output into place: $(path_sq "$out")"
+      return 1
+    }
 
   else
     emit_status "INFO: ${_bh_ptag}MP4 stream-copy (remux) is not possible for this file."
@@ -676,14 +724,19 @@ process_file() {
       fi
     fi
 
-    BH_PROGRESS_FILE="${in##*/}" \
-    encoder_run_handbrake "$BH_HANDBRAKE_CLI_BIN" \
+    if ! BH_PROGRESS_FILE="${in##*/}" \
+      encoder_run_handbrake "$BH_HANDBRAKE_CLI_BIN" \
       --preset-import-gui \
       --json \
       -i "$hb_in_arg" \
       -o "$hb_out_arg" \
-      --preset="$preset" </dev/null
-    mv "$tmpout" "$out"
+      --preset="$preset" </dev/null; then
+      return 1
+    fi
+    mv "$tmpout" "$out" || {
+      emit_status "ERROR: ${_bh_ptag}cannot move output into place: $(path_sq "$out")"
+      return 1
+    }
   fi
 
   local _in_b _out_b _in_hr _out_hr _el_s _el_hr
@@ -725,11 +778,41 @@ if [[ "${continue_mode:-0}" -eq 1 ]]; then
 fi
 _BH_TASK_N="${#_BH_TASKS[@]}"
 declare -A _BH_ALREADY_DONE_OUT=()
+# One bad file must not abort the batch (the HandBrake UI would silently skip it). Collect
+# problems and report them all at the end; process_file returns 2 for unreadable/corrupt
+# inputs and 1 for any other encode/remux failure.
+declare -a _BH_UNREADABLE=()
+declare -a _BH_FAILED=()
 for ((_bh_i = 0; _bh_i < _BH_TASK_N; _bh_i++)); do
   f="${_BH_TASKS[_bh_i]}"
   [[ -z "$f" ]] && continue
   f="${f%$'\r'}"
   out="$(map_output "$f")"
-  BH_PROGRESS_INDEX=$((_bh_i + 1)) BH_PROGRESS_TOTAL="$_BH_TASK_N" process_file "$f" "$out"
+  _bh_rc=0
+  BH_PROGRESS_INDEX=$((_bh_i + 1)) BH_PROGRESS_TOTAL="$_BH_TASK_N" process_file "$f" "$out" || _bh_rc=$?
+  case "$_bh_rc" in
+    0) ;;
+    2) _BH_UNREADABLE+=("$f") ;;
+    *) _BH_FAILED+=("$f") ;;
+  esac
 done
+
+if (( ${#_BH_UNREADABLE[@]} > 0 || ${#_BH_FAILED[@]} > 0 )); then
+  emit_status ""
+  emit_status "WARNING: $(( ${#_BH_UNREADABLE[@]} + ${#_BH_FAILED[@]} )) of ${_BH_TASK_N} input(s) did not produce output:"
+  if (( ${#_BH_UNREADABLE[@]} > 0 )); then
+    emit_status "  Unreadable / corrupt (matched the selection but libav could not open them;"
+    emit_status "  the HandBrake UI silently skips these during a folder scan):"
+    for f in "${_BH_UNREADABLE[@]}"; do
+      emit_status "    $(path_sq "$f")"
+    done
+  fi
+  if (( ${#_BH_FAILED[@]} > 0 )); then
+    emit_status "  Encode / remux failed:"
+    for f in "${_BH_FAILED[@]}"; do
+      emit_status "    $(path_sq "$f")"
+    done
+  fi
+  exit 1
+fi
 
