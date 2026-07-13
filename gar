@@ -1121,6 +1121,51 @@ mac_secret_exists() {
     security find-generic-password -a "$USER" -s "$1" >/dev/null 2>&1
 }
 
+offer_brew_install_missing() {
+    local brew_bin="$1"
+    shift
+    local item name prompt
+
+    gar_can_prompt || return 0
+
+    for item in "$@"; do
+        if [[ "$item" =~ ^Tap[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
+            name="${BASH_REMATCH[1]}"
+            prompt="Tap $name?"
+            gar_prompt_yn "$prompt" || continue
+            if "$brew_bin" tap "$name"; then
+                printf 'Tapped %s.\n' "$name"
+            else
+                report_warn "Homebrew: could not tap $name"
+            fi
+        elif [[ "$item" =~ ^Formula[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
+            name="${BASH_REMATCH[1]}"
+            prompt="Install $name (brew)?"
+            gar_prompt_yn "$prompt" || continue
+            if [[ "$name" == gng || "$name" == */gng ]]; then
+                if ! "$brew_bin" trust --formula gdubw/gng/gng; then
+                    report_warn "Homebrew: could not trust gdubw/gng/gng"
+                    continue
+                fi
+            fi
+            if "$brew_bin" install "$name"; then
+                printf 'Installed %s.\n' "$name"
+            else
+                report_warn "Homebrew: could not install $name"
+            fi
+        elif [[ "$item" =~ ^Cask[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
+            name="${BASH_REMATCH[1]}"
+            prompt="Install $name (brew cask)?"
+            gar_prompt_yn "$prompt" || continue
+            if "$brew_bin" install --cask "$name"; then
+                printf 'Installed %s.\n' "$name"
+            else
+                report_warn "Homebrew: could not install cask $name"
+            fi
+        fi
+    done
+}
+
 check_mac_homebrew() {
     local brew_bin=""
     if command -v brew >/dev/null 2>&1; then
@@ -1162,6 +1207,8 @@ check_mac_homebrew() {
             report_miss "Homebrew: $item"
         fi
     done
+
+    offer_brew_install_missing "$brew_bin" "${missing[@]}"
 }
 
 check_mac_secrets() {
