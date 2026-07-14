@@ -29,6 +29,8 @@ Text::Autoformat|Try:\n\n        cpan\n\n        (answer 'yes' to the question a
 csvformat|brew install csvkit
 gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
 gdubw/gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
+mvn|brew install maven
+maven|brew install maven
 user.name|git config --global user.name "Your Name"
 user.email|git config --global user.email "you@example.com"
 1Password Nightly|Install in Opera from https://chromewebstore.google.com/detail/1password-nightly-%E2%80%93-passw/gejiddohjgogedgjnonbofjigllpkmbf
