@@ -1,0 +1,3 @@
+# My-Data client: apps that should open at login (macOS Login Items).
+# Format: label|login item name (as shown in System Settings / System Events)
+Proton VPN|ProtonVPN

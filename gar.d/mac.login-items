@@ -1,5 +1,5 @@
 # Apps that should open at login (macOS Login Items).
 # Format: label|login item name (as shown in System Settings / System Events)
+# Role overlays add more (e.g. role.my-data-client.login-items).
 Rectangle|Rectangle
 Flycut|Flycut
-Proton VPN|ProtonVPN

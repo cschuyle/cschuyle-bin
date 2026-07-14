@@ -7,6 +7,7 @@ gar_show_all=0
 gar_section_name=""
 gar_section_header_printed=0
 gar_tmpdir=""
+gar_active_roles=()
 
 gar_init_workdir() {
     gar_tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/gar.XXXXXX")
@@ -33,6 +34,9 @@ Check the current machine's configuration against the desired state in gar.d/.
 Reports missing or out-of-date elements. Mac, Synology, and WSL checks are
 implemented; plain Linux is detected but not yet audited.
 
+Desired state is platform/shared manifests plus an additive union of role
+overlays enabled in ~/.config/gar/roles (one role id per line).
+
   -a, --all     Show all checks, including OK (default: only MISS and WARN)
   apps          List GUI apps tracked in gar.d/mac.apps (App Store or vendor site)
   info [name]   With no name: show the platform info page (gar.d/<platform>.info;
@@ -44,7 +48,10 @@ EOF
 }
 
 cmd_apps() {
-    local entry name path hint
+    local entry name path hint apps_manifest
+    detect_roles
+    gar_init_workdir
+    apps_manifest=$(gar_combined_capability_manifest mac apps)
     printf 'Tracked apps (installed outside Homebrew):\n\n'
     while IFS= read -r entry; do
         name="${entry%%|*}"
@@ -57,7 +64,7 @@ cmd_apps() {
             printf '  Install: App Store or vendor site\n'
         fi
         printf '\n'
-    done < <(read_manifest "$GAR_DIR/mac.apps")
+    done < <(read_manifest "$apps_manifest")
 }
 
 gar_name_eq() {
@@ -156,16 +163,32 @@ gar_print_install_hint() {
     fi
 }
 
+# List platform + all role.* manifests for a capability (for lookups / info).
+gar_all_capability_manifests() {
+    local platform="$1" capability="$2" f
+    if [[ -f "$GAR_DIR/$platform.$capability" ]]; then
+        printf '%s\n' "$GAR_DIR/$platform.$capability"
+    elif [[ -f "$GAR_DIR/shared.$capability" ]]; then
+        printf '%s\n' "$GAR_DIR/shared.$capability"
+    fi
+    for f in "$GAR_DIR"/role.*."$capability"; do
+        [[ -f "$f" ]] || continue
+        printf '%s\n' "$f"
+    done
+}
+
 lookup_app_entry() {
-    local query="$1" entry name path
-    while IFS= read -r entry; do
-        name="${entry%%|*}"
-        path="${entry#*|}"
-        if gar_name_eq "$query" "$name"; then
-            printf '%s|%s\n' "$name" "$path"
-            return 0
-        fi
-    done < <(read_manifest "$GAR_DIR/mac.apps")
+    local query="$1" entry name path manifest
+    while IFS= read -r manifest; do
+        while IFS= read -r entry; do
+            name="${entry%%|*}"
+            path="${entry#*|}"
+            if gar_name_eq "$query" "$name"; then
+                printf '%s|%s\n' "$name" "$path"
+                return 0
+            fi
+        done < <(read_manifest "$manifest")
+    done < <(gar_all_capability_manifests mac apps)
     return 1
 }
 
@@ -321,6 +344,84 @@ detect_platform() {
     else
         printf '%s\n' unknown
     fi
+}
+
+gar_roles_file() {
+    printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/gar/roles"
+}
+
+gar_role_is_known() {
+    local role="$1" f
+    for f in "$GAR_DIR"/role."$role".*; do
+        [[ -e "$f" ]] || continue
+        [[ -f "$f" ]] && return 0
+    done
+    return 1
+}
+
+detect_roles() {
+    local file line
+    gar_active_roles=()
+    file=$(gar_roles_file)
+    [[ -f "$file" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -n "$line" ]] || continue
+        gar_active_roles+=("$line")
+    done <"$file"
+}
+
+gar_format_roles() {
+    if (( ${#gar_active_roles[@]} == 0 )); then
+        printf '(none)'
+        return
+    fi
+    local IFS=,
+    printf '%s' "${gar_active_roles[*]}"
+}
+
+gar_warn_unknown_roles() {
+    local role
+    for role in "${gar_active_roles[@]}"; do
+        if ! gar_role_is_known "$role"; then
+            printf 'WARN Unknown role: %s (no gar.d/role.%s.* manifests)\n' "$role" "$role"
+        fi
+    done
+}
+
+# Concatenate role.<role>.<capability> for each active role into a temp file.
+# Writes under gar_tmpdir; call gar_init_workdir first.
+gar_collect_role_manifest() {
+    local capability="$1" out role f
+    out="$gar_tmpdir/role.$capability"
+    : >"$out"
+    for role in "${gar_active_roles[@]}"; do
+        f="$GAR_DIR/role.$role.$capability"
+        if [[ -f "$f" ]]; then
+            cat "$f" >>"$out"
+            printf '\n' >>"$out"
+        fi
+    done
+    printf '%s\n' "$out"
+}
+
+# Platform/shared base plus active role overlays for one capability name.
+gar_combined_capability_manifest() {
+    local platform="$1" capability="$2" base role_file out
+    out="$gar_tmpdir/combined.$capability"
+    : >"$out"
+    base=$(gar_resolve_manifest "$platform" "$capability")
+    if [[ -n "$base" && -f "$base" ]]; then
+        cat "$base" >>"$out"
+        printf '\n' >>"$out"
+    fi
+    role_file=$(gar_collect_role_manifest "$capability")
+    if [[ -n "$role_file" && -f "$role_file" && -s "$role_file" ]]; then
+        cat "$role_file" >>"$out"
+    fi
+    printf '%s\n' "$out"
 }
 
 read_manifest() {
@@ -1212,7 +1313,8 @@ check_mac_homebrew() {
 }
 
 check_mac_secrets() {
-    local key keys=() i=0 result status
+    local secrets_manifest="${1:-}" key keys=() i=0 result status
+    [[ -n "$secrets_manifest" ]] || secrets_manifest=$(gar_combined_capability_manifest mac secrets)
     mkdir -p "$gar_tmpdir/secrets"
     while IFS= read -r key; do
         keys+=("$key")
@@ -1224,7 +1326,7 @@ check_mac_secrets() {
             fi
         ) &
         i=$((i + 1))
-    done < <(read_manifest "$GAR_DIR/mac.secrets")
+    done < <(read_manifest "$secrets_manifest")
     wait
     for i in "${!keys[@]}"; do
         key="${keys[$i]}"
@@ -1250,7 +1352,9 @@ check_env() {
 }
 
 check_mac_env() {
-    check_env "$GAR_DIR/mac.env"
+    local env_manifest="${1:-}"
+    [[ -n "$env_manifest" ]] || env_manifest=$(gar_combined_capability_manifest mac env)
+    check_env "$env_manifest"
 }
 
 check_mac_java() {
@@ -1327,7 +1431,8 @@ check_mac_perl_modules() {
 }
 
 check_mac_apps() {
-    local entry name path
+    local apps_manifest="${1:-}" entry name path
+    [[ -n "$apps_manifest" ]] || apps_manifest=$(gar_combined_capability_manifest mac apps)
     while IFS= read -r entry; do
         name="${entry%%|*}"
         path="${entry#*|}"
@@ -1340,7 +1445,7 @@ check_mac_apps() {
         else
             report_miss "App $name ($path)"
         fi
-    done < <(read_manifest "$GAR_DIR/mac.apps")
+    done < <(read_manifest "$apps_manifest")
 }
 
 mac_login_items_raw() {
@@ -1359,6 +1464,8 @@ mac_login_item_listed() {
 
 check_mac_login_items() {
     local entry label login_name items_raw read_status=0
+    local login_manifest="${1:-}"
+    [[ -n "$login_manifest" ]] || login_manifest=$(gar_combined_capability_manifest mac login-items)
     read_status=0
     items_raw=$(mac_login_items_raw) || read_status=$?
     if (( read_status != 0 )); then
@@ -1376,7 +1483,7 @@ check_mac_login_items() {
         else
             report_miss "Login item $label (add $login_name in System Settings → General → Login Items)"
         fi
-    done < <(read_manifest "$GAR_DIR/mac.login-items")
+    done < <(read_manifest "$login_manifest")
 }
 
 mac_browser_app_path() {
@@ -1513,21 +1620,23 @@ check_mac_browser_extensions() {
 }
 
 run_mac_checks() {
-    local repos_manifest hints_file git_config_manifest
-    repos_manifest=$(gar_resolve_manifest mac machine-env-repos)
+    local repos_manifest secrets_manifest env_manifest login_manifest apps_manifest hints_file git_config_manifest
+    repos_manifest=$(gar_combined_capability_manifest mac machine-env-repos)
+    secrets_manifest=$(gar_combined_capability_manifest mac secrets)
+    env_manifest=$(gar_combined_capability_manifest mac env)
+    login_manifest=$(gar_combined_capability_manifest mac login-items)
+    apps_manifest=$(gar_combined_capability_manifest mac apps)
     git_config_manifest=$(gar_resolve_manifest mac git-config)
     hints_file="$GAR_DIR/mac.install-hints"
-
-    gar_init_workdir
 
     gar_section_begin "Homebrew"
     check_mac_homebrew
 
     gar_section_begin "Secrets"
-    check_mac_secrets
+    check_mac_secrets "$secrets_manifest"
 
     gar_section_begin "Environment"
-    check_mac_env
+    check_mac_env "$env_manifest"
 
     gar_section_begin "Java"
     check_mac_java
@@ -1539,10 +1648,10 @@ run_mac_checks() {
     check_mac_perl_modules
 
     gar_section_begin "Applications"
-    check_mac_apps
+    check_mac_apps "$apps_manifest"
 
     gar_section_begin "Login items"
-    check_mac_login_items
+    check_mac_login_items "$login_manifest"
 
     gar_section_begin "Browser extensions"
     check_mac_browser_extensions
@@ -1567,14 +1676,12 @@ check_wsl_mount() {
 
 run_wsl_checks() {
     local repos_manifest skip_manifest commands_manifest env_manifest git_config_manifest hints_file
-    repos_manifest=$(gar_resolve_manifest wsl machine-env-repos)
+    repos_manifest=$(gar_combined_capability_manifest wsl machine-env-repos)
     skip_manifest=$(gar_resolve_manifest wsl machine-env-skip)
     commands_manifest=$(gar_resolve_manifest wsl commands)
-    env_manifest=$(gar_resolve_manifest wsl env)
+    env_manifest=$(gar_combined_capability_manifest wsl env)
     git_config_manifest=$(gar_resolve_manifest wsl git-config)
     hints_file=$(gar_hints_file)
-
-    gar_init_workdir
 
     gar_section_begin "Environment"
     if [[ -n "$env_manifest" ]]; then
@@ -1596,13 +1703,11 @@ run_wsl_checks() {
 
 run_synology_checks() {
     local repos_manifest skip_manifest commands_manifest git_config_manifest hints_file
-    repos_manifest=$(gar_resolve_manifest synology machine-env-repos)
+    repos_manifest=$(gar_combined_capability_manifest synology machine-env-repos)
     skip_manifest=$(gar_resolve_manifest synology machine-env-skip)
     commands_manifest=$(gar_resolve_manifest synology commands)
     git_config_manifest=$(gar_resolve_manifest synology git-config)
     hints_file="$GAR_DIR/synology.install-hints"
-
-    gar_init_workdir
 
     gar_section_begin "Commands"
     check_commands "$commands_manifest" "$hints_file"
@@ -1648,7 +1753,11 @@ main() {
     done
 
     platform=$(detect_platform)
-    printf 'gar: platform %s\n' "$platform"
+    detect_roles
+    printf 'gar: platform %s; roles %s\n' "$platform" "$(gar_format_roles)"
+    gar_warn_unknown_roles
+
+    gar_init_workdir
 
     case "$platform" in
         mac)

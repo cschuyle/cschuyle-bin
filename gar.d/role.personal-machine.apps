@@ -1,0 +1,16 @@
+# Personal machine: apps installed outside Homebrew (App Store or vendor site).
+# Format: display name|path
+Opera|/Applications/Opera.app
+Waterfox|/Applications/Waterfox.app
+WhatsApp|/Applications/WhatsApp.app
+ProtonVPN|/Applications/ProtonVPN.app
+qBittorrent|/Applications/qbittorrent.app
+Spotify|/Applications/Spotify.app
+VLC|/Applications/VLC.app
+HandBrake|/Applications/HandBrake.app
+Kindle|/Applications/Amazon Kindle.app
+Karakeep|/Applications/Karakeep.app
+Ground News|/Applications/Ground News.app
+Amphetamine|/Applications/Amphetamine.app
+Mondly Languages|/Applications/Mondly Languages.app
+Telegram|/Applications/Telegram.app

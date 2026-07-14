@@ -1,26 +1,13 @@
 # Apps installed outside Homebrew (App Store or vendor site).
 # Format: display name|path
-Opera|/Applications/Opera.app
-Waterfox|/Applications/Waterfox.app
+# Role overlays add more (e.g. role.personal-machine.apps).
 Cursor|/Applications/Cursor.app
-WhatsApp|/Applications/WhatsApp.app
 1Password|/Applications/1Password.app
 ChatGPT|/Applications/ChatGPT.app
 Roam Research|/Applications/Roam Research.app
 iTerm|/Applications/iTerm.app
-ProtonVPN|/Applications/ProtonVPN.app
 Flycut|/Applications/Flycut.app
 Rectangle|/Applications/Rectangle.app
 Docker|/Applications/Docker.app
-qBittorrent|/Applications/qbittorrent.app
 VS Code|/Applications/Visual Studio Code.app
 Zoom|/Applications/zoom.us.app
-Spotify|/Applications/Spotify.app
-VLC|/Applications/VLC.app
-HandBrake|/Applications/HandBrake.app
-Kindle|/Applications/Amazon Kindle.app
-Karakeep|/Applications/Karakeep.app
-Ground News|/Applications/Ground News.app
-Amphetamine|/Applications/Amphetamine.app
-Mondly Languages|/Applications/Mondly Languages.app
-Telegram|/Applications/Telegram.app
