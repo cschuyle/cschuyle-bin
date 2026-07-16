@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """
+DEPRECATED: the video workflow now lives in `vids-handle`. This reporting tool
+is kept for now but will be removed.
+
 Report file lists by category for Download / HandBrake workflows.
 
 Categories:
@@ -195,6 +198,10 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: List[str] | None = None) -> int:
+    print(
+        "WARNING: datani-stats is DEPRECATED; the video workflow now lives in 'vids-handle'.",
+        file=sys.stderr,
+    )
     args = parse_args(argv)
     download_root: Path = args.download
     handbreak: Path = args.handbreak

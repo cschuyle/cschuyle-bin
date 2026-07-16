@@ -4,6 +4,10 @@ set -o pipefail
 script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 script_file=$(basename "$0")
 
+# DEPRECATED: superseded by `vids-handle`, which covers status/split as part of
+# the full pipeline. Still works for now; will be removed.
+echo "WARNING: vids is DEPRECATED; use 'vids-handle' instead." >&2
+
 # Exit codes: 
 # 100 - clean, but not split
 # else - dirty or doesn't exist
@@ -132,6 +136,8 @@ case "$1" in
     split) "$@"; exit;;
     -h|--help)
       cat <<EOF
+DEPRECATED: use 'vids-handle' instead (it covers status/split in the full pipeline).
+
 Usage: $script_file status DIR
        $script_file split FROM_DIR MP4_DEST [ORIGINALS_DEST]
 

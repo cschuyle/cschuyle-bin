@@ -1,0 +1,404 @@
+#!/usr/bin/env bash
+set -o errexit
+set -o nounset
+set -o pipefail
+
+prog="$(basename "$0")"
+script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# ---------------------------------------------------------------------------
+# Config (env-driven; no hardcoded paths beyond datani-stats' own defaults).
+# ---------------------------------------------------------------------------
+DOWNLOAD_ROOT="${DATANI_DOWNLOAD:-/volume1/cschuyle/Noncloud-Data/Downloads/_Torrents}"
+HANDBREAK_ROOT="${DATANI_HANDBREAK:-/volume1/cschuyle/Noncloud-Data/video/_Handbreakme}"
+MOVIES_ROOT="${DRAGNON_MOVIES:-}"
+SERIES_ROOT="${DRAGNON_SERIES:-}"
+# dir-fission reads DIR_FISSION_DEST_DIR itself; we only sanity-check it.
+
+dry_run=0
+assume_yes=0
+warn_network=1
+
+usage() {
+  cat >&2 <<EOF
+Usage: $prog [--dry-run|-n] [--yes|-y] [item ...]
+
+Interactive orchestrator that walks video folders through the pipeline:
+  download-check -> HANDBRAKEME -> encode -> equivalence -> fission -> shelve
+
+With no item arguments, scans the top-level directories of DOWNLOAD and
+HANDBREAK roots. Each item is advanced as far as it can go in one pass,
+prompting before every move/encode/fission. Nothing is overwritten silently.
+
+Options:
+  -n, --dry-run   Show the next planned action per item; execute nothing.
+  -y, --yes       Auto-confirm every action (non-interactive).
+      --no-warn   Do not warn when a root is on a network filesystem.
+  -h, --help      This help.
+
+Roots may be local or on a network mount; everything works either way, but the
+underlying scripts run better on local drives, so $prog warns (non-fatally)
+when a configured root lives on a network filesystem. Silence with --no-warn.
+
+Stages (existing scripts do the real work):
+  qb partials present ............ downloading; skip
+  finished, directly in DOWNLOAD . SORT into _MP4 (pure mp4/m4v) or _DONE
+                                   (has non-mp4) -- mirrors qb-is-done
+  mp4/m4v only ................... ready to shelve
+  mixed (mp4 + non-mp4) .......... split now (no transcode): equivalence-gated
+                                   dir-fission, then shelve
+  non-mp4 only ................... move into HANDBRAKE root (HANDBRAKEME)
+  in HANDBRAKE root, no mp4 yet .. better-handbrake.sh <item>   (long-running)
+  dg-whatis -e = verified ........ dir-fission <item> (park originals), then shelve
+  dg-whatis -e = not equivalent .. warn; do not fission
+  shelve ......................... dg-whatis -c movie/series; movies via
+                                   vids-rename.pl; mv to \$DRAGNON_MOVIES /
+                                   \$DRAGNON_SERIES. If the destination exists,
+                                   dg-whatis --diff and prompt which to keep.
+
+Environment:
+  DATANI_DOWNLOAD    DOWNLOAD root   (default: $DOWNLOAD_ROOT)
+  DATANI_HANDBREAK   HANDBRAKE root  (default: $HANDBREAK_ROOT)
+  DRAGNON_MOVIES     Movies shelving root (required to shelve movies)
+  DRAGNON_SERIES     Series shelving root (required to shelve series)
+  DIR_FISSION_DEST_DIR  Where dir-fission parks non-mp4 originals
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Arg parsing
+# ---------------------------------------------------------------------------
+items=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -n|--dry-run) dry_run=1; shift ;;
+    -y|--yes) assume_yes=1; shift ;;
+    --no-warn) warn_network=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; while [[ $# -gt 0 ]]; do items+=("$1"); shift; done ;;
+    -*) echo "$prog: unknown option: $1" >&2; usage; exit 1 ;;
+    *) items+=("$1"); shift ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+say() { printf '%s\n' "$*" >&2; }
+
+cmd_str() { local out='' a; for a in "$@"; do out+=" $(printf '%q' "$a")"; done; printf '%s' "${out# }"; }
+
+# GNU coreutils stat (Linux/Synology/WSL) supports --version; BSD/macOS does not.
+_have_gnu_stat=0
+if stat --version >/dev/null 2>&1; then _have_gnu_stat=1; fi
+
+# Best-effort locality of a path's filesystem: network | local | unknown.
+path_locality() {
+  local p="$1" t src
+  if (( _have_gnu_stat )); then
+    t="$(stat -f -c '%T' "$p" 2>/dev/null || true)"
+    case "$t" in
+      nfs|nfs4|cifs|smb*|afs|9p|ncpfs|fuse.sshfs) echo network; return ;;
+      ?*) echo local; return ;;
+    esac
+  fi
+  # BSD/macOS fallback: classify the df "Filesystem" (source) column.
+  src="$(df "$p" 2>/dev/null | awk 'NR==2{print $1}')"
+  case "$src" in
+    //*|*:/*) echo network; return ;;   # //host/share (SMB) or host:/export (NFS)
+    /dev/*)   echo local;   return ;;
+  esac
+  echo unknown
+}
+
+# Warn (non-fatally) if an existing root is on a network filesystem.
+warn_if_network() {
+  (( warn_network )) || return 0
+  local label="$1" path="$2"
+  [[ -n "$path" && -d "$path" ]] || return 0
+  if [[ "$(path_locality "$path")" == network ]]; then
+    say "WARNING: $label is on a network filesystem (works, but local drives are faster/safer): $path"
+  fi
+}
+
+# confirm: honor --dry-run (never) and --yes (always); else prompt on the tty.
+confirm() {
+  if (( dry_run )); then say "     [dry-run] not executed"; return 1; fi
+  (( assume_yes )) && return 0
+  local ans=''
+  read -r -p "     Proceed? [y/N] " ans </dev/tty || ans=''
+  case "$ans" in [yY]*) return 0 ;; *) say "     skipped"; return 1 ;; esac
+}
+
+# do_action DESC CMD...: show, confirm, run. Returns 0 only if it ran.
+do_action() {
+  local desc="$1"; shift
+  say ">> $desc"
+  say "     \$ $(cmd_str "$@")"
+  confirm || return 1
+  "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Content detection (same predicates as qb-is-done; skip @eaDir/AppleDouble).
+# ---------------------------------------------------------------------------
+has_match() {
+  local dir=$1; shift
+  [[ -n "$(find "$dir" -type f \( "$@" \) 2>/dev/null | grep -v '/._')" ]]
+}
+has_partial() { has_match "$1" -iname '*.!qB' -o -iname '*.part'; }
+has_nonmp4()  { has_match "$1" -iname '*.mkv' -o -iname '*.avi' -o -iname '*.ogm' -o -iname '*.mov' -o -iname '*.webm'; }
+has_mp4()     { has_match "$1" -iname '*.mp4' -o -iname '*.m4v'; }
+has_video()   { has_match "$1" -iname '*.mp4' -o -iname '*.m4v' -o -iname '*.mkv' -o -iname '*.avi' -o -iname '*.ogm' -o -iname '*.mov' -o -iname '*.webm'; }
+
+# equivalence label from dg-whatis -e: verified | N/A | not equivalent
+equivalence_of() {
+  local out
+  out="$("$script_dir/dg-whatis" -e "$1" 2>/dev/null)" || out=''
+  printf '%s' "$out" | head -n1 | cut -f1 | sed 's/[[:space:]]*$//'
+}
+
+# classification via dg-whatis -c (emits the path when it matches)
+classify() {
+  local d="$1"
+  if [[ -n "$("$script_dir/dg-whatis" -c movie "$d" 2>/dev/null || true)" ]]; then
+    echo movie
+  elif [[ -n "$("$script_dir/dg-whatis" -c series "$d" 2>/dev/null || true)" ]]; then
+    echo series
+  else
+    echo other
+  fi
+}
+
+abspath() { local p="${1%/}"; printf '%s/%s' "$(cd "$(dirname "$p")" && pwd)" "$(basename "$p")"; }
+
+sort_into_bucket() { mkdir -p "$1" && mv "$2" "$1/"; }
+
+# ---------------------------------------------------------------------------
+# Shelving
+# ---------------------------------------------------------------------------
+# Normalize the folder name via vids-rename.pl (the folder is the shelving unit;
+# never feed file names, since vids-rename.pl drops the extension). Uses -n to
+# preview the target, then performs the rename through the standard confirm /
+# dry-run machinery. Prints the resulting item path on stdout; UI goes to stderr.
+offer_rename() {
+  local item="$1" kind="$2"
+  local base parent preview newbase
+  base="$(basename "$item")"
+  parent="$(dirname "$item")"
+  preview="$(printf '%s\n' "$base" | "$script_dir/vids-rename.pl" -n || true)"
+  newbase="$(printf '%s\n' "$preview" | sed -n "s/^mv '.*' '\(.*\)'\$/\1/p" | tail -n1)"
+  if [[ -z "$newbase" || "$newbase" == "$base" ]]; then printf '%s' "$item"; return 0; fi
+  if [[ -e "$parent/$newbase" ]]; then
+    say ">> RENAME ($kind): target already exists, skipping: $parent/$newbase"
+    printf '%s' "$item"; return 0
+  fi
+  if do_action "RENAME ($kind): normalize folder name -> $newbase" mv "$parent/$base" "$parent/$newbase"; then
+    printf '%s' "$parent/$newbase"
+  else
+    printf '%s' "$item"
+  fi
+}
+
+resolve_conflict() {
+  local item="$1" dest="$2"
+  if (( dry_run )); then
+    say "     [dry-run] destination exists; would prompt to keep incoming or shelved"
+    return 0
+  fi
+  local ans='k'
+  read -r -p "     Keep [i]ncoming (back up existing) / [s]helved(existing) / s[k]ip: " ans </dev/tty || ans='k'
+  case "$ans" in
+    i|I)
+      local backup="$dest.OLD-$(date +%Y%m%d%H%M%S)"
+      say "     backing up existing -> $backup, then shelving incoming"
+      mv "$dest" "$backup"
+      mv "$item" "$dest"
+      say "     shelved -> $dest"
+      ;;
+    s|S) say "     keeping shelved; incoming left at $item" ;;
+    *)   say "     skipped" ;;
+  esac
+}
+
+shelve_item() {
+  local item="$1"; local base; base="$(basename "$item")"
+  if has_nonmp4 "$item"; then
+    say "  not clean (non-mp4 present); cannot shelve $item"
+    return 0
+  fi
+  local kind; kind="$(classify "$item")"
+  local root=''
+  case "$kind" in
+    movie)  root="$MOVIES_ROOT" ;;
+    series) root="$SERIES_ROOT" ;;
+    *) say "  classification=$kind (not movie/series); leaving in place: $item"; return 0 ;;
+  esac
+  if [[ -z "$root" ]]; then
+    say "  ERROR: shelving root not set for kind=$kind (set DRAGNON_MOVIES/DRAGNON_SERIES)"
+    return 0
+  fi
+  if [[ ! -d "$root" ]]; then
+    say "  ERROR: shelving root does not exist: $root"
+    return 0
+  fi
+
+  item="$(offer_rename "$item" "$kind")"
+  base="$(basename "$item")"
+
+  local dest="$root/$base"
+  if [[ -e "$dest" ]]; then
+    say "  destination already exists: $dest"
+    say "  --- dg-whatis --diff (incoming vs shelved) ---"
+    "$script_dir/dg-whatis" --diff "$item" "$root" >&2 || true
+    resolve_conflict "$item" "$dest"
+    return 0
+  fi
+  do_action "SHELVE ($kind): move into $root" mv "$item" "$root/" || return 0
+  say "  shelved -> $dest"
+}
+
+# Equivalence-gated split: only when dg-whatis confirms the mp4 matches the
+# originals do we park the non-mp4 files (dir-fission) and then shelve. Used
+# both after a HandBrake encode and for folders that arrive already "mixed"
+# (mp4 alongside mkv/avi/ogm/...). Assumes the folder still has non-mp4 files.
+fission_and_shelve() {
+  local item="$1" eq
+  eq="$(equivalence_of "$item")"
+  case "$eq" in
+    verified) ;;
+    "not equivalent")
+      say "  mp4 and originals are NOT equivalent; not fissioning. Inspect/re-encode."
+      return 0 ;;
+    *)
+      say "  equivalence=$eq (need an mp4 alongside the originals to split); skipping."
+      return 0 ;;
+  esac
+  if [[ -z "${DIR_FISSION_DEST_DIR:-}" ]]; then
+    say "  equivalence verified, but DIR_FISSION_DEST_DIR is not set; cannot fission."
+    return 0
+  fi
+  do_action "FISSION: park non-mp4 originals (dir-fission)" "$script_dir/dir-fission" "$item" || return 0
+  shelve_item "$item"
+}
+
+# ---------------------------------------------------------------------------
+# Per-item state machine
+# ---------------------------------------------------------------------------
+handle_item() {
+  local item="$1"
+  item="${item%/}"
+  [[ -d "$item" ]] || { say "skip (not a directory): $item"; return 0; }
+  item="$(abspath "$item")"
+  local base; base="$(basename "$item")"
+
+  case "$base" in
+    @eaDir|temp|_DONE|_MP4|_MIXED|TRASHCAN|KRACK|_Originals)
+      return 0 ;;
+  esac
+
+  say "== $item"
+
+  if has_partial "$item"; then
+    say "  downloading (partial .!qB/.part present); skipping"
+    return 0
+  fi
+  if ! has_video "$item"; then
+    say "  no video files; skipping"
+    return 0
+  fi
+
+  # SORT: a finished folder sitting directly in the DOWNLOAD root is first
+  # bucketed into _MP4 (pure mp4/m4v) or _DONE (anything with non-mp4, incl.
+  # mixed) -- mirrors qb-is-done. Downstream stages then run from the bucket.
+  local abs_dl=''
+  if [[ -d "$DOWNLOAD_ROOT" ]]; then abs_dl="$(cd "$DOWNLOAD_ROOT" && pwd)"; fi
+  if [[ -n "$abs_dl" && "$(dirname "$item")" == "$abs_dl" ]]; then
+    local bucket bucket_dir bdest
+    if has_mp4 "$item" && ! has_nonmp4 "$item"; then bucket="_MP4"; else bucket="_DONE"; fi
+    bucket_dir="$abs_dl/$bucket"
+    bdest="$bucket_dir/$base"
+    if [[ -e "$bdest" ]]; then
+      say "  cannot sort into $bucket: already exists: $bdest"
+      return 0
+    fi
+    do_action "SORT: move into $bucket" sort_into_bucket "$bucket_dir" "$item" || return 0
+    item="$bdest"
+  fi
+
+  local abs_hb=''
+  if [[ -d "$HANDBREAK_ROOT" ]]; then abs_hb="$(cd "$HANDBREAK_ROOT" && pwd)"; fi
+  local in_handbreak=0
+  if [[ -n "$abs_hb" && "$item" == "$abs_hb"/* ]]; then in_handbreak=1; fi
+
+  # STAGE 1: outside the handbrake root ---------------------------------------
+  if (( ! in_handbreak )); then
+    if has_nonmp4 "$item"; then
+      if has_mp4 "$item"; then
+        # Mixed: an mp4 already sits alongside the originals, so there is nothing
+        # to transcode -> split (equivalence-gated) then shelve.
+        fission_and_shelve "$item"
+        return 0
+      fi
+      # Non-mp4 only -> needs transcoding: move into the HANDBRAKE root.
+      if [[ -z "$abs_hb" ]]; then
+        say "  needs transcoding but HANDBRAKE root missing: $HANDBREAK_ROOT"
+        return 0
+      fi
+      local dest="$abs_hb/$base"
+      if [[ -e "$dest" ]]; then
+        say "  cannot move to HANDBRAKEME: already exists: $dest"
+        return 0
+      fi
+      do_action "HANDBRAKEME: move into $abs_hb" mv "$item" "$abs_hb/" || return 0
+      item="$dest"; in_handbreak=1
+    else
+      shelve_item "$item"
+      return 0
+    fi
+  fi
+
+  # STAGE 2: inside the handbrake root ----------------------------------------
+  if ! has_nonmp4 "$item"; then
+    shelve_item "$item"
+    return 0
+  fi
+  if has_mp4 "$item"; then
+    # mp4 present alongside originals (encode done, or arrived mixed) -> split.
+    fission_and_shelve "$item"
+    return 0
+  fi
+  # Only originals, no mp4 yet -> encode, then split.
+  do_action "ENCODE: better-handbrake.sh (long-running)" "$script_dir/better-handbrake.sh" "$item" || return 0
+  fission_and_shelve "$item"
+}
+
+# ---------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------
+warn_if_network "DOWNLOAD root" "$DOWNLOAD_ROOT"
+warn_if_network "HANDBRAKE root" "$HANDBREAK_ROOT"
+warn_if_network "DRAGNON_MOVIES root" "$MOVIES_ROOT"
+warn_if_network "DRAGNON_SERIES root" "$SERIES_ROOT"
+warn_if_network "DIR_FISSION_DEST_DIR" "${DIR_FISSION_DEST_DIR:-}"
+
+if (( ${#items[@]} == 0 )); then
+  shopt -s nullglob
+  for d in "$DOWNLOAD_ROOT"/*/ \
+           "$DOWNLOAD_ROOT"/_MP4/*/ \
+           "$DOWNLOAD_ROOT"/_DONE/*/ \
+           "$HANDBREAK_ROOT"/*/; do
+    items+=("$d")
+  done
+  shopt -u nullglob
+  if (( ${#items[@]} == 0 )); then
+    say "$prog: no items given and nothing found under:"
+    say "  DOWNLOAD:  $DOWNLOAD_ROOT"
+    say "  HANDBRAKE: $HANDBREAK_ROOT"
+    exit 0
+  fi
+fi
+
+for it in "${items[@]}"; do
+  handle_item "$it"
+done

@@ -26,7 +26,7 @@ Read lines from stdin; print each line with the first whitespace-separated field
 
 ### datani-stats
 
-List torrent/HandBrake workflow files by category (downloading, downloaded, to-be-transcoded, transcoding), sorted by size. Roots default to Synology Download and HandBrake paths; override with flags or `DATANI_*` env vars.
+**Deprecated** (superseded by the `vids-handle` workflow; still runs, prints a warning). List torrent/HandBrake workflow files by category (downloading, downloaded, to-be-transcoded, transcoding), sorted by size. Roots default to Synology Download and HandBrake paths; override with flags or `DATANI_*` env vars.
 
 ### ddf
 
@@ -90,7 +90,7 @@ Copy each path listed in a file (one per line) into a target directory. Paths ma
 
 ### qb-is-done
 
-For finished qBittorrent folders, print `mkdir`/`mv` commands to sort into `_MP4` or `_DONE` by video type.
+**Deprecated** (superseded by `vids-handle`'s SORT step; still runs, prints a warning). For finished qBittorrent folders, print `mkdir`/`mv` commands to sort into `_MP4` or `_DONE` by video type.
 
 ### qb-is-mixed
 
@@ -142,7 +142,11 @@ Report video files as JSON: size, duration, resolution, codec, and audio/subtitl
 
 ### vids
 
-`status` checks whether a torrent video folder is downloaded and ready (no partials; MP4 present; no unsplit MKV/AVI/OGM); `split` moves the folder and parks non-MP4 originals under `_Originals`.
+**Deprecated** (superseded by `vids-handle`; still runs, prints a warning). `status` checks whether a torrent video folder is downloaded and ready (no partials; MP4 present; no unsplit MKV/AVI/OGM); `split` moves the folder and parks non-MP4 originals under `_Originals`.
+
+### vids-handle
+
+Interactive orchestrator that walks video folders through the full pipeline by calling the existing tools: download-check (`qb-is-done` predicates) to SORT (a finished folder sitting directly in the DOWNLOAD root is bucketed into `_MP4` for pure mp4/m4v or `_DONE` for anything with non-mp4, mirroring `qb-is-done`) to HANDBRAKEME (move into the HandBrake root) to encode (`better-handbrake.sh`) to equivalence check (`dg-whatis -e`) to `dir-fission` (park non-mp4 originals) to shelving. A "mixed" folder (an mp4/m4v already present alongside mkv/avi/ogm/mov/webm) needs no transcode: it goes straight to the equivalence-gated `dir-fission` split and then shelving, same as the post-encode state. Shelving classifies with `dg-whatis -c`; movies are folder-normalized via `vids-rename.pl`; then the folder is moved to `$DRAGNON_MOVIES` / `$DRAGNON_SERIES`. Each item is advanced as far as it can go in one pass, prompting before every move/encode/fission; nothing is overwritten silently (when a shelving destination already exists it runs `dg-whatis --diff` and asks whether to keep the incoming or the shelved copy). `--dry-run`/`-n` shows the next planned action per item without executing; `--yes`/`-y` auto-confirms. With no arguments, scans the top-level directories of the DOWNLOAD and HANDBRAKE roots. Every root works whether local or on a network mount, but the underlying scripts run better on local drives, so it warns (non-fatally) when a configured root is on a network filesystem (detected via GNU `stat` on Synology/WSL, `df` source on macOS); silence with `--no-warn`. Roots are env-configurable: `DATANI_DOWNLOAD`, `DATANI_HANDBREAK` (shared with `datani-stats`), `DRAGNON_MOVIES`, `DRAGNON_SERIES`, and `DIR_FISSION_DEST_DIR` (for `dir-fission`).
 
 ### vids-lint
 
@@ -154,4 +158,4 @@ Read video filenames from stdin; print `mkdir`/`mv` commands to group files by y
 
 ### vids-rename.pl
 
-Read video filenames from stdin; print `mv` commands to normalize names (strip resolution, tidy years).
+Normalize video/folder names (strip resolution, tidy years). Names come from positional arguments or, when none are given, from stdin (one per line). By default it executes the renames (`mv`/`rename`) in the current directory, printing each `renamed: 'old' -> 'new'`; a rename is skipped when the source is missing or the target already exists. Use `-n`/`--dry-run` to only print the `mv` commands instead of running them.
