@@ -1642,7 +1642,7 @@ run_mac_checks() {
     check_mac_java
 
     gar_section_begin "Commands"
-    check_commands "$GAR_DIR/mac.commands" "$hints_file"
+    check_commands "$(gar_combined_capability_manifest mac commands)" "$hints_file"
 
     gar_section_begin "Perl modules"
     check_mac_perl_modules
@@ -1678,7 +1678,7 @@ run_wsl_checks() {
     local repos_manifest skip_manifest commands_manifest env_manifest git_config_manifest hints_file
     repos_manifest=$(gar_combined_capability_manifest wsl machine-env-repos)
     skip_manifest=$(gar_resolve_manifest wsl machine-env-skip)
-    commands_manifest=$(gar_resolve_manifest wsl commands)
+    commands_manifest=$(gar_combined_capability_manifest wsl commands)
     env_manifest=$(gar_combined_capability_manifest wsl env)
     git_config_manifest=$(gar_resolve_manifest wsl git-config)
     hints_file=$(gar_hints_file)
@@ -1705,7 +1705,7 @@ run_synology_checks() {
     local repos_manifest skip_manifest commands_manifest git_config_manifest hints_file
     repos_manifest=$(gar_combined_capability_manifest synology machine-env-repos)
     skip_manifest=$(gar_resolve_manifest synology machine-env-skip)
-    commands_manifest=$(gar_resolve_manifest synology commands)
+    commands_manifest=$(gar_combined_capability_manifest synology commands)
     git_config_manifest=$(gar_resolve_manifest synology git-config)
     hints_file="$GAR_DIR/synology.install-hints"
 

@@ -1,0 +1,3 @@
+# Commands added by the personal-machine role.
+# HandBrakeCLI belongs with the HandBrake GUI app (role.personal-machine.apps).
+HandBrakeCLI
