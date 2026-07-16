@@ -32,6 +32,28 @@ is_a_dest_dir() {
   return 1
 }
 
+# Shell-quote a string for safe pasting:
+#   • only safe chars       -> no quoting
+#   • no '                  -> wrap in single quotes
+#   • has ' but no "        -> wrap in double quotes
+#   • has both ' and "      -> wrap in double quotes, backslash-escaping " (and \ $ `)
+shquote() {
+  local s=$1
+  if [[ -n "$s" && "$s" =~ ^[A-Za-z0-9._/+=:@%,-]+$ ]]; then
+    printf '%s' "$s"
+  elif [[ "$s" != *\'* ]]; then
+    printf "'%s'" "$s"
+  elif [[ "$s" != *\"* ]]; then
+    printf '"%s"' "$s"
+  else
+    s=${s//\\/\\\\}
+    s=${s//\$/\\\$}
+    s=${s//\`/\\\`}
+    s=${s//\"/\\\"}
+    printf '"%s"' "$s"
+  fi
+}
+
 # True if find prints any path (excluding Synology AppleDouble).
 has_match() {
   local dir=$1
@@ -82,13 +104,13 @@ done
 if ((${#mp4_list[@]} > 0)); then
   echo "mkdir -p '$MP4_DIR'"
   for d in "${mp4_list[@]}"; do
-    printf "[[ -d '%s' ]] && mv '%s' '%s'\n" "$MP4_DIR" "$d" "$MP4_DIR"
+    printf "[[ -d '%s' ]] && mv %s '%s'\n" "$MP4_DIR" "$(shquote "$d")" "$MP4_DIR"
   done
 fi
 
 if ((${#done_list[@]} > 0)); then
   echo "mkdir -p '$DONE_DIR'"
   for d in "${done_list[@]}"; do
-    printf "[[ -d '%s' ]] && mv '%s' '%s'\n" "$DONE_DIR" "$d" "$DONE_DIR"
+    printf "[[ -d '%s' ]] && mv %s '%s'\n" "$DONE_DIR" "$(shquote "$d")" "$DONE_DIR"
   done
 fi
