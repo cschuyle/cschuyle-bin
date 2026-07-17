@@ -34,12 +34,12 @@ mvn|brew install maven
 maven|brew install maven
 user.name|git config --global user.name "Your Name"
 user.email|git config --global user.email "you@example.com"
-1Password Nightly|Install in Opera from https://chromewebstore.google.com/detail/1password-nightly-%E2%80%93-passw/gejiddohjgogedgjnonbofjigllpkmbf
-Go to Playing Tab|Opera: https://chromewebstore.google.com/detail/go-to-playing-tab/hmbhamadknmmkapmhbldodoajkcggcml — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/go-to-playing-tab-2/
-JSON Formatter|Opera: https://chromewebstore.google.com/detail/json-formatter/bcjindcccaagfpapjjmafapmmgkkhgoa — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/json_formatter/
-Roam Highlighter|Install in Opera from https://chromewebstore.google.com/detail/roam-highlighter/hponfflfgcjikmehlcdcnpapicnljkkc
-React Developer Tools|Opera: https://chromewebstore.google.com/detail/react-developer-tools/fmkadmapgofadopljbjfkapdkoienihi — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/react-devtools/
-Pinboard Plus|Install in Opera from https://chromewebstore.google.com/detail/pinboard-plus/mphdppdgoagghpmmhodmfajjlloijnbd
+1Password Nightly|Install in Chrome or Opera from https://chromewebstore.google.com/detail/1password-nightly-%E2%80%93-passw/gejiddohjgogedgjnonbofjigllpkmbf
+Go to Playing Tab|Chrome/Opera: https://chromewebstore.google.com/detail/go-to-playing-tab/hmbhamadknmmkapmhbldodoajkcggcml — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/go-to-playing-tab-2/
+JSON Formatter|Chrome/Opera: https://chromewebstore.google.com/detail/json-formatter/bcjindcccaagfpapjjmafapmmgkkhgoa — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/json_formatter/
+Roam Highlighter|Install in Chrome or Opera from https://chromewebstore.google.com/detail/roam-highlighter/hponfflfgcjikmehlcdcnpapicnljkkc
+React Developer Tools|Chrome/Opera: https://chromewebstore.google.com/detail/react-developer-tools/fmkadmapgofadopljbjfkapdkoienihi — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/react-devtools/
+Pinboard Plus|Install in Chrome or Opera from https://chromewebstore.google.com/detail/pinboard-plus/mphdppdgoagghpmmhodmfajjlloijnbd
 Karakeep|App: Mac App Store; extension — Opera: https://chromewebstore.google.com/detail/karakeep/kgcjekpmcjjogibpjebkhaanilehneje — Waterfox: https://addons.mozilla.org/en-US/firefox/addon/karakeep/
 1Password|Install in Waterfox from https://addons.mozilla.org/en-US/firefox/addon/1password-x-password-manager/
 Link Text and Location Copier|Install in Waterfox from https://addons.mozilla.org/en-US/firefox/addon/link-text-and-location-copier/

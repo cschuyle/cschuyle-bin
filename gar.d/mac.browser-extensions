@@ -1,7 +1,13 @@
 # Expected browser extensions. Format: browser|extension-id|display name
-# browser is opera or waterfox. IDs from Chrome Web Store / AMO.
+# browser is chrome, opera, or waterfox. IDs from Chrome Web Store / AMO.
 #
-# Chromium (Opera) — see mac-setup/scripts/opt-in/cschuyle.sh
+# Chromium (Chrome / Opera) — see mac-setup/scripts/opt-in/cschuyle.sh
+chrome|gejiddohjgogedgjnonbofjigllpkmbf|1Password Nightly
+chrome|hmbhamadknmmkapmhbldodoajkcggcml|Go to Playing Tab
+chrome|bcjindcccaagfpapjjmafapmmgkkhgoa|JSON Formatter
+chrome|hponfflfgcjikmehlcdcnpapicnljkkc|Roam Highlighter
+chrome|fmkadmapgofadopljbjfkapdkoienihi|React Developer Tools
+chrome|mphdppdgoagghpmmhodmfajjlloijnbd|Pinboard Plus
 opera|gejiddohjgogedgjnonbofjigllpkmbf|1Password Nightly
 opera|hmbhamadknmmkapmhbldodoajkcggcml|Go to Playing Tab
 opera|bcjindcccaagfpapjjmafapmmgkkhgoa|JSON Formatter

@@ -1488,6 +1488,7 @@ check_mac_login_items() {
 
 mac_browser_app_path() {
     case "$1" in
+        chrome) printf '%s\n' "/Applications/Google Chrome.app" ;;
         opera) printf '%s\n' /Applications/Opera.app ;;
         waterfox) printf '%s\n' /Applications/Waterfox.app ;;
     esac
@@ -1546,6 +1547,11 @@ PY
 mac_browser_extension_installed() {
     local browser="$1" ext_id="$2"
     case "$browser" in
+        chrome)
+            mac_chromium_extension_installed \
+                "$HOME/Library/Application Support/Google/Chrome" \
+                "$ext_id"
+            ;;
         opera)
             mac_chromium_extension_installed \
                 "$HOME/Library/Application Support/com.operasoftware.Opera" \
@@ -1563,7 +1569,7 @@ mac_browser_extension_installed() {
 }
 
 check_mac_browser_extensions() {
-    local entry browser ext_id label app_path i=0 status
+    local entry browser ext_id label app_path i=0 status hint
     local browsers=() ext_ids=() labels=()
     mkdir -p "$gar_tmpdir/extensions"
     while IFS='|' read -r browser ext_id label; do
@@ -1613,7 +1619,12 @@ check_mac_browser_extensions() {
                 report_ok "Extension $browser/$label"
                 ;;
             miss)
-                report_miss "Extension $browser/$label ($ext_id)"
+                hint=$(lookup_install_hint "$label" 2>/dev/null || true)
+                if [[ -n "$hint" ]]; then
+                    report_miss "Extension $browser/$label ($hint)"
+                else
+                    report_miss "Extension $browser/$label ($ext_id)"
+                fi
                 ;;
         esac
     done
