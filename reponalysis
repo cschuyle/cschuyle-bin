@@ -1,1 +1,1258 @@
-/Users/cschuyler/workspace/_SCRIPTS/reponalysis
+#!/usr/bin/env python3
+"""Scan GitLab member repos for stats; persist under .gitlab-repo-stats.
+
+Uses the GitLab API via `glab` (no local clones). One repo at a time with a
+delay peaked near 4.5s on [2, 19] (truncated normal with an inflated right
+tail). Repos are processed most-stale first. A full rescan is skipped when the
+tip is unchanged and last_scan_at is less than 7 days old.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import quote
+
+DEFAULT_HOST = "gitlab.natera.com"
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_STATS_DIR = SCRIPT_DIR / ".gitlab-repo-stats"
+DEFAULT_TEAM_FILE = Path("team.txt")
+PER_PAGE = 100
+SLEEP_MIN = 2.0
+SLEEP_MAX = 19.0
+SLEEP_MU = 4.5
+SLEEP_SIGMA = 3.5
+# Stretch excess above the mode so the right tail gets relatively more hits
+# than a symmetric normal (then re-truncated to [SLEEP_MIN, SLEEP_MAX]).
+SLEEP_RIGHT_TAIL_INFLATE = 1.8
+SKIP_MAX_AGE = timedelta(days=7)
+COMMITS_LOOKBACK = timedelta(days=183)
+# --group clustering: ignore committers on > this fraction of repos, merge
+# clusters while average-linkage Jaccard of committer sets stays >= threshold,
+# and treat a committer as identifying a cluster when they appear on >= this
+# fraction of the cluster's repos.
+GROUP_UBIQUITY_FRAC = 0.5
+GROUP_MERGE_JACCARD = 0.3
+GROUP_IDENTITY_FRAC = 0.5
+
+
+def die(msg: str, code: int = 2) -> None:
+    print(msg, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_iso() -> str:
+    return now_utc().replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def monday_utc(dt: datetime) -> datetime:
+    dt = dt.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    return dt - timedelta(days=dt.weekday())
+
+
+def file_extension(name: str) -> str:
+    base = name.rsplit("/", 1)[-1]
+    if "." not in base:
+        return ""
+    return "." + base.rsplit(".", 1)[-1].lower()
+
+
+def glab_env(host: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env["GITLAB_HOST"] = host
+    env["GLAB_SEND_TELEMETRY"] = "false"
+    return env
+
+
+def glab_api(host: str, path: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["glab", "api", path],
+            capture_output=True,
+            text=True,
+            env=glab_env(host),
+        )
+    except FileNotFoundError:
+        die("glab not found on PATH; install it first")
+
+
+def require_glab(host: str) -> None:
+    result = glab_api(host, "user")
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "glab api user failed").strip()
+        die(
+            f"{err}\n\n"
+            f"Authenticate with:\n"
+            f"  glab auth login --hostname {host}"
+        )
+
+
+def parse_json(text: str, context: str):
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"failed to parse JSON for {context}: {exc}\n{text[:500]}") from exc
+
+
+def parse_json_list(text: str, context: str) -> list:
+    data = parse_json(text, context)
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise RuntimeError(f"unexpected JSON for {context} (expected list): {type(data).__name__}")
+    return data
+
+
+def parse_json_object(text: str, context: str) -> dict:
+    data = parse_json(text, context)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"unexpected JSON for {context} (expected object): {type(data).__name__}")
+    return data
+
+
+def encoded_project(path_with_namespace: str) -> str:
+    return quote(path_with_namespace, safe="")
+
+
+def paginated_list(host: str, path_prefix: str, context: str) -> list:
+    """Fetch all pages for a path that already includes query params (or not)."""
+    items: list = []
+    page = 1
+    sep = "&" if "?" in path_prefix else "?"
+    while True:
+        path = f"{path_prefix}{sep}per_page={PER_PAGE}&page={page}"
+        result = glab_api(host, path)
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or f"{context} failed").strip()
+            raise RuntimeError(err)
+        batch = parse_json_list(result.stdout, f"{context} page {page}")
+        if not batch:
+            break
+        items.extend(batch)
+        if len(batch) < PER_PAGE:
+            break
+        page += 1
+    return items
+
+
+def list_member_repos(host: str) -> list[dict]:
+    repos: list[dict] = []
+    page = 1
+    while True:
+        result = subprocess.run(
+            [
+                "glab",
+                "repo",
+                "list",
+                "--member",
+                "-F",
+                "json",
+                "-P",
+                str(PER_PAGE),
+                "-p",
+                str(page),
+            ],
+            capture_output=True,
+            text=True,
+            env=glab_env(host),
+        )
+        if result.returncode != 0:
+            die((result.stderr or result.stdout or "glab repo list failed").strip())
+        try:
+            batch = parse_json_list(result.stdout, f"repo list page {page}")
+        except RuntimeError as exc:
+            die(str(exc))
+        if not batch:
+            break
+        repos.extend(batch)
+        if len(batch) < PER_PAGE:
+            break
+        page += 1
+    return repos
+
+
+def latest_commit(host: str, path_with_namespace: str) -> tuple[str | None, str | None]:
+    """Return (committed_date, commit_id) for the newest commit, or (None, None)."""
+    path = f"projects/{encoded_project(path_with_namespace)}/repository/commits?per_page=1"
+    result = glab_api(host, path)
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "commits request failed").strip()
+        raise RuntimeError(err)
+    batch = parse_json_list(result.stdout, f"latest commit {path_with_namespace}")
+    if not batch:
+        return None, None
+    commit = batch[0]
+    when = commit.get("committed_date") or commit.get("created_at")
+    return when, commit.get("id")
+
+
+def list_contributors(host: str, path_with_namespace: str) -> list[dict]:
+    raw_list = paginated_list(
+        host,
+        (
+            f"projects/{encoded_project(path_with_namespace)}/repository/contributors"
+            f"?order_by=commits&sort=desc"
+        ),
+        f"contributors {path_with_namespace}",
+    )
+    contributors = [
+        {
+            "name": raw.get("name") or "",
+            "email": raw.get("email") or "",
+            "commits": int(raw.get("commits") or 0),
+            "additions": int(raw.get("additions") or 0),
+            "deletions": int(raw.get("deletions") or 0),
+        }
+        for raw in raw_list
+    ]
+    contributors.sort(key=lambda c: (-c["commits"], c["name"].lower(), c["email"].lower()))
+    return contributors
+
+
+def project_with_statistics(host: str, path_with_namespace: str) -> dict:
+    path = f"projects/{encoded_project(path_with_namespace)}?statistics=true"
+    result = glab_api(host, path)
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "project statistics failed").strip()
+        raise RuntimeError(err)
+    return parse_json_object(result.stdout, f"project {path_with_namespace}")
+
+
+def file_stats_for_tree(host: str, path_with_namespace: str, ref: str) -> tuple[int, dict[str, int]]:
+    """Return (file_count, files_by_extension) for blobs on ref."""
+    encoded_ref = quote(ref, safe="")
+    entries = paginated_list(
+        host,
+        (
+            f"projects/{encoded_project(path_with_namespace)}/repository/tree"
+            f"?ref={encoded_ref}&recursive=true"
+        ),
+        f"tree {path_with_namespace}",
+    )
+    counts: Counter[str] = Counter()
+    for entry in entries:
+        if entry.get("type") != "blob":
+            continue
+        name = entry.get("name") or Path(entry.get("path") or "").name
+        counts[file_extension(name)] += 1
+    by_ext = dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+    return sum(counts.values()), by_ext
+
+
+def commits_by_week(host: str, path_with_namespace: str, ref: str) -> list[dict]:
+    """Commits on ref over the last ~6 months, bucketed by Monday UTC week start."""
+    end = now_utc()
+    start = end - COMMITS_LOOKBACK
+    since = start.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    encoded_ref = quote(ref, safe="")
+    commits = paginated_list(
+        host,
+        (
+            f"projects/{encoded_project(path_with_namespace)}/repository/commits"
+            f"?ref_name={encoded_ref}&since={quote(since, safe='')}"
+        ),
+        f"commits {path_with_namespace}",
+    )
+
+    first_week = monday_utc(start)
+    last_week = monday_utc(end)
+    buckets: dict[str, int] = {}
+    week = first_week
+    while week <= last_week:
+        buckets[week.date().isoformat()] = 0
+        week += timedelta(days=7)
+
+    for commit in commits:
+        when = parse_iso(commit.get("committed_date") or commit.get("created_at"))
+        if when is None or when < start:
+            continue
+        key = monday_utc(when).date().isoformat()
+        if key in buckets:
+            buckets[key] += 1
+
+    return [{"week_start": k, "commits": buckets[k]} for k in sorted(buckets)]
+
+
+def count_branches(host: str, path_with_namespace: str) -> int:
+    branches = paginated_list(
+        host,
+        f"projects/{encoded_project(path_with_namespace)}/repository/branches",
+        f"branches {path_with_namespace}",
+    )
+    return len(branches)
+
+
+def sleep_delay_seconds() -> float:
+    """Truncated normal peaked at SLEEP_MU, with the right tail inflated.
+
+    Draw x ~ N(μ, σ). Values below the mode are kept as-is; values above the
+    mode are stretched by SLEEP_RIGHT_TAIL_INFLATE so longer waits get more
+    relative weight. Reject draws outside [SLEEP_MIN, SLEEP_MAX].
+    """
+    for _ in range(1000):
+        delay = random.gauss(SLEEP_MU, SLEEP_SIGMA)
+        if delay > SLEEP_MU:
+            delay = SLEEP_MU + (delay - SLEEP_MU) * SLEEP_RIGHT_TAIL_INFLATE
+        if SLEEP_MIN <= delay <= SLEEP_MAX:
+            return delay
+    return min(SLEEP_MAX, max(SLEEP_MIN, SLEEP_MU))
+
+
+def sleep_between_repos() -> None:
+    delay = sleep_delay_seconds()
+    print(f"  sleeping {delay:.1f}s…", file=sys.stderr)
+    time.sleep(delay)
+
+
+def stats_path(stats_dir: Path, path_with_namespace: str) -> Path:
+    return stats_dir / f"{path_with_namespace.replace('/', '__')}.yaml"
+
+
+def yaml_scalar(value) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return json.dumps(str(value))
+
+
+def dump_stats(data: dict) -> str:
+    lines = [
+        f"path_with_namespace: {yaml_scalar(data['path_with_namespace'])}",
+        f"last_scan_at: {yaml_scalar(data.get('last_scan_at'))}",
+        f"latest_commit_at: {yaml_scalar(data.get('latest_commit_at'))}",
+        f"latest_commit_id: {yaml_scalar(data.get('latest_commit_id'))}",
+        f"default_branch: {yaml_scalar(data.get('default_branch'))}",
+        f"file_count: {yaml_scalar(data.get('file_count'))}",
+        f"repository_size_bytes: {yaml_scalar(data.get('repository_size_bytes'))}",
+        f"branch_count: {yaml_scalar(data.get('branch_count'))}",
+        "files_by_extension:",
+    ]
+    by_ext = data.get("files_by_extension") or {}
+    if not by_ext:
+        lines.append("  {}")
+    else:
+        for ext, count in by_ext.items():
+            lines.append(f"  {yaml_scalar(ext)}: {yaml_scalar(int(count))}")
+
+    lines.append("commits_last_6_months_by_week:")
+    weeks = data.get("commits_last_6_months_by_week") or []
+    if not weeks:
+        lines.append("  []")
+    else:
+        for week in weeks:
+            lines.append(f"  - week_start: {yaml_scalar(week.get('week_start'))}")
+            lines.append(f"    commits: {yaml_scalar(int(week.get('commits') or 0))}")
+
+    lines.append("contributors:")
+    contributors = data.get("contributors") or []
+    if not contributors:
+        lines.append("  []")
+    else:
+        for c in contributors:
+            lines.append(f"  - name: {yaml_scalar(c.get('name'))}")
+            lines.append(f"    email: {yaml_scalar(c.get('email'))}")
+            lines.append(f"    commits: {yaml_scalar(int(c.get('commits') or 0))}")
+            lines.append(f"    additions: {yaml_scalar(int(c.get('additions') or 0))}")
+            lines.append(f"    deletions: {yaml_scalar(int(c.get('deletions') or 0))}")
+    return "\n".join(lines) + "\n"
+
+
+def parse_scalar(raw: str):
+    raw = raw.strip()
+    if raw == "null":
+        return None
+    if raw == "true":
+        return True
+    if raw == "false":
+        return False
+    if re.fullmatch(r"-?\d+", raw):
+        return int(raw)
+    if raw.startswith('"') and raw.endswith('"'):
+        return json.loads(raw)
+    return raw
+
+
+def load_stats(path: Path) -> dict | None:
+    """Load a stats YAML file written by dump_stats."""
+    if not path.is_file():
+        return None
+    data: dict = {
+        "path_with_namespace": None,
+        "last_scan_at": None,
+        "latest_commit_at": None,
+        "latest_commit_id": None,
+        "default_branch": None,
+        "file_count": None,
+        "repository_size_bytes": None,
+        "branch_count": None,
+        "files_by_extension": {},
+        "commits_last_6_months_by_week": [],
+        "contributors": [],
+    }
+    contributors: list[dict] = []
+    weeks: list[dict] = []
+    by_ext: dict[str, int] = {}
+    current: dict | None = None
+    section: str | None = None
+
+    def flush_current() -> None:
+        nonlocal current
+        if current is None:
+            return
+        if section == "contributors":
+            contributors.append(current)
+        elif section == "commits_last_6_months_by_week":
+            weeks.append(current)
+        current = None
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+
+        if line in ("contributors:", "commits_last_6_months_by_week:", "files_by_extension:"):
+            flush_current()
+            section = line[:-1]
+            continue
+
+        if section == "files_by_extension":
+            if line.strip() == "{}":
+                continue
+            if line.startswith("  "):
+                key, _, value = line.strip().partition(":")
+                by_ext[str(parse_scalar(key))] = int(parse_scalar(value) or 0)
+            continue
+
+        if section in ("contributors", "commits_last_6_months_by_week"):
+            if line.strip() == "[]":
+                continue
+            if line.startswith("  - "):
+                flush_current()
+                rest = line[4:]
+                key, _, value = rest.partition(":")
+                current = {key.strip(): parse_scalar(value)}
+                continue
+            if current is not None and line.startswith("    "):
+                key, _, value = line.strip().partition(":")
+                current[key.strip()] = parse_scalar(value)
+                continue
+
+        if section is None and ":" in line:
+            key, _, value = line.partition(":")
+            data[key.strip()] = parse_scalar(value)
+
+    flush_current()
+    data["files_by_extension"] = by_ext
+    data["contributors"] = contributors
+    data["commits_last_6_months_by_week"] = weeks
+    return data
+
+
+def write_stats(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = dump_stats(data)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def stale_key(stats: dict | None) -> tuple:
+    """Sort key: never scanned first, then oldest last_scan_at."""
+    if not stats or not stats.get("last_scan_at"):
+        return (0, "")
+    return (1, stats["last_scan_at"])
+
+
+# Present only after a full scan that includes the expanded metrics.
+_REQUIRED_STATS_FIELDS = (
+    "default_branch",
+    "file_count",
+    "repository_size_bytes",
+    "branch_count",
+    "files_by_extension",
+    "commits_last_6_months_by_week",
+    "contributors",
+)
+
+
+def has_complete_stats(existing: dict) -> bool:
+    """True when prior YAML has the full current schema (not a partial older scan)."""
+    for key in _REQUIRED_STATS_FIELDS:
+        if existing.get(key) is None:
+            return False
+    if not isinstance(existing.get("files_by_extension"), dict):
+        return False
+    if not isinstance(existing.get("commits_last_6_months_by_week"), list):
+        return False
+    if not isinstance(existing.get("contributors"), list):
+        return False
+    return True
+
+
+def should_skip_full_scan(existing: dict | None, tip_at: str | None) -> bool:
+    if not existing or not has_complete_stats(existing):
+        return False
+    if existing.get("latest_commit_at") != tip_at:
+        return False
+    last = parse_iso(existing.get("last_scan_at"))
+    if last is None:
+        return False
+    return (now_utc() - last) < SKIP_MAX_AGE
+
+
+def print_scan_plan(enriched: list[tuple[str, dict | None]]) -> None:
+    """Print repos in scan order with last scan date."""
+    print("Scan order (most stale first):", file=sys.stderr)
+    if not enriched:
+        print("  (no repos)", file=sys.stderr)
+        return
+    width = len(str(len(enriched)))
+    for i, (ns, existing) in enumerate(enriched, start=1):
+        last = (existing or {}).get("last_scan_at") or "(never)"
+        print(f"  {i:>{width}}. {last}  {ns}", file=sys.stderr)
+    print(file=sys.stderr)
+
+
+def collect_repo_stats(host: str, path_with_namespace: str) -> dict:
+    project = project_with_statistics(host, path_with_namespace)
+    default_branch = project.get("default_branch") or "main"
+    stats = project.get("statistics") or {}
+    repository_size = stats.get("repository_size")
+    if repository_size is not None:
+        repository_size = int(repository_size)
+
+    file_count, files_by_extension = file_stats_for_tree(host, path_with_namespace, default_branch)
+    weekly = commits_by_week(host, path_with_namespace, default_branch)
+    branch_count = count_branches(host, path_with_namespace)
+    contributors = list_contributors(host, path_with_namespace)
+
+    return {
+        "default_branch": default_branch,
+        "file_count": file_count,
+        "repository_size_bytes": repository_size,
+        "files_by_extension": files_by_extension,
+        "commits_last_6_months_by_week": weekly,
+        "branch_count": branch_count,
+        "contributors": contributors,
+    }
+
+
+def load_all_stats(stats_dir: Path) -> list[dict]:
+    if not stats_dir.is_dir():
+        die(f"stats directory not found: {stats_dir}")
+    rows: list[dict] = []
+    for path in sorted(stats_dir.glob("*.yaml")):
+        data = load_stats(path)
+        if data and data.get("path_with_namespace"):
+            rows.append(data)
+    return rows
+
+
+def contributor_keys(contributor: dict) -> set[str]:
+    """Casefolded name/email tokens used for matching."""
+    keys: set[str] = set()
+    name = (contributor.get("name") or "").strip()
+    email = (contributor.get("email") or "").strip()
+    if name:
+        keys.add(name.casefold())
+    if email:
+        keys.add(email.casefold())
+    return keys
+
+
+def all_known_committer_keys(stats_rows: list[dict]) -> set[str]:
+    known: set[str] = set()
+    for row in stats_rows:
+        for c in row.get("contributors") or []:
+            known |= contributor_keys(c)
+    return known
+
+
+def read_committer_list(path: Path) -> list[str]:
+    if not path.is_file():
+        die(f"committers file not found: {path}")
+    lines: list[str] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        lines.append(line)
+    return lines
+
+
+def report_list_committers(stats_dir: Path) -> None:
+    """Print all committers across stats, merged by email then name, commits desc."""
+    rows = load_all_stats(stats_dir)
+    # key -> {name, email, commits, repos}
+    merged: dict[str, dict] = {}
+    for row in rows:
+        ns = row.get("path_with_namespace") or "?"
+        for c in row.get("contributors") or []:
+            name = (c.get("name") or "").strip()
+            email = (c.get("email") or "").strip()
+            commits = int(c.get("commits") or 0)
+            if email:
+                key = f"email:{email.casefold()}"
+            elif name:
+                key = f"name:{name.casefold()}"
+            else:
+                key = "unknown:"
+            entry = merged.setdefault(
+                key,
+                {"name": name, "email": email, "commits": 0, "repos": set()},
+            )
+            if name and not entry["name"]:
+                entry["name"] = name
+            if email and not entry["email"]:
+                entry["email"] = email
+            entry["commits"] += commits
+            entry["repos"].add(ns)
+
+    ordered = sorted(
+        merged.values(),
+        key=lambda e: (-e["commits"], (e["name"] or "").casefold(), (e["email"] or "").casefold()),
+    )
+    if not ordered:
+        print("(no committers in stats)", file=sys.stderr)
+        return
+    width = max(len(str(e["commits"])) for e in ordered)
+    for e in ordered:
+        label = e["name"] or "(unknown)"
+        if e["email"]:
+            label = f"{label} <{e['email']}>"
+        print(f"{e['commits']:>{width}}  {label}  ({len(e['repos'])} repo(s))")
+
+
+def report_rank_by_committers(stats_dir: Path, committers_file: Path) -> None:
+    """Rank repos by total commits from the given committer list."""
+    wanted = read_committer_list(committers_file)
+    rows = load_all_stats(stats_dir)
+    known = all_known_committer_keys(rows)
+
+    wanted_keys = [w.casefold() for w in wanted]
+    for original, key in zip(wanted, wanted_keys):
+        if key not in known:
+            print(f"WARN: unknown committer: {original}", file=sys.stderr)
+
+    wanted_set = set(wanted_keys)
+    ranked: list[tuple[int, str, list[tuple[int, str]]]] = []
+    for row in rows:
+        ns = row.get("path_with_namespace") or "?"
+        matched: list[tuple[int, str]] = []
+        total = 0
+        for c in row.get("contributors") or []:
+            if not (contributor_keys(c) & wanted_set):
+                continue
+            commits = int(c.get("commits") or 0)
+            total += commits
+            label = (c.get("name") or "").strip() or "(unknown)"
+            email = (c.get("email") or "").strip()
+            if email:
+                label = f"{label} <{email}>"
+            matched.append((commits, label))
+        matched.sort(key=lambda item: (-item[0], item[1].casefold()))
+        ranked.append((total, ns, matched))
+
+    ranked.sort(key=lambda item: (-item[0], item[1].casefold()))
+    if not ranked:
+        print("(no repo stats)", file=sys.stderr)
+        return
+    width = max(len(str(total)) for total, _, _ in ranked)
+    for total, ns, matched in ranked:
+        print(f"{total:>{width}}  {ns}")
+        for commits, label in matched:
+            print(f"{'':>{width}}    {commits}  {label}")
+
+
+def committer_identity(contributor: dict) -> str | None:
+    """Stable id: prefer email, else name (casefolded)."""
+    email = (contributor.get("email") or "").strip()
+    if email:
+        return f"email:{email.casefold()}"
+    name = (contributor.get("name") or "").strip()
+    if name:
+        return f"name:{name.casefold()}"
+    return None
+
+
+def committer_label(contributor: dict) -> str:
+    name = (contributor.get("name") or "").strip() or "(unknown)"
+    email = (contributor.get("email") or "").strip()
+    if email:
+        return f"{name} <{email}>"
+    return name
+
+
+def jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def average_linkage_jaccard(sets_a: list[set[str]], sets_b: list[set[str]]) -> float:
+    if not sets_a or not sets_b:
+        return 0.0
+    total = 0.0
+    n = 0
+    for sa in sets_a:
+        for sb in sets_b:
+            total += jaccard(sa, sb)
+            n += 1
+    return total / n if n else 0.0
+
+
+def cluster_repos_by_committers(
+    rows: list[dict],
+) -> list[tuple[list[str], list[tuple[str, str, int, int]], set[str]]]:
+    """Return [(repos, identifiers, member_idents), ...].
+
+    identifiers: [(ident, label, repos_in_cluster, commits_in_cluster), ...]
+    member_idents: distinctive committer ids used for team matching
+    """
+    n_repos = len(rows)
+    if n_repos == 0:
+        return []
+
+    # identity -> label (richest seen), and repo index -> set of identities
+    labels: dict[str, str] = {}
+    repo_sets: list[set[str]] = []
+    repo_names: list[str] = []
+    # identity -> list of (repo_index, commits)
+    presence: dict[str, list[tuple[int, int]]] = {}
+
+    for idx, row in enumerate(rows):
+        ns = row.get("path_with_namespace") or "?"
+        repo_names.append(ns)
+        identities: set[str] = set()
+        for c in row.get("contributors") or []:
+            ident = committer_identity(c)
+            if ident is None:
+                continue
+            identities.add(ident)
+            label = committer_label(c)
+            prev = labels.get(ident)
+            if prev is None or ("<" in label and "<" not in prev):
+                labels[ident] = label
+            presence.setdefault(ident, []).append((idx, int(c.get("commits") or 0)))
+        repo_sets.append(identities)
+
+    # Drop ubiquitous committers (shared across most repos — weak team signal).
+    if n_repos >= 2:
+        ubiquitous = {
+            ident
+            for ident, posts in presence.items()
+            if len({i for i, _ in posts}) / n_repos > GROUP_UBIQUITY_FRAC
+        }
+    else:
+        ubiquitous = set()
+    filtered_sets = [s - ubiquitous for s in repo_sets]
+
+    # Agglomerative clustering (average-linkage Jaccard).
+    clusters: list[list[int]] = [[i] for i in range(n_repos)]
+    while len(clusters) > 1:
+        best_sim = GROUP_MERGE_JACCARD
+        best_pair: tuple[int, int] | None = None
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                sets_i = [filtered_sets[r] for r in clusters[i]]
+                sets_j = [filtered_sets[r] for r in clusters[j]]
+                sim = average_linkage_jaccard(sets_i, sets_j)
+                if sim >= best_sim - 1e-12:
+                    # Prefer higher similarity; tie-break for stability
+                    if best_pair is None or sim > best_sim + 1e-12:
+                        best_sim = sim
+                        best_pair = (i, j)
+                    elif abs(sim - best_sim) <= 1e-12 and best_pair is not None:
+                        if (i, j) < best_pair:
+                            best_pair = (i, j)
+        if best_pair is None:
+            break
+        i, j = best_pair
+        merged = clusters[i] + clusters[j]
+        clusters = [c for k, c in enumerate(clusters) if k != i and k != j]
+        clusters.append(merged)
+
+    results: list[tuple[list[str], list[tuple[str, str, int, int]], set[str]]] = []
+    for members in clusters:
+        repos = sorted(repo_names[i] for i in members)
+        member_set = set(members)
+        min_repos = max(1, int(len(members) * GROUP_IDENTITY_FRAC + 0.999999))
+        # For singletons, any filtered committer on that repo identifies it.
+        if len(members) == 1:
+            min_repos = 1
+
+        identifiers: list[tuple[str, str, int, int]] = []
+        for ident, posts in presence.items():
+            if ident in ubiquitous:
+                continue
+            in_cluster = [(i, commits) for i, commits in posts if i in member_set]
+            repo_count = len({i for i, _ in in_cluster})
+            if repo_count < min_repos:
+                continue
+            # Must also still be in the filtered set of at least one cluster repo
+            if not any(ident in filtered_sets[i] for i in member_set):
+                continue
+            total_commits = sum(commits for _, commits in in_cluster)
+            identifiers.append(
+                (ident, labels.get(ident, ident), repo_count, total_commits)
+            )
+
+        identifiers.sort(key=lambda t: (-t[2], -t[3], t[1].casefold()))
+        member_idents = {ident for ident, _label, _rc, _tc in identifiers}
+        if not member_idents:
+            for i in members:
+                member_idents |= filtered_sets[i]
+        results.append((repos, identifiers, member_idents))
+
+    results.sort(key=lambda item: (-len(item[0]), item[0][0].casefold() if item[0] else ""))
+    return results
+
+
+def report_group(stats_dir: Path) -> None:
+    """Cluster repos by shared committers (team proxy) and print groups."""
+    rows = load_all_stats(stats_dir)
+    if not rows:
+        print("(no repo stats)", file=sys.stderr)
+        return
+
+    clusters = cluster_repos_by_committers(rows)
+    print(
+        f"Grouped {len(rows)} repo(s) into {len(clusters)} cluster(s) "
+        f"(Jaccard≥{GROUP_MERGE_JACCARD:g}, drop committers on >"
+        f"{GROUP_UBIQUITY_FRAC:.0%} of repos).",
+        file=sys.stderr,
+    )
+
+    for n, (repos, identifiers, _member_idents) in enumerate(clusters, start=1):
+        print(f"Group {n} ({len(repos)} repo(s))")
+        if identifiers:
+            print("  Committers:")
+            for _ident, label, repo_count, commits in identifiers:
+                print(f"    {label}  ({repo_count}/{len(repos)} repos, {commits} commits)")
+        else:
+            print("  Committers: (none distinctive)")
+        print("  Repos:")
+        for ns in repos:
+            print(f"    {ns}")
+        print()
+
+
+def build_committer_index(
+    rows: list[dict],
+) -> tuple[dict[str, dict], list[dict[str, int]], set[str]]:
+    """Return (people, repo_people, ubiquitous_ids).
+
+    people[ident] = {label, repos: set[int], commits}
+    repo_people[i] = {ident: commits on that repo}
+    """
+    people: dict[str, dict] = {}
+    repo_people: list[dict[str, int]] = []
+    n_repos = len(rows)
+
+    for idx, row in enumerate(rows):
+        on_repo: dict[str, int] = {}
+        for c in row.get("contributors") or []:
+            ident = committer_identity(c)
+            if ident is None:
+                continue
+            commits = int(c.get("commits") or 0)
+            on_repo[ident] = on_repo.get(ident, 0) + commits
+            entry = people.setdefault(
+                ident,
+                {"label": committer_label(c), "repos": set(), "commits": 0},
+            )
+            label = committer_label(c)
+            if "<" in label and "<" not in entry["label"]:
+                entry["label"] = label
+            entry["repos"].add(idx)
+            entry["commits"] += commits
+        repo_people.append(on_repo)
+
+    ubiquitous = {
+        ident
+        for ident, info in people.items()
+        if n_repos > 0 and len(info["repos"]) / n_repos > GROUP_UBIQUITY_FRAC
+    }
+    return people, repo_people, ubiquitous
+
+
+def team_clusters(
+    clusters: list[tuple[list[str], list[tuple[str, str, int, int]], set[str]]],
+) -> list[tuple[list[str], set[str], list[tuple[str, str, int, int]]]]:
+    """Multi-repo clusters only: (repos, member_idents, identifiers)."""
+    teams = []
+    for repos, identifiers, member_idents in clusters:
+        if len(repos) < 2 or not member_idents:
+            continue
+        teams.append((repos, member_idents, identifiers))
+    return teams
+
+
+def team_majority_hit(on_repo: set[str], teams: list) -> bool:
+    """True when a strict majority of teams have a distinctive committer on the repo."""
+    if not teams:
+        return False
+    hits = sum(1 for _repos, member_idents, _ids in teams if member_idents & on_repo)
+    return hits * 2 > len(teams)
+
+
+def common_repo_namespaces(rows: list[dict]) -> set[str]:
+    """Repos where a majority of inferred teams have a distinctive committer."""
+    if not rows:
+        return set()
+    _people, repo_people, _ubi = build_committer_index(rows)
+    teams = team_clusters(cluster_repos_by_committers(rows))
+    if len(teams) < 2:
+        return set()
+
+    common: set[str] = set()
+    for idx, row in enumerate(rows):
+        on_repo = set(repo_people[idx])
+        if team_majority_hit(on_repo, teams):
+            common.add(row.get("path_with_namespace") or "?")
+    return common
+
+
+def categorize_repos(rows: list[dict]) -> list[tuple[str, str]]:
+    """Return [(category, path_with_namespace), ...] sorted by category then name.
+
+    Categories:
+      TEAM     – multi-repo cluster from distinctive-committer grouping
+      COMMON   – a majority of inferred teams have a distinctive committer on the repo
+      NON-TEAM – neither
+    """
+    if not rows:
+        return []
+
+    clusters = cluster_repos_by_committers(rows)
+    cluster_size: dict[str, int] = {}
+    for repos, _identifiers, _member_idents in clusters:
+        for ns in repos:
+            cluster_size[ns] = len(repos)
+    common = common_repo_namespaces(rows)
+
+    ns_by_index = [row.get("path_with_namespace") or "?" for row in rows]
+    categorized: list[tuple[str, str]] = []
+
+    for ns in ns_by_index:
+        size = cluster_size.get(ns, 1)
+        if ns in common:
+            category = "COMMON"
+        elif size >= 2:
+            category = "TEAM"
+        else:
+            category = "NON-TEAM"
+        categorized.append((category, ns))
+
+    order = {"TEAM": 0, "COMMON": 1, "NON-TEAM": 2}
+    categorized.sort(key=lambda t: (order.get(t[0], 9), t[1].casefold()))
+    return categorized
+
+
+def report_categories(stats_dir: Path) -> None:
+    """List each repo with category TEAM, COMMON, or NON-TEAM."""
+    rows = load_all_stats(stats_dir)
+    if not rows:
+        print("(no repo stats)", file=sys.stderr)
+        return
+
+    categorized = categorize_repos(rows)
+    counts = {"TEAM": 0, "COMMON": 0, "NON-TEAM": 0}
+    for category, _ns in categorized:
+        counts[category] = counts.get(category, 0) + 1
+
+    print(
+        f"Categorized {len(categorized)} repo(s): "
+        f"TEAM={counts['TEAM']}, COMMON={counts['COMMON']}, "
+        f"NON-TEAM={counts['NON-TEAM']}.",
+        file=sys.stderr,
+    )
+
+    for category, ns in categorized:
+        print(f"{category}\t{ns}")
+
+
+def report_common(stats_dir: Path) -> None:
+    """List repos where a majority of inferred teams appear to have a committer."""
+    rows = load_all_stats(stats_dir)
+    if not rows:
+        print("(no repo stats)", file=sys.stderr)
+        return
+
+    people, repo_people, _ubi = build_committer_index(rows)
+    clusters = cluster_repos_by_committers(rows)
+    teams = team_clusters(clusters)
+
+    if len(teams) < 2:
+        print(
+            "(need at least 2 multi-repo teams to find COMMON repos)",
+            file=sys.stderr,
+        )
+        return
+
+    need = len(teams) // 2 + 1
+    print(f"Inferred {len(teams)} team(s) from committer clustering.")
+    for n, (repos, _idents, identifiers) in enumerate(teams, start=1):
+        print(f"Team {n} ({len(repos)} repo(s)):")
+        for ns in repos:
+            print(f"  {ns}")
+        if identifiers:
+            labels = ", ".join(label for _i, label, _rc, _tc in identifiers[:5])
+            if len(identifiers) > 5:
+                labels += f", +{len(identifiers) - 5} more"
+            print(f"  committers: {labels}")
+    print()
+
+    hits: list[tuple[str, int, list[tuple[int, int, str]]]] = []
+    for idx, row in enumerate(rows):
+        ns = row.get("path_with_namespace") or "?"
+        on_repo = set(repo_people[idx])
+        per_team: list[tuple[int, int, str]] = []
+        for team_n, (_repos, member_idents, identifiers) in enumerate(teams, start=1):
+            matched = member_idents & on_repo
+            if not matched:
+                continue
+            best_ident = max(matched, key=lambda i: (repo_people[idx].get(i, 0), i))
+            label = people.get(best_ident, {}).get("label") or best_ident
+            for ident, lab, _rc, _tc in identifiers:
+                if ident == best_ident:
+                    label = lab
+                    break
+            per_team.append((team_n, repo_people[idx].get(best_ident, 0), label))
+        if len(per_team) * 2 > len(teams):
+            hits.append((ns, len(per_team), per_team))
+
+    hits.sort(key=lambda t: (-t[1], t[0].casefold()))
+    print(f"COMMON repos (majority of teams, ≥{need}/{len(teams)}): {len(hits)}")
+    for ns, n_hit, per_team in hits:
+        print(f"{ns}\t{n_hit}/{len(teams)} teams")
+        for team_n, commits, label in per_team:
+            print(f"  team {team_n}: {commits}  {label}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Scan GitLab member repos into .gitlab-repo-stats (committers, file "
+            "counts, size, weekly commits, branches), or report from saved stats. "
+            "Scan: most-stale first; skip when tip unchanged and last scan < "
+            f"{SKIP_MAX_AGE.days}d. Delay peaked near {SLEEP_MU:g}s with inflated "
+            f"right tail, truncated to [{SLEEP_MIN:g}, {SLEEP_MAX:g}] between repos."
+        )
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("GITLAB_HOST", DEFAULT_HOST),
+        help=f"GitLab hostname (default: {DEFAULT_HOST})",
+    )
+    parser.add_argument(
+        "--stats-dir",
+        type=Path,
+        default=Path(os.environ.get("GITLAB_REPO_STATS_DIR", DEFAULT_STATS_DIR)),
+        help=f"stats directory (default: {DEFAULT_STATS_DIR})",
+    )
+    parser.add_argument(
+        "--list-committers",
+        action="store_true",
+        help="list all committers from saved stats (no scan) and exit",
+    )
+    parser.add_argument(
+        "--rank-by-committers",
+        type=Path,
+        nargs="?",
+        const=DEFAULT_TEAM_FILE,
+        default=None,
+        metavar="FILE",
+        help=(
+            "rank repos by commits from committers listed in FILE "
+            f"(one name or email per line; default FILE: {DEFAULT_TEAM_FILE}; "
+            "no scan) and exit"
+        ),
+    )
+    parser.add_argument(
+        "--group",
+        action="store_true",
+        help=(
+            "cluster repos by shared committers (team proxy) from saved stats "
+            "(no scan) and exit"
+        ),
+    )
+    parser.add_argument(
+        "--common",
+        action="store_true",
+        help=(
+            "list repos a majority of inferred teams commit to "
+            "(no scan) and exit"
+        ),
+    )
+    parser.add_argument(
+        "--categories",
+        action="store_true",
+        help=(
+            "list repos tagged TEAM, COMMON, or NON-TEAM from saved stats "
+            "(no scan) and exit"
+        ),
+    )
+    args = parser.parse_args()
+
+    report_flags = sum(
+        bool(x)
+        for x in (
+            args.list_committers,
+            args.rank_by_committers,
+            args.group,
+            args.common,
+            args.categories,
+        )
+    )
+    if report_flags > 1:
+        die(
+            "use only one of --list-committers, --rank-by-committers, "
+            "--group, --common, or --categories"
+        )
+    if args.list_committers:
+        report_list_committers(args.stats_dir)
+        return
+    if args.rank_by_committers:
+        report_rank_by_committers(args.stats_dir, args.rank_by_committers)
+        return
+    if args.group:
+        report_group(args.stats_dir)
+        return
+    if args.common:
+        report_common(args.stats_dir)
+        return
+    if args.categories:
+        report_categories(args.stats_dir)
+        return
+
+    require_glab(args.host)
+    args.stats_dir.mkdir(parents=True, exist_ok=True)
+
+    repos = list_member_repos(args.host)
+    enriched = []
+    for repo in repos:
+        ns = repo.get("path_with_namespace") or repo.get("path")
+        if not ns:
+            continue
+        existing = load_stats(stats_path(args.stats_dir, ns))
+        enriched.append((ns, existing))
+    enriched.sort(key=lambda item: (stale_key(item[1]), item[0].lower()))
+
+    print(
+        f"Scanning {len(enriched)} member repo(s) on {args.host} → {args.stats_dir} "
+        f"(most stale first; delay mode ~{SLEEP_MU:g}s, heavy right tail)…",
+        file=sys.stderr,
+    )
+    print_scan_plan(enriched)
+
+    failures = 0
+    scanned = 0
+    skipped = 0
+    for i, (ns, existing) in enumerate(enriched):
+        if i > 0:
+            sleep_between_repos()
+        print(f"[{i + 1}/{len(enriched)}] {ns}", file=sys.stderr)
+        out = stats_path(args.stats_dir, ns)
+        try:
+            tip_at, tip_id = latest_commit(args.host, ns)
+        except RuntimeError as exc:
+            failures += 1
+            print(f"  ERROR (latest commit): {exc}", file=sys.stderr)
+            continue
+
+        if should_skip_full_scan(existing, tip_at):
+            existing = dict(existing or {})
+            existing["last_scan_at"] = now_iso()
+            existing["latest_commit_at"] = tip_at
+            existing["latest_commit_id"] = (
+                tip_id if tip_id is not None else existing.get("latest_commit_id")
+            )
+            existing["path_with_namespace"] = ns
+            write_stats(out, existing)
+            skipped += 1
+            print(
+                f"  skip (tip unchanged, scanned <{SKIP_MAX_AGE.days}d ago: {tip_at})",
+                file=sys.stderr,
+            )
+            continue
+
+        try:
+            extra = collect_repo_stats(args.host, ns)
+        except RuntimeError as exc:
+            failures += 1
+            print(f"  ERROR (scan): {exc}", file=sys.stderr)
+            continue
+
+        payload = {
+            "path_with_namespace": ns,
+            "last_scan_at": now_iso(),
+            "latest_commit_at": tip_at,
+            "latest_commit_id": tip_id,
+            **extra,
+        }
+        write_stats(out, payload)
+        scanned += 1
+        print(
+            f"  wrote {out.name} "
+            f"({payload['file_count']} files; "
+            f"{payload['branch_count']} branches; "
+            f"{len(payload['contributors'])} committers; "
+            f"latest {tip_at})",
+            file=sys.stderr,
+        )
+
+    print(
+        f"Done: {scanned} scanned, {skipped} skipped, {failures} error(s).",
+        file=sys.stderr,
+    )
+    if failures:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

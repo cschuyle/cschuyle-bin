@@ -1,1 +1,436 @@
-/Users/cschuyler/workspace/_SCRIPTS/gitlab-repo-overseer
+#!/usr/bin/env python3
+"""Classify local Git clones; optionally compare against GitLab membership.
+
+Requires ~/.config/gitlab-repo-overseer/{workspace,host}.
+
+Default (no -a): scan workspace clones with git only (no glab / network).
+With -a: also query GitLab (`glab repo list --member` + extra-repos) and
+list NOT CLONED.
+
+Cloned repos are classified (no network fetch for status):
+  DIRTY    – working tree or index has local changes
+  PULLABLE – clean, but behind upstream remote-tracking ref
+  CLEAN    – clean and not behind upstream
+
+Exit 1 if -a and any tracked repo is missing; otherwise 0.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+CONFIG_DIR = (
+    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    / "gitlab-repo-overseer"
+)
+CONFIG_WORKSPACE = CONFIG_DIR / "workspace"
+CONFIG_HOST = CONFIG_DIR / "host"
+CONFIG_EXTRA_REPOS = CONFIG_DIR / "extra-repos"
+PER_PAGE = 100
+
+
+def die(msg: str, code: int = 2) -> None:
+    print(msg, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def read_required_config_line(path: Path, label: str) -> str:
+    """Return the first non-empty, non-comment line from a required config file."""
+    if not path.is_file():
+        die(
+            f"missing required config: {path}\n"
+            f"Create it with a single-line {label}."
+        )
+    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        return line
+    die(f"{path}: empty; put a single-line {label} in this file")
+
+
+def host_from_remote(url: str) -> str | None:
+    url = url.strip()
+    if not url:
+        return None
+    if url.startswith("git@"):
+        # git@host:group/project.git
+        return url[4:].partition(":")[0] or None
+    return urlparse(url).hostname
+
+
+def path_with_namespace_from_remote(url: str) -> str | None:
+    url = url.strip()
+    if not url:
+        return None
+    if url.startswith("git@"):
+        # git@host:group/project.git
+        _, _, rest = url.partition(":")
+        path = rest
+    else:
+        parsed = urlparse(url)
+        path = parsed.path.lstrip("/")
+    path = path.removesuffix(".git").strip("/")
+    return path or None
+
+
+def local_clones(
+    workspace: Path, host: str
+) -> tuple[dict[str, Path], dict[str, Path], list[tuple[str, Path]]]:
+    """Return (by_ns, by_name, host_clones).
+
+    host_clones is [(label, path), ...] for origin remotes on host.
+    """
+    by_ns: dict[str, Path] = {}
+    by_name: dict[str, Path] = {}
+    host_clones: list[tuple[str, Path]] = []
+    if not workspace.is_dir():
+        die(f"workspace not found: {workspace}")
+    for entry in sorted(workspace.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        git_dir = entry / ".git"
+        if not (git_dir.is_dir() or git_dir.is_file()):
+            continue
+        by_name[entry.name] = entry
+        result = subprocess.run(
+            ["git", "-C", str(entry), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            continue
+        url = result.stdout
+        ns = path_with_namespace_from_remote(url)
+        if ns:
+            by_ns[ns] = entry
+        if host_from_remote(url) == host:
+            host_clones.append((ns or entry.name, entry))
+    return by_ns, by_name, host_clones
+
+
+def clone_dir(
+    repo: dict, by_ns: dict[str, Path], by_name: dict[str, Path]
+) -> Path | None:
+    ns = repo.get("path_with_namespace") or ""
+    path = repo.get("path") or ""
+    if ns and ns in by_ns:
+        return by_ns[ns]
+    if path and path in by_name:
+        return by_name[path]
+    return None
+
+
+def git_ok(repo_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo_dir), *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def is_dirty(repo_dir: Path) -> bool:
+    result = git_ok(repo_dir, "status", "--porcelain")
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def is_pullable(repo_dir: Path) -> bool:
+    """True if upstream exists and has commits not in HEAD (based on last fetch)."""
+    upstream = git_ok(repo_dir, "rev-parse", "--abbrev-ref", "@{u}")
+    if upstream.returncode != 0:
+        return False
+    behind = git_ok(repo_dir, "rev-list", "--count", "HEAD..@{u}")
+    if behind.returncode != 0:
+        return False
+    try:
+        return int(behind.stdout.strip() or "0") > 0
+    except ValueError:
+        return False
+
+
+def clone_class(repo_dir: Path) -> str:
+    """Return DIRTY, PULLABLE, or CLEAN (mutually exclusive; dirty wins)."""
+    if is_dirty(repo_dir):
+        return "DIRTY"
+    if is_pullable(repo_dir):
+        return "PULLABLE"
+    return "CLEAN"
+
+
+def classify_paths(
+    items: list[tuple[str, Path]],
+) -> tuple[list[tuple[str, Path]], list[tuple[str, Path]], list[tuple[str, Path]]]:
+    clean: list[tuple[str, Path]] = []
+    dirty: list[tuple[str, Path]] = []
+    pullable: list[tuple[str, Path]] = []
+    for label, path in items:
+        kind = clone_class(path)
+        if kind == "DIRTY":
+            dirty.append((label, path))
+        elif kind == "PULLABLE":
+            pullable.append((label, path))
+        else:
+            clean.append((label, path))
+    key = lambda t: t[0].lower()
+    clean.sort(key=key)
+    dirty.sort(key=key)
+    pullable.sort(key=key)
+    return clean, dirty, pullable
+
+
+def prompt_yes(question: str, *, default_yes: bool = True) -> bool:
+    suffix = " [Y/n] " if default_yes else " [y/N] "
+    try:
+        answer = input(f"{question}{suffix}").strip().lower()
+    except EOFError:
+        print()
+        return default_yes
+    if not answer:
+        return default_yes
+    return answer in ("y", "yes")
+
+
+def interactive_pull(pullable: list[tuple[str, Path]]) -> None:
+    """Prompt Y/n for each pullable repo and run git pull --ff-only."""
+    if not pullable:
+        return
+    print()
+    for label, path in pullable:
+        if not prompt_yes(f"Pull {label}?"):
+            print(f"  skipped {label}")
+            continue
+        result = subprocess.run(
+            ["git", "-C", str(path), "pull", "--ff-only"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            msg = (result.stdout or result.stderr or "ok").strip().splitlines()
+            detail = msg[-1] if msg else "ok"
+            print(f"  pulled {label}: {detail}")
+        else:
+            err = (result.stderr or result.stdout or "git pull failed").strip()
+            print(f"  FAILED {label}: {err}", file=sys.stderr)
+
+
+def glab_env(host: str) -> dict[str, str]:
+    env = os.environ.copy()
+    env["GITLAB_HOST"] = host
+    env["GLAB_SEND_TELEMETRY"] = "false"
+    return env
+
+
+def require_glab(host: str) -> None:
+    try:
+        result = subprocess.run(
+            ["glab", "api", "user"],
+            capture_output=True,
+            text=True,
+            env=glab_env(host),
+        )
+    except FileNotFoundError:
+        die("glab not found on PATH; install it first")
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "glab api user failed").strip()
+        die(
+            f"{err}\n\n"
+            f"Authenticate with:\n"
+            f"  glab auth login --hostname {host}"
+        )
+
+
+def list_member_repos(host: str) -> list[dict]:
+    require_glab(host)
+    env = glab_env(host)
+    repos: list[dict] = []
+    page = 1
+    while True:
+        result = subprocess.run(
+            [
+                "glab",
+                "repo",
+                "list",
+                "--member",
+                "-F",
+                "json",
+                "-P",
+                str(PER_PAGE),
+                "-p",
+                str(page),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "glab repo list failed").strip()
+            die(err)
+        text = result.stdout.strip()
+        if not text:
+            break
+        try:
+            batch = json.loads(text)
+        except json.JSONDecodeError as exc:
+            die(f"failed to parse glab JSON: {exc}\n{text[:500]}")
+        if not isinstance(batch, list):
+            die(f"unexpected glab JSON (expected list): {type(batch).__name__}")
+        if not batch:
+            break
+        repos.extend(batch)
+        if len(batch) < PER_PAGE:
+            break
+        page += 1
+    return repos
+
+
+def load_extra_repos(path: Path) -> list[dict]:
+    """Load path_with_namespace lines from config; missing file means none."""
+    if not path.is_file():
+        return []
+    repos: list[dict] = []
+    seen: set[str] = set()
+    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Allow full URLs or git@ remotes; normalize to path_with_namespace.
+        if "://" in line or line.startswith("git@"):
+            ns = path_with_namespace_from_remote(line)
+            if not ns:
+                die(f"{path}:{line_no}: could not parse repo path: {raw}")
+        else:
+            ns = line.strip("/")
+        if ns in seen:
+            continue
+        seen.add(ns)
+        repos.append(
+            {
+                "path_with_namespace": ns,
+                "path": ns.rsplit("/", 1)[-1],
+            }
+        )
+    return repos
+
+
+def merge_tracked_repos(member: list[dict], extra: list[dict]) -> list[dict]:
+    """Member repos first, then extras not already present by path_with_namespace."""
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for repo in member + extra:
+        ns = repo.get("path_with_namespace") or ""
+        if not ns or ns in seen:
+            continue
+        seen.add(ns)
+        merged.append(repo)
+    return merged
+
+
+def print_section(title: str, items: list[tuple[str, Path]] | list[str]) -> None:
+    print(title)
+    if not items:
+        print("  (none)")
+        return
+    for item in items:
+        label = item[0] if isinstance(item, tuple) else item
+        print(f"  {label}")
+
+
+def print_sections(
+    clean: list[tuple[str, Path]],
+    dirty: list[tuple[str, Path]],
+    pullable: list[tuple[str, Path]],
+    not_cloned: list[str] | None,
+) -> None:
+    print_section("CLEAN", clean)
+    print_section("DIRTY", dirty)
+    print_section("PULLABLE", pullable)
+    if not_cloned is not None:
+        print_section("NOT CLONED", not_cloned)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Classify workspace Git clones (CLEAN / DIRTY / PULLABLE). "
+            "Default uses local git only. Pass -a to query GitLab and also "
+            "list NOT CLONED. Pass -i to prompt pulling PULLABLE repos. workspace and host are required under "
+            "~/.config/gitlab-repo-overseer/."
+        )
+    )
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help=f"local clones directory (default: required file {CONFIG_WORKSPACE})",
+    )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help=f"GitLab hostname (default: required file {CONFIG_HOST})",
+    )
+    parser.add_argument(
+        "--extra-repos",
+        type=Path,
+        default=CONFIG_EXTRA_REPOS,
+        help=f"extra path_with_namespace list (default: {CONFIG_EXTRA_REPOS}; used with -a)",
+    )
+    parser.add_argument(
+        "-a",
+        "--all",
+        action="store_true",
+        help="query GitLab and include NOT CLONED repos in the report",
+    )
+    parser.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        help="after the report, prompt Y/n to git pull each PULLABLE repo",
+    )
+    args = parser.parse_args()
+
+    if args.workspace is None:
+        args.workspace = Path(
+            read_required_config_line(CONFIG_WORKSPACE, "workspace path")
+        ).expanduser()
+    if args.host is None:
+        args.host = read_required_config_line(CONFIG_HOST, "GitLab hostname")
+
+    by_ns, by_name, host_clones = local_clones(args.workspace, args.host)
+
+    if not args.all:
+        clean, dirty, pullable = classify_paths(host_clones)
+        print_sections(clean, dirty, pullable, not_cloned=None)
+        if args.interactive:
+            interactive_pull(pullable)
+        raise SystemExit(0)
+
+    member = list_member_repos(args.host)
+    extra = load_extra_repos(args.extra_repos)
+    repos = merge_tracked_repos(member, extra)
+
+    cloned_items: list[tuple[str, Path]] = []
+    not_cloned: list[str] = []
+    for repo in repos:
+        label = repo.get("path_with_namespace") or repo.get("path") or "?"
+        path = clone_dir(repo, by_ns, by_name)
+        if path is None:
+            not_cloned.append(label)
+            continue
+        cloned_items.append((label, path))
+
+    clean, dirty, pullable = classify_paths(cloned_items)
+    not_cloned.sort(key=str.lower)
+    print_sections(clean, dirty, pullable, not_cloned=not_cloned)
+    if args.interactive:
+        interactive_pull(pullable)
+    raise SystemExit(0 if not not_cloned else 1)
+
+
+if __name__ == "__main__":
+    main()
