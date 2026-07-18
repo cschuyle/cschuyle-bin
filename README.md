@@ -60,10 +60,6 @@ Walk a directory tree and emit JSON (stats by default; `--hash` adds BLAKE3). Ho
 
 List Synology share names and their paths (`synoshare`). Optional argument filters to one share name.
 
-### mount-z
-
-Mount the Synology `cschuyle` share at `/mnt/z` on WSL (requires `DRAGNON_SYNOLOGY_IP`).
-
 ### move-file-list
 
 Move each path listed in a file (one per line) into a target directory. Paths may be files or directories. Lines may be quoted (`'…'`, `"…"`), backslash-escaped, or surrounded by whitespace.
@@ -83,10 +79,6 @@ Show disk usage for files or directories, sorted by size. `-h` uses human-readab
 ### split-lines
 
 Split input into two files: a small fraction (~1/N of lines) and the rest. Default N is 2.
-
-### ssh-synology
-
-SSH to the Synology NAS (port 4546) using `DRAGNON_SYNOLOGY_IP`. Switches iTerm to the Caution profile for the session.
 
 ### tarsync
 
