@@ -198,7 +198,7 @@ build_tasks() {
       \( -type f -not -name '._*' -iname "$file_pattern" -print \) | sort -u
   else
     find "$input" \( -type d -name '@*' -prune \) -o \
-      \( -type f -not -name '._*' \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi" -o -iname "*.ogm" \) -print \) | sort -u
+      \( -type f -not -name '._*' \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.mov" -o -iname "*.avi" -o -iname "*.divx" -o -iname "*.ogm" \) -print \) | sort -u
   fi
 }
 
