@@ -16,6 +16,12 @@ Look up domains via RDAP (`rdap.org`). Default output is one tab-separated line 
 
 Report top-level files in a directory whose names collide when compared case-insensitively. Exits 1 if any duplicates are found.
 
+### config-get
+
+Resolve a single string config value for a command-line script (usable from bash, Python, or Perl by shelling out). Pass the caller's path with `-s`/`--script` (e.g. `"${BASH_SOURCE[0]}"`, `$0`, or `__file__`); `<script base>` is that filename with its extension stripped. Sources are tried in order, first match wins: (1) env var `<SCRIPT_BASE>_<KEY>` (uppercased, non-alphanumerics become `_`); (2) `<script base>.{yaml,yml,json}` in the script's dir; (3) the same in `~/.config/` (honors `XDG_CONFIG_HOME`); (4) `config.{yaml,yml,json}` in the script's dir, under the top-level `<script base>` object; (5) the same in `~/.config/`. Within one file source, `yaml` then `yml` then `json` is tried. YAML uses PyYAML when installed, else a built-in parser covering nested mappings of scalar values (no dependency required). Prints the value to stdout; exits 1 if the key is unresolved and no `--default` is given. `--name`/`--dir` override the derived base/dir; `--source` prints the matched source to stderr.
+
+Example: `preset="$(config-get -s "${BASH_SOURCE[0]}" --default "Fast 1080p30" preset)"`
+
 ### cut-first
 
 Read lines from stdin; print each line with the first whitespace-separated field removed.
