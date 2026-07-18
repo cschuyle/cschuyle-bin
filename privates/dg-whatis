@@ -18,6 +18,9 @@ Usage: dg-whatis [--json] [-v|--verbose] [-m|--media] [-e|--equivalence]
                  If PATH_B is a directory containing an entry named like PATH_A's
                  basename, PATH_A is compared against PATH_B/<basename> (so you can
                  pass the parent directory of the counterpart instead of retyping it).
+                 After the field comparison the output ends with a per-side summary
+                 of the embedded subtitle tracks in each video file (language/codec);
+                 in --json this is subtitles_left / subtitles_right.
 
 Content types (one primary kind per path):
   movie, series, album, ebook, unknown
@@ -1070,8 +1073,28 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
                 'resolution': rb if rb != '—' else None,
                 'duration': r.get('duration'),
                 'duration_human': human_duration(r.get('duration')),
+                'subtitles': r.get('subtitles') or [],
+                'subtitles_brief': format_subtitles_brief(r.get('subtitles') or []),
             }
             out.append(entry)
+        return out
+
+    def _subtitles_json(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+        vids = [
+            r
+            for r in (row.get('visual_metadata') or [])
+            if r.get('media') == 'video'
+        ]
+        out: List[Dict[str, Any]] = []
+        for r in sorted(vids, key=lambda x: Path(str(x['path'])).name.lower()):
+            subs = r.get('subtitles') or []
+            out.append(
+                {
+                    'path': r['path'],
+                    'subtitles': subs,
+                    'subtitles_brief': format_subtitles_brief(subs),
+                }
+            )
         return out
 
     if as_json:
@@ -1090,6 +1113,8 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
             'equal_fields': equals_filtered,
             'top_videos_left': _top_videos_json(row_a),
             'top_videos_right': _top_videos_json(row_b),
+            'subtitles_left': _subtitles_json(row_a),
+            'subtitles_right': _subtitles_json(row_b),
         }
         print(json.dumps(out, ensure_ascii=False), flush=True)
         return
@@ -1134,6 +1159,18 @@ def emit_diff_output(path_a: str, path_b: str, row_a: Dict[str, Any], row_b: Dic
                 res = resolution_brief(r)
                 dur = human_duration(r.get('duration'))
                 print(f'      {sz:<8}  {res:<12}  {dur}  {name}', flush=True)
+    for side_label, side_shown, side_row in (('<', shown_a, row_a), ('>', shown_b, row_b)):
+        vids = [
+            r
+            for r in (side_row.get('visual_metadata') or [])
+            if r.get('media') == 'video'
+        ]
+        if vids:
+            print(f'  {side_label} {side_shown} — subtitles by file:', flush=True)
+            for r in sorted(vids, key=lambda x: Path(str(x['path'])).name.lower()):
+                name = Path(str(r['path'])).name
+                subs = format_subtitles_brief(r.get('subtitles') or [])
+                print(f'      {name}: {subs}', flush=True)
 
 
 def equivalence_status_label(eq: Optional[Dict[str, Any]]) -> str:
