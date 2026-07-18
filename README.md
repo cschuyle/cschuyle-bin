@@ -8,10 +8,6 @@ Personal scripts and utilities on `$PATH` (via `Yew/cschuyle-bin` in shell confi
 
 Watch files or directories and enqueue changed paths for the interactive shell to `source`. Run with `source autosource.sh --shell-hook` and add `_autosource_drain` to `PROMPT_COMMAND`.
 
-### better-handbrake.sh
-
-Batch-encode video with HandBrakeCLI. Accepts a file or directory, optional preset and filename pattern, and can list GUI presets.
-
 ### brief-whois
 
 Look up domains via RDAP (`rdap.org`). Default output is one tab-separated line per domain; `-v` prints a multi-line report. With no arguments, reads domains from stdin.
@@ -24,21 +20,9 @@ Report top-level files in a directory whose names collide when compared case-ins
 
 Read lines from stdin; print each line with the first whitespace-separated field removed.
 
-### datani-stats
-
-**Deprecated** (superseded by the `vids-handle` workflow; still runs, prints a warning). List torrent/HandBrake workflow files by category (downloading, downloaded, to-be-transcoded, transcoding), sorted by size. Roots default to Synology Download and HandBrake paths; override with flags or `DATANI_*` env vars.
-
 ### ddf
 
 Show disk availability for each directory in `CS_DF_DATA_DIRS` (from `config.sh`).
-
-### dg-whatis
-
-Classify paths as movie, series, album, or ebook using filesystem heuristics. Supports JSON output, ffprobe metadata, and cross-type video equivalence checks.
-
-### dir-fission
-
-Move video files (`.mkv`, `.avi`, `.mov`, `.webm`, `.ogm`) from source trees into a destination, preserving directory structure. `.mp4` / `.m4v` are left in place.
 
 ### dus
 
@@ -88,29 +72,9 @@ Move each path listed in a file (one per line) into a target directory. Paths ma
 
 Copy each path listed in a file (one per line) into a target directory. Paths may be files or directories. Lines may be quoted (`'…'`, `"…"`), backslash-escaped, or surrounded by whitespace. Shows a progress meter on stderr (`[####------] 2/5 (40%) path`). `-v` / `--verbose` echoes each `cp` command.
 
-### qb-is-done
-
-**Deprecated** (superseded by `vids-handle`'s SORT step; still runs, prints a warning). For finished qBittorrent folders, print `mkdir`/`mv` commands to sort into `_MP4` or `_DONE` by video type.
-
-### qb-is-mixed
-
-For finished folders containing both MP4/M4V and MKV/AVI/OGM, print shell commands to move them into `_MIXED`.
-
-### qb-is-not-done
-
-List torrent download directories that still have in-progress `.!qB` partial files.
-
-### qb-is-not-mp4
-
-List finished torrent directories that contain only non-MP4 video (MKV/AVI/OGM), with no active partials or MP4/M4V files.
-
 ### rename-fat-filename-by-urlencoding
 
 Rename a file by percent-encoding characters unsafe on FAT/exFAT (quotes, colons, etc.).
-
-### smartylass.py
-
-Classify a directory as code, audio, video, TV series, or books and print a short summary.
 
 ### space
 
@@ -136,26 +100,6 @@ List the four largest files under a directory with human-readable sizes.
 
 Split lines into odd/even buckets, or into N parts (`-nth` / `-n`). Companion to recombine shuffled splits.
 
-### video-data.py
+---
 
-Report video files as JSON: size, duration, resolution, codec, and audio/subtitle languages (via ffprobe).
-
-### vids
-
-**Deprecated** (superseded by `vids-handle`; still runs, prints a warning). `status` checks whether a torrent video folder is downloaded and ready (no partials; MP4 present; no unsplit MKV/AVI/OGM); `split` moves the folder and parks non-MP4 originals under `_Originals`.
-
-### vids-handle
-
-Interactive orchestrator that walks video folders through the full pipeline by calling the existing tools: download-check (`qb-is-done` predicates) to SORT (a finished folder sitting directly in the DOWNLOAD root is bucketed into `_MP4` for pure mp4/m4v or `_DONE` for anything with non-mp4, mirroring `qb-is-done`) to HANDBRAKEME (move into the HandBrake root) to encode (`better-handbrake.sh`) to equivalence check (`dg-whatis -e`) to `dir-fission` (park non-mp4 originals) to shelving. A "mixed" folder (an mp4/m4v already present alongside mkv/avi/ogm/mov/webm) needs no transcode: it goes straight to the equivalence-gated `dir-fission` split and then shelving, same as the post-encode state. Shelving classifies with `dg-whatis -c`; movies are folder-normalized via `vids-rename.pl`; then the folder is moved to `$DRAGNON_MOVIES` / `$DRAGNON_SERIES`. Each item is advanced as far as it can go in one pass, prompting before every move/encode/fission; nothing is overwritten silently (when a shelving destination already exists it runs `dg-whatis --diff` and asks whether to keep the incoming or the shelved copy). `--dry-run`/`-n` shows the next planned action per item without executing; `--yes`/`-y` auto-confirms. With no arguments, scans the top-level directories of the DOWNLOAD and HANDBRAKE roots. Every root works whether local or on a network mount, but the underlying scripts run better on local drives, so it warns (non-fatally) when a configured root is on a network filesystem (detected via GNU `stat` on Synology/WSL, `df` source on macOS); silence with `--no-warn`. Roots are env-configurable: `DATANI_DOWNLOAD`, `DATANI_HANDBREAK` (shared with `datani-stats`), `DRAGNON_MOVIES`, `DRAGNON_SERIES`, and `DIR_FISSION_DEST_DIR` (for `dir-fission`).
-
-### vids-lint
-
-Scan video directories for "dirty" states: `.srt` subtitles not named `<video-stem>.<suffix>.srt` (with a language segment) alongside their video, and directories that directly contain more than one video file. Two subtitle violations are recognized: `orphan-subtitle` (name matches no video in the folder) and `non-identifiable-language-subtitle-file` (tied to a video but carrying no language segment, e.g. `Movie.srt` or `Movie.forced.srt` next to `Movie.mp4`). Only the part of the name past the video stem is inspected for a language, so a title word like `The.English.Patient.srt` is not mistaken for a language. `non-identifiable-language-subtitle-file` is a quiet violation, reported only with `-a` / `--all`. It also flags macOS AppleDouble sidecar files (`._<name>`) as `appledouble-junk-file` — these are never counted as videos or subtitles, and their presence is another quiet violation reported only with `-a` / `--all` (and `-i` offers to delete them). Each finding carries its violation code, shown in brackets in plain output and as a `code` field with `--json`. With no path argument, lints the first eligible item in the current directory (first non-hidden entry, sorted by name, whose tree contains a video or subtitle file). `--json` emits one object per dirty directory. `-i` / `--interactive` offers to fix each fixable subtitle by moving it into its main video's folder and prepending the video's basename to the original subtitle name (`Subs/2_English.srt` → `Movie.2_English.srt`); subtitles are skipped when there is no single main video, the target already exists, or the name is just the video stem with no suffix. `-i` also offers to delete AppleDouble junk files, with one prompt per directory covering all its changes. With no path argument, `-i` processes every non-hidden entry in the current directory (as if the argument were `*`), offering fixes and advancing to the next item even after you fix the current one. Exits 1 if anything is flagged (after fixes, in `-i` mode).
-
-### vids-mkdir.pl
-
-Read video filenames from stdin; print `mkdir`/`mv` commands to group files by year.
-
-### vids-rename.pl
-
-Normalize video/folder names (strip resolution, tidy years). Names come from positional arguments or, when none are given, from stdin (one per line). By default it executes the renames (`mv`/`rename`) in the current directory, printing each `renamed: 'old' -> 'new'`; a rename is skipped when the source is missing or the target already exists. Use `-n`/`--dry-run` to only print the `mv` commands instead of running them.
+The video toolchain (`vids-handle`, `better-handbrake.sh`, `dir-fission`, `dg-whatis`, `vids-rename.pl`, `vids-mkdir.pl`, `vids-lint`, `video-data.py`, `smartylass.py`, and the deprecated `vids`, `datani-stats`, `qb-is-*`) has moved to the sibling `trovester` repository.
