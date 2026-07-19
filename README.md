@@ -28,7 +28,7 @@ Read lines from stdin; print each line with the first whitespace-separated field
 
 ### ddf
 
-Show disk availability for each directory in `CS_DF_DATA_DIRS` (from `config.sh`).
+Show disk availability for each configured data directory. The space-separated directory list resolves via `config-get` (key `data_dirs`): env `DDF_DATA_DIRS`, then `ddf.{yaml,json}` / `config.{yaml,json}` in the script dir or `~/.config`. Without `config-get` on `PATH`, `DDF_DATA_DIRS` is used directly.
 
 ### dus
 
