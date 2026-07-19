@@ -14,6 +14,10 @@ A key is resolved from these sources, first match wins:
 --script (usually "$0" / "${BASH_SOURCE[0]}" / __file__); --name and --dir can
 override the derived base and directory.
 
+Hyphens and underscores are interchangeable in the script base and the key:
+in the env var both become '_' (data-dirs / data_dirs -> DDF_DATA_DIRS), and
+file lookups match either spelling.
+
 Within one file source, format variants are tried in the order yaml, yml, json,
 and the first file that contains the key wins. YAML is parsed with PyYAML when
 available, otherwise with a small built-in parser that handles nested mappings
@@ -179,6 +183,23 @@ def candidate_files(directory, basename):
         yield os.path.join(directory, "{}.{}".format(basename, suffix))
 
 
+def dict_get(node, wanted):
+    """Look up `wanted` in a mapping, treating '-' and '_' as interchangeable.
+
+    An exact match wins; otherwise the first key (in sorted order, for
+    determinism) whose hyphens/underscores match is used.
+    """
+    if not isinstance(node, dict):
+        return None, False
+    if wanted in node:
+        return node[wanted], True
+    canon = wanted.replace("-", "_")
+    for k in sorted(node):
+        if isinstance(k, str) and k.replace("-", "_") == canon:
+            return node[k], True
+    return None, False
+
+
 def lookup_in_file(path, keys):
     """keys is a list of nested keys, e.g. ['base', 'key'] or ['key']."""
     data = load_mapping(path)
@@ -186,12 +207,11 @@ def lookup_in_file(path, keys):
         return None, False
     node = data
     for k in keys[:-1]:
-        node = node.get(k) if isinstance(node, dict) else None
-        if not isinstance(node, dict):
+        sub, found = dict_get(node, k)
+        if not found or not isinstance(sub, dict):
             return None, False
-    if not isinstance(node, dict) or keys[-1] not in node:
-        return None, False
-    return node[keys[-1]], True
+        node = sub
+    return dict_get(node, keys[-1])
 
 
 def resolve(base, directory, key):
