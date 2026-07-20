@@ -5,6 +5,7 @@ python3|sudo apt install python3
 rsync|sudo apt install rsync
 curl|Usually preinstalled on Ubuntu WSL; otherwise: sudo apt install curl
 jq|sudo apt install jq
+gh|sudo apt install gh (or see https://github.com/cli/cli/blob/trunk/docs/install_linux.md)
 tar|Usually preinstalled on Ubuntu WSL
 ssh|Usually preinstalled on Ubuntu WSL; otherwise: sudo apt install openssh-client
 HandBrakeCLI|sudo apt install handbrake-cli

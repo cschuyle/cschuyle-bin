@@ -28,6 +28,7 @@ imagemagick|brew install imagemagick
 HandBrakeCLI|brew install handbrake
 Text::Autoformat|Try:\n\n        cpan\n\n        (answer 'yes' to the question about setting up if this is the first time you're running cpan)\n        cpan[1]> install Text::Autoformat\n        cpan[2]> exit
 csvformat|brew install csvkit
+gh|brew install gh
 gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
 gdubw/gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
 mvn|brew install maven
