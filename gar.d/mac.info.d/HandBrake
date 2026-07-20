@@ -5,9 +5,9 @@ Settings / Advanced / Decoder / Enable the VideoToolbox hardware decoders (e.g. 
 Save preset with these settings (name: h264-VideoToolbox CQ=23 peakFR=48 WebOpt all-subs all-audios):
   Summary: Web Optimized
   Video:
-    Encoder: H.264 VideoToolbox
-    Constant Quality 23
-    VFR: Peak Framerate 48 fps
+    Encoder: [Apple Silicon: H.264 VideoToolbox] [Intel NUC: X.265 HEVC 10bit]
+    Constant Quality [Apple silicon: 21 (lower i.s better)] [Intel NUC: CQ23]
+    Framerate: Same as source
   Audio:
     Any / All audio
   Subtitles:
