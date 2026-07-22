@@ -29,6 +29,7 @@ usage() {
 Usage: gar [-ah]
        gar apps
        gar info [name]
+       gar roles
 
 Check the current machine's configuration against the desired state in gar.d/.
 Reports missing or out-of-date elements. Mac, Synology, and WSL checks are
@@ -42,6 +43,7 @@ overlays enabled in ~/.config/gar/roles (one role id per line).
   info [name]   With no name: show the platform info page (gar.d/<platform>.info;
                 empty by default). With a name: install hints and general info
                 for a tracked item (case-insensitive)
+  roles         List known role ids (those with gar.d/role.<id>.* manifests)
 
 Exit status: 0 if everything looks good, 1 if anything is missing.
 EOF
@@ -357,6 +359,27 @@ gar_role_is_known() {
         [[ -f "$f" ]] && return 0
     done
     return 1
+}
+
+# Emit known role ids (unique, sorted) from gar.d/role.<id>.* manifests.
+gar_known_roles() {
+    local f base rest role
+    for f in "$GAR_DIR"/role.*; do
+        [[ -f "$f" ]] || continue
+        base=$(basename "$f")
+        rest="${base#role.}"
+        role="${rest%.*}"
+        [[ -n "$role" && "$role" != "$rest" ]] || continue
+        printf '%s\n' "$role"
+    done | sort -u
+}
+
+cmd_roles() {
+    local role
+    while IFS= read -r role; do
+        [[ -n "$role" ]] || continue
+        printf '%s\n' "$role"
+    done < <(gar_known_roles)
 }
 
 detect_roles() {
@@ -1742,6 +1765,11 @@ main() {
 
     if [[ "${1:-}" == "apps" ]]; then
         cmd_apps
+        return
+    fi
+
+    if [[ "${1:-}" == "roles" ]]; then
+        cmd_roles
         return
     fi
 
