@@ -27,19 +27,39 @@ gar_result_get() {
 usage() {
     cat <<'EOF'
 Usage: gar [-ah]
-       gar apps
+       gar apps [-r <role>]
        gar info [name]
        gar roles
+       gar --man
 
 Check the current machine's configuration against the desired state in gar.d/.
 Reports missing or out-of-date elements. Mac, Synology, and WSL checks are
 implemented; plain Linux is detected but not yet audited.
 
-Desired state is platform/shared manifests plus an additive union of role
-overlays enabled in ~/.config/gar/roles (one role id per line).
+Desired state is the platform/shared base plus an additive union of role
+overlays enabled for this machine.
 
+Roles
+  Enable roles in ~/.config/gar/roles (one role id per line). A missing file
+  means no roles are enabled. Blank lines and # comments are ignored.
+
+  Example ~/.config/gar/roles:
+
+    # overlays for this machine
+    personal-machine
+    my-data-client
+    dev-tools
+
+  Known role ids are listed by `gar roles` (those with gar.d/role.<id>.*
+  manifests). Unknown ids in the roles file produce a WARN at audit time.
+
+Options and commands
   -a, --all     Show all checks, including OK (default: only MISS and WARN)
-  apps          List GUI apps tracked in gar.d/mac.apps (App Store or vendor site)
+  -h, --help, --man
+                Show this help
+  apps          List GUI apps tracked for this machine (platform base plus active
+                role overlays). With -r <role>: only that role's apps overlay
+                (gar.d/role.<role>.apps)
   info [name]   With no name: show the platform info page (gar.d/<platform>.info;
                 empty by default). With a name: install hints and general info
                 for a tracked item (case-insensitive)
@@ -50,11 +70,48 @@ EOF
 }
 
 cmd_apps() {
-    local entry name path hint apps_manifest
-    detect_roles
-    gar_init_workdir
-    apps_manifest=$(gar_combined_capability_manifest mac apps)
-    printf 'Tracked apps (installed outside Homebrew):\n\n'
+    local entry name path hint apps_manifest role="" role_file
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -r|--role)
+                if [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+                    echo "apps: -r requires a role id" >&2
+                    exit 2
+                fi
+                role="$2"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option for apps: $1" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    if [[ -n "$role" ]]; then
+        if ! gar_role_is_known "$role"; then
+            echo "Unknown role: $role" >&2
+            exit 1
+        fi
+        role_file="$GAR_DIR/role.$role.apps"
+        if [[ ! -f "$role_file" ]]; then
+            printf 'No apps for role %s\n' "$role"
+            return 0
+        fi
+        apps_manifest="$role_file"
+        printf 'Tracked apps for role %s:\n\n' "$role"
+    else
+        detect_roles
+        gar_init_workdir
+        apps_manifest=$(gar_combined_capability_manifest mac apps)
+        printf 'Tracked apps (installed outside Homebrew):\n\n'
+    fi
+
     while IFS= read -r entry; do
         name="${entry%%|*}"
         path="${entry#*|}"
@@ -1764,7 +1821,8 @@ main() {
     fi
 
     if [[ "${1:-}" == "apps" ]]; then
-        cmd_apps
+        shift
+        cmd_apps "$@"
         return
     fi
 
@@ -1775,7 +1833,7 @@ main() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -h|--help)
+            -h|--help|--man)
                 usage
                 exit 0
                 ;;
