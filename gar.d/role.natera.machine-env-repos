@@ -1,0 +1,3 @@
+# Natera work laptop: natera-laptop-setup repo under $HOME/workspace
+# Format: name|path (path may use $HOME)
+natera-laptop-setup|$HOME/workspace/natera-laptop-setup
