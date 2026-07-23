@@ -4,5 +4,4 @@
 # Role overlays (see ~/.config/gar/roles) add further repos, e.g.
 # role.my-data-client.machine-env-repos for dragnon/moocho/My-Data.
 cschuyle-bin|$HOME/Yew/cschuyle-bin
-trovester-bin|$HOME/Yew/trovester-bin
 ohmyzsh|$HOME/Yew/ohmyzsh
