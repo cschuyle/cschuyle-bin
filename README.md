@@ -90,6 +90,10 @@ Split input into two files: a small fraction (~1/N of lines) and the rest. Defau
 
 Synchronize files with `tar` over a pipe; supports local or remote destinations, dry-run, compression, and optional overwrite-newer.
 
+### toggle-switch-key
+
+Toggle the macOS "Move focus to next window" shortcut between Command-` (standard) and Command-<. Pass `show` to print the current binding without changing it.
+
 ### top-5.sh
 
 List the four largest files under a directory with human-readable sizes.

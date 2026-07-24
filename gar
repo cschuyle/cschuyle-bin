@@ -969,6 +969,8 @@ try:
 except Exception:
     raise SystemExit(1)
 entry = (data.get("AppleSymbolicHotKeys") or {}).get(hk)
+if entry is None and hk.isdigit():
+    entry = (data.get("AppleSymbolicHotKeys") or {}).get(int(hk))
 if not isinstance(entry, dict):
     raise SystemExit(2)
 enabled = 1 if entry.get("enabled") else 0
@@ -1142,19 +1144,41 @@ mac_fix_sound_menu_bar() {
     return 0
 }
 
-mac_fix_next_window_czech() {
-    # Symbolic hotkey 27 = "Move focus to next window". Bind it to keycode 10
-    # (the key that types < on Czech-QWERTY, after Karabiner's
-    # non_us_backslash/grave swap) with the Command modifier (1048576). The
-    # character is 65535 (none) on purpose: storing the glyph < makes macOS
-    # infer Shift and turn the combo into Command-Shift, so binding by keycode
-    # keeps it a plain Command-<.
-    defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 27 \
-        '{enabled = 1; value = {parameters = (65535, 10, 1048576); type = "standard";};}' \
-        || return 1
-    # Reload shortcut settings so the change takes effect without a full re-login.
+mac_fix_next_window_angle() {
+    # Symbolic hotkey 27 = "Move focus to next window". Bind to Command-<
+    # (keycap label; stored as ASCII 92 with keycode 50, Command 1048576) —
+    # same physical key as Command-`, differing only by character. Matches
+    # toggle-switch-key / System Settings on this layout.
+    defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 27 "
+<dict>
+  <key>enabled</key><true/>
+  <key>value</key>
+  <dict>
+    <key>type</key><string>standard</string>
+    <key>parameters</key>
+    <array>
+      <integer>92</integer>
+      <integer>50</integer>
+      <integer>1048576</integer>
+    </array>
+  </dict>
+</dict>
+" || return 1
+    defaults read com.apple.symbolichotkeys >/dev/null 2>&1 || true
     /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u \
         2>/dev/null || true
+    return 0
+}
+
+# Return 0 if hotkey 27 is Command-< (ASCII 92, keycode 50, Command) — the
+# expected binding under Czech-QWERTY + Karabiner. Command-` is the other
+# toggle-switch-key value but is not the desired state for this check.
+mac_next_window_is_switch_key_binding() {
+    local hk_char="" hk_key="" hk_mod="" hk_enabled="" hk_read=""
+    hk_read=$(mac_read_symbolic_hotkey 27) || return 1
+    read -r hk_char hk_key hk_mod hk_enabled <<<"$hk_read"
+    [[ "$hk_enabled" == 1 && "$hk_mod" == 1048576 && "$hk_key" == 50 ]] || return 1
+    [[ "$hk_char" == 92 ]] || return 1
     return 0
 }
 
@@ -1190,9 +1214,9 @@ offer_fix_mac_setting() {
                 report_warn "Setting $label (could not update Control Center)"
             fi
             ;;
-        next-window-czech-qwerty)
+        next-window-switch-key)
             gar_prompt_yn "Fix $label: map \"Move focus to next window\" to Command-<?" || return 0
-            if mac_fix_next_window_czech; then
+            if mac_fix_next_window_angle; then
                 printf 'Mapped Move focus to next window to Command-< (log out/in if it does not take effect right away).\n'
             else
                 report_warn "Setting $label (could not update symbolic hotkey)"
@@ -1209,22 +1233,16 @@ check_mac_settings() {
         actual=""
 
         case "$kind" in
-            next-window-czech-qwerty)
+            next-window-switch-key)
                 # Only relevant with Karabiner Elements installed and the
                 # Czech-QWERTY input source enabled; otherwise skip silently.
                 if ! mac_karabiner_installed || ! mac_czech_qwerty_enabled; then
                     continue
                 fi
-                hk_read=$(mac_read_symbolic_hotkey 27) || hk_read=""
-                read -r hk_char hk_key hk_mod hk_enabled <<<"$hk_read"
-                # Match on keycode 10 (the < key on Czech-QWERTY) with the
-                # Command modifier (1048576). The char is intentionally ignored:
-                # binding by keycode avoids macOS inferring Shift from the
-                # shifted glyph < and turning the combo into Command-Shift.
-                if [[ "$hk_enabled" == 1 && "$hk_key" == 10 && "$hk_mod" == 1048576 ]]; then
+                if mac_next_window_is_switch_key_binding; then
                     report_ok "Setting $label"
                 else
-                    report_warn "Setting $label (map to Command-< under System Settings → Keyboard → Keyboard Shortcuts → Keyboard → Move focus to next window)"
+                    report_warn "Setting $label (map to Command-<; toggle-switch-key toggles with Command-\`)"
                     offer_fix_mac_setting "$kind" "$location" "$key" "$expected" "$label"
                 fi
                 continue

@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Toggle "Move focus to next window" between Command-` and Command-<.
+# Command-< is the keycap label; the binding is stored as ASCII backslash (92)
+# with keycode 50 (same physical key System Settings records for both).
+set -euo pipefail
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: toggle-switch-key [show]
+
+Toggle the macOS "Move focus to next window" shortcut (symbolic hotkey 27)
+between Command-` (standard) and Command-<.
+
+  show   Print which binding is currently selected; do not change it.
+
+Requires macOS. Reloads shortcut settings via activateSettings.
+EOF
+  exit 0
+fi
+
+if [[ "$(uname -s)" != Darwin ]]; then
+  echo "toggle-switch-key: macOS only" >&2
+  exit 1
+fi
+
+# Symbolic hotkey 27 parameters: (ascii_or_65535, keycode, modifier).
+# Command modifier = 1048576. Both bindings use keycode 50 (the physical key
+# System Settings stores for Command-` and for Command-< on this layout);
+# they differ only by ASCII char: 96 = `, 92 = \ (keycap <).
+readonly CMD_MOD=1048576
+readonly KEY_SWITCH=50
+readonly CHAR_GRAVE=96
+readonly CHAR_ANGLE=92
+readonly ACTIVATE_SETTINGS=/System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings
+
+# Print "char keycode modifier enabled" for hotkey id; exit 2 if missing, 1 on error.
+read_symbolic_hotkey() {
+  local hk="$1" tmp rc
+  tmp=$(mktemp) || return 1
+  if ! defaults export com.apple.symbolichotkeys "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  python3 - "$tmp" "$hk" <<'PY'
+import sys, plistlib
+path, hk = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "rb") as f:
+        data = plistlib.load(f)
+except Exception:
+    raise SystemExit(1)
+hotkeys = data.get("AppleSymbolicHotKeys") or {}
+entry = hotkeys.get(hk)
+if entry is None and hk.isdigit():
+    entry = hotkeys.get(int(hk))
+if not isinstance(entry, dict):
+    raise SystemExit(2)
+enabled = 1 if entry.get("enabled") else 0
+params = ((entry.get("value") or {}).get("parameters")) or []
+char = params[0] if len(params) > 0 else -1
+keycode = params[1] if len(params) > 1 else -1
+mod = params[2] if len(params) > 2 else -1
+print("%s %s %s %s" % (char, keycode, mod, enabled))
+PY
+  rc=$?
+  rm -f "$tmp"
+  return $rc
+}
+
+write_hotkey() {
+  local char="$1"
+  # XML form is reliable; then force a read so activateSettings sees the update.
+  defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 27 "
+<dict>
+  <key>enabled</key><true/>
+  <key>value</key>
+  <dict>
+    <key>type</key><string>standard</string>
+    <key>parameters</key>
+    <array>
+      <integer>${char}</integer>
+      <integer>${KEY_SWITCH}</integer>
+      <integer>${CMD_MOD}</integer>
+    </array>
+  </dict>
+</dict>
+"
+  defaults read com.apple.symbolichotkeys >/dev/null 2>&1 || true
+  "$ACTIVATE_SETTINGS" -u 2>/dev/null || true
+}
+
+# Set CURRENT_LABEL / CURRENT_KIND from hotkey 27 (char-first).
+classify_current() {
+  local hk_char="" hk_key="" hk_mod="" hk_enabled="" hk_read="" read_rc=0
+  set +e
+  hk_read=$(read_symbolic_hotkey 27)
+  read_rc=$?
+  set -e
+  if [[ $read_rc -eq 0 && -n "$hk_read" ]]; then
+    read -r hk_char hk_key hk_mod hk_enabled <<<"$hk_read"
+  fi
+
+  if [[ "${hk_enabled:-}" == 1 && "$hk_mod" == "$CMD_MOD" ]]; then
+    if [[ "$hk_char" == "$CHAR_GRAVE" ]]; then
+      CURRENT_LABEL='Command-`'
+      CURRENT_KIND=grave
+    elif [[ "$hk_char" == "$CHAR_ANGLE" ]]; then
+      CURRENT_LABEL='Command-<'
+      CURRENT_KIND=angle
+    elif [[ "$hk_key" == "$KEY_SWITCH" ]]; then
+      # Keycode-only / ambiguous: treat as standard Command-`.
+      CURRENT_LABEL='Command-`'
+      CURRENT_KIND=grave
+    else
+      CURRENT_LABEL="(other: char=${hk_char:-?} key=${hk_key:-?} mod=${hk_mod:-?} enabled=${hk_enabled:-?})"
+      CURRENT_KIND=other
+    fi
+  elif [[ $read_rc -eq 2 || -z "${hk_enabled:-}" ]]; then
+    CURRENT_LABEL='(unset)'
+    CURRENT_KIND=other
+  else
+    CURRENT_LABEL="(other: char=${hk_char:-?} key=${hk_key:-?} mod=${hk_mod:-?} enabled=${hk_enabled:-?})"
+    CURRENT_KIND=other
+  fi
+}
+
+classify_current
+
+if [[ "${1:-}" == show ]]; then
+  echo "Move focus to next window: $CURRENT_LABEL"
+  exit 0
+fi
+
+if [[ -n "${1:-}" ]]; then
+  echo "toggle-switch-key: unknown argument: $1 (try show or --help)" >&2
+  exit 1
+fi
+
+# If currently Command-` → Command-<; otherwise → Command-`.
+if [[ "$CURRENT_KIND" == grave ]]; then
+  write_hotkey "$CHAR_ANGLE"
+  echo "Move focus to next window → Command-<"
+else
+  write_hotkey "$CHAR_GRAVE"
+  echo "Move focus to next window → Command-\`"
+fi
