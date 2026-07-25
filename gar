@@ -63,7 +63,8 @@ Options and commands
   info [name]   With no name: show the platform info page (gar.d/<platform>.info;
                 empty by default). With a name: install hints and general info
                 for a tracked item (case-insensitive)
-  roles         List known role ids (those with gar.d/role.<id>.* manifests)
+  roles         List known role ids (those with gar.d/role.<id>.* manifests);
+                enabled roles are prefixed with "✓ " (others with two spaces)
 
 Exit status: 0 if everything looks good, 1 if anything is missing.
 EOF
@@ -431,11 +432,24 @@ gar_known_roles() {
     done | sort -u
 }
 
+gar_role_is_active() {
+    local role="$1" r
+    for r in "${gar_active_roles[@]}"; do
+        [[ "$r" == "$role" ]] && return 0
+    done
+    return 1
+}
+
 cmd_roles() {
     local role
+    detect_roles
     while IFS= read -r role; do
         [[ -n "$role" ]] || continue
-        printf '%s\n' "$role"
+        if gar_role_is_active "$role"; then
+            printf '✓ %s\n' "$role"
+        else
+            printf '  %s\n' "$role"
+        fi
     done < <(gar_known_roles)
 }
 
