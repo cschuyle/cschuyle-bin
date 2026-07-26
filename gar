@@ -117,7 +117,7 @@ cmd_apps() {
         name="${entry%%|*}"
         path="${entry#*|}"
         printf '%s\n' "$name"
-        printf '  Path: %s\n' "$path"
+        printf '  Path: %s\n' "$(gar_app_format_paths "$path")"
         if hint=$(lookup_install_hint "$name" 2>/dev/null); then
             printf '  Install: %s\n' "$hint"
         else
@@ -237,6 +237,38 @@ gar_all_capability_manifests() {
     done
 }
 
+# Split a manifest path field on '|' into candidate paths, one per line. An app
+# entry may list several paths (name|path|path...); any existing one counts as
+# installed.
+gar_app_candidate_paths() {
+    local field="$1" path
+    while IFS= read -r path || [[ -n "$path" ]]; do
+        [[ -n "$path" ]] && printf '%s\n' "$path"
+    done < <(printf '%s' "$field" | tr '|' '\n')
+}
+
+# Print the first candidate path that exists on disk; return 1 if none do.
+gar_app_first_existing_path() {
+    local field="$1" path
+    while IFS= read -r path; do
+        [[ -e "$path" ]] && { printf '%s\n' "$path"; return 0; }
+    done < <(gar_app_candidate_paths "$field")
+    return 1
+}
+
+# Join candidate paths with " or " for display.
+gar_app_format_paths() {
+    local field="$1" path out=""
+    while IFS= read -r path; do
+        if [[ -z "$out" ]]; then
+            out="$path"
+        else
+            out="$out or $path"
+        fi
+    done < <(gar_app_candidate_paths "$field")
+    printf '%s\n' "$out"
+}
+
 lookup_app_entry() {
     local query="$1" entry name path manifest
     while IFS= read -r manifest; do
@@ -308,7 +340,7 @@ brew_miss_hint() {
 }
 
 cmd_info() {
-    local query="$1" app_entry canonical path hint ext_entry browser ext_id label app_path info
+    local query="$1" app_entry canonical path hint ext_entry browser ext_id label app_path app_found info
 
     if [[ -z "$query" ]]; then
         if info=$(lookup_platform_info); then
@@ -321,9 +353,9 @@ cmd_info() {
         canonical="${app_entry%%|*}"
         path="${app_entry#*|}"
         printf '%s (app)\n' "$canonical"
-        printf 'Expected path: %s\n' "$path"
-        if [[ -e "$path" ]]; then
-            printf 'Status: installed\n'
+        printf 'Expected path: %s\n' "$(gar_app_format_paths "$path")"
+        if app_found=$(gar_app_first_existing_path "$path"); then
+            printf 'Status: installed (%s)\n' "$app_found"
         else
             printf 'Status: not installed\n'
         fi
@@ -1555,10 +1587,10 @@ check_mac_apps() {
             report_miss "App manifest line (expected name|path): $entry"
             continue
         fi
-        if [[ -e "$path" ]]; then
+        if gar_app_first_existing_path "$path" >/dev/null; then
             report_ok "App $name"
         else
-            report_miss "App $name ($path)"
+            report_miss "App $name ($(gar_app_format_paths "$path"))"
         fi
     done < <(read_manifest "$apps_manifest")
 }
