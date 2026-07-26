@@ -277,22 +277,24 @@ lookup_browser_extension_entry() {
 }
 
 lookup_brew_hint() {
-    local query="$1" line name
-    while IFS= read -r line; do
-        if [[ "$line" =~ ^brew[[:space:]]+\"([^\"]+)\" ]]; then
-            name="${BASH_REMATCH[1]}"
-            if gar_name_eq "$query" "$name"; then
-                printf 'brew install %s\n' "$name"
-                return 0
+    local query="$1" line name manifest
+    while IFS= read -r manifest; do
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^brew[[:space:]]+\"([^\"]+)\" ]]; then
+                name="${BASH_REMATCH[1]}"
+                if gar_name_eq "$query" "$name"; then
+                    printf 'brew install %s\n' "$name"
+                    return 0
+                fi
+            elif [[ "$line" =~ ^cask[[:space:]]+\"([^\"]+)\" ]]; then
+                name="${BASH_REMATCH[1]}"
+                if gar_name_eq "$query" "$name"; then
+                    printf 'brew install --cask %s\n' "$name"
+                    return 0
+                fi
             fi
-        elif [[ "$line" =~ ^cask[[:space:]]+\"([^\"]+)\" ]]; then
-            name="${BASH_REMATCH[1]}"
-            if gar_name_eq "$query" "$name"; then
-                printf 'brew install --cask %s\n' "$name"
-                return 0
-            fi
-        fi
-    done < <(read_manifest "$GAR_DIR/mac.Brewfile")
+        done < <(read_manifest "$manifest")
+    done < <(gar_all_capability_manifests mac Brewfile)
     return 1
 }
 
@@ -1395,9 +1397,10 @@ check_mac_homebrew() {
     fi
     report_ok "Homebrew ($brew_bin)"
 
-    local brewfile="$GAR_DIR/mac.Brewfile"
-    if [[ ! -f "$brewfile" ]]; then
-        report_miss "Homebrew manifest ($brewfile missing)"
+    local brewfile
+    brewfile=$(gar_combined_capability_manifest mac Brewfile)
+    if [[ ! -f "$brewfile" || ! -s "$brewfile" ]]; then
+        report_miss "Homebrew manifest (mac.Brewfile missing)"
         return
     fi
 
