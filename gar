@@ -9,6 +9,19 @@ gar_section_header_printed=0
 gar_tmpdir=""
 gar_active_roles=()
 
+# Machine-local manifest overlays (same XDG base as ~/.config/gar/roles).
+gar_local_dir() {
+    printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/gar/d"
+}
+
+# Emit existing manifest roots in order: repo gar.d, then local ~/.config/gar/d.
+gar_manifest_dirs() {
+    local local_dir
+    printf '%s\n' "$GAR_DIR"
+    local_dir=$(gar_local_dir)
+    [[ -d "$local_dir" ]] && printf '%s\n' "$local_dir"
+}
+
 gar_init_workdir() {
     gar_tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/gar.XXXXXX")
     trap '[[ -n "$gar_tmpdir" ]] && rm -rf "$gar_tmpdir"' EXIT
@@ -32,12 +45,15 @@ Usage: gar [-ah]
        gar roles
        gar --man
 
-Check the current machine's configuration against the desired state in gar.d/.
+Check the current machine's configuration against the desired state in gar.d/
+and optional machine-local overlays in ~/.config/gar/d/.
 Reports missing or out-of-date elements. Mac, Synology, and WSL checks are
 implemented; plain Linux is detected but not yet audited.
 
 Desired state is the platform/shared base plus an additive union of role
-overlays enabled for this machine.
+overlays enabled for this machine. Manifest roots are the repo gar.d/ then
+~/.config/gar/d/ (if present); platform/shared files use first match (repo
+preferred), role overlays from both roots are concatenated.
 
 Roles
   Enable roles in ~/.config/gar/roles (one role id per line). A missing file
@@ -50,8 +66,9 @@ Roles
     my-data-client
     dev-tools
 
-  Known role ids are listed by `gar roles` (those with gar.d/role.<id>.*
-  manifests). Unknown ids in the roles file produce a WARN at audit time.
+  Known role ids are listed by `gar roles` (those with role.<id>.* manifests
+  in gar.d/ or ~/.config/gar/d/). Unknown ids in the roles file produce a WARN
+  at audit time.
 
 Options and commands
   -a, --all     Show all checks, including OK (default: only MISS and WARN)
@@ -59,11 +76,11 @@ Options and commands
                 Show this help
   apps          List GUI apps tracked for this machine (platform base plus active
                 role overlays). With -r <role>: only that role's apps overlay
-                (gar.d/role.<role>.apps)
-  info [name]   With no name: show the platform info page (gar.d/<platform>.info;
-                empty by default). With a name: install hints and general info
-                for a tracked item (case-insensitive)
-  roles         List known role ids (those with gar.d/role.<id>.* manifests);
+                (role.<role>.apps under gar.d/ or ~/.config/gar/d/)
+  info [name]   With no name: show the platform info page (<platform>.info under
+                a manifest root; empty by default). With a name: install hints
+                and general info for a tracked item (case-insensitive)
+  roles         List known role ids (role.<id>.* under gar.d/ or ~/.config/gar/d/);
                 enabled roles are prefixed with "✓ " (others with two spaces)
 
 Exit status: 0 if everything looks good, 1 if anything is missing.
@@ -99,8 +116,9 @@ cmd_apps() {
             echo "Unknown role: $role" >&2
             exit 1
         fi
-        role_file="$GAR_DIR/role.$role.apps"
-        if [[ ! -f "$role_file" ]]; then
+        gar_init_workdir
+        role_file=$(gar_collect_role_manifest_for_role "$role" apps)
+        if [[ ! -f "$role_file" || ! -s "$role_file" ]]; then
             printf 'No apps for role %s\n' "$role"
             return 0
         fi
@@ -144,12 +162,21 @@ lookup_install_hint() {
 }
 
 gar_resolve_manifest() {
-    local platform="$1" name="$2"
-    if [[ -f "$GAR_DIR/$platform.$name" ]]; then
-        printf '%s\n' "$GAR_DIR/$platform.$name"
-    elif [[ -f "$GAR_DIR/shared.$name" ]]; then
-        printf '%s\n' "$GAR_DIR/shared.$name"
-    fi
+    local platform="$1" name="$2" dir
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        if [[ -f "$dir/$platform.$name" ]]; then
+            printf '%s\n' "$dir/$platform.$name"
+            return 0
+        fi
+    done < <(gar_manifest_dirs)
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        if [[ -f "$dir/shared.$name" ]]; then
+            printf '%s\n' "$dir/shared.$name"
+            return 0
+        fi
+    done < <(gar_manifest_dirs)
 }
 
 gar_hints_file() {
@@ -164,17 +191,30 @@ gar_hints_file() {
 }
 
 gar_info_dirs() {
-    # Platform-specific info first, then shared info (inherited). A
-    # platform file with the same name shadows the shared one.
-    local platform="$1"
-    [[ -d "$GAR_DIR/$platform.info.d" ]] && printf '%s\n' "$GAR_DIR/$platform.info.d"
-    [[ -d "$GAR_DIR/shared.info.d" ]] && printf '%s\n' "$GAR_DIR/shared.info.d"
+    # Platform-specific info first, then shared info (inherited), per manifest
+    # root (repo then local). A platform file with the same name shadows shared.
+    local platform="$1" dir
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        [[ -d "$dir/$platform.info.d" ]] && printf '%s\n' "$dir/$platform.info.d"
+    done < <(gar_manifest_dirs)
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        [[ -d "$dir/shared.info.d" ]] && printf '%s\n' "$dir/shared.info.d"
+    done < <(gar_manifest_dirs)
 }
 
-# Platform default page for `gar info` with no name: gar.d/<platform>.info
-# (missing or empty = no content).
+# Platform default page for `gar info` with no name: <platform>.info under a
+# manifest root (first match; missing or empty = no content).
 gar_platform_info_file() {
-    local platform="${1:-$(detect_platform)}"
+    local platform="${1:-$(detect_platform)}" dir
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        if [[ -f "$dir/$platform.info" ]]; then
+            printf '%s\n' "$dir/$platform.info"
+            return 0
+        fi
+    done < <(gar_manifest_dirs)
     printf '%s\n' "$GAR_DIR/$platform.info"
 }
 
@@ -225,16 +265,16 @@ gar_print_install_hint() {
 
 # List platform + all role.* manifests for a capability (for lookups / info).
 gar_all_capability_manifests() {
-    local platform="$1" capability="$2" f
-    if [[ -f "$GAR_DIR/$platform.$capability" ]]; then
-        printf '%s\n' "$GAR_DIR/$platform.$capability"
-    elif [[ -f "$GAR_DIR/shared.$capability" ]]; then
-        printf '%s\n' "$GAR_DIR/shared.$capability"
-    fi
-    for f in "$GAR_DIR"/role.*."$capability"; do
-        [[ -f "$f" ]] || continue
-        printf '%s\n' "$f"
-    done
+    local platform="$1" capability="$2" dir f base
+    base=$(gar_resolve_manifest "$platform" "$capability")
+    [[ -n "$base" && -f "$base" ]] && printf '%s\n' "$base"
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        for f in "$dir"/role.*."$capability"; do
+            [[ -f "$f" ]] || continue
+            printf '%s\n' "$f"
+        done
+    done < <(gar_manifest_dirs)
 }
 
 # Split a manifest path field on '|' into candidate paths, one per line. An app
@@ -445,25 +485,31 @@ gar_roles_file() {
 }
 
 gar_role_is_known() {
-    local role="$1" f
-    for f in "$GAR_DIR"/role."$role".*; do
-        [[ -e "$f" ]] || continue
-        [[ -f "$f" ]] && return 0
-    done
+    local role="$1" dir f
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        for f in "$dir"/role."$role".*; do
+            [[ -e "$f" ]] || continue
+            [[ -f "$f" ]] && return 0
+        done
+    done < <(gar_manifest_dirs)
     return 1
 }
 
-# Emit known role ids (unique, sorted) from gar.d/role.<id>.* manifests.
+# Emit known role ids (unique, sorted) from role.<id>.* under all manifest roots.
 gar_known_roles() {
-    local f base rest role
-    for f in "$GAR_DIR"/role.*; do
-        [[ -f "$f" ]] || continue
-        base=$(basename "$f")
-        rest="${base#role.}"
-        role="${rest%.*}"
-        [[ -n "$role" && "$role" != "$rest" ]] || continue
-        printf '%s\n' "$role"
-    done | sort -u
+    local dir f base rest role
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        for f in "$dir"/role.*; do
+            [[ -f "$f" ]] || continue
+            base=$(basename "$f")
+            rest="${base#role.}"
+            role="${rest%.*}"
+            [[ -n "$role" && "$role" != "$rest" ]] || continue
+            printf '%s\n' "$role"
+        done
+    done < <(gar_manifest_dirs) | sort -u
 }
 
 gar_role_is_active() {
@@ -514,22 +560,38 @@ gar_warn_unknown_roles() {
     local role
     for role in "${gar_active_roles[@]}"; do
         if ! gar_role_is_known "$role"; then
-            printf 'WARN Unknown role: %s (no gar.d/role.%s.* manifests)\n' "$role" "$role"
+            printf 'WARN Unknown role: %s (no role.%s.* in gar.d/ or ~/.config/gar/d/)\n' "$role" "$role"
         fi
     done
+}
+
+# Concatenate role.<role>.<capability> from all manifest roots into a temp file.
+# Writes under gar_tmpdir; call gar_init_workdir first.
+gar_collect_role_manifest_for_role() {
+    local role="$1" capability="$2" out dir f
+    out="$gar_tmpdir/role.$role.$capability"
+    : >"$out"
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        f="$dir/role.$role.$capability"
+        if [[ -f "$f" ]]; then
+            cat "$f" >>"$out"
+            printf '\n' >>"$out"
+        fi
+    done < <(gar_manifest_dirs)
+    printf '%s\n' "$out"
 }
 
 # Concatenate role.<role>.<capability> for each active role into a temp file.
 # Writes under gar_tmpdir; call gar_init_workdir first.
 gar_collect_role_manifest() {
-    local capability="$1" out role f
+    local capability="$1" out role role_file
     out="$gar_tmpdir/role.$capability"
     : >"$out"
     for role in "${gar_active_roles[@]}"; do
-        f="$GAR_DIR/role.$role.$capability"
-        if [[ -f "$f" ]]; then
-            cat "$f" >>"$out"
-            printf '\n' >>"$out"
+        role_file=$(gar_collect_role_manifest_for_role "$role" "$capability")
+        if [[ -n "$role_file" && -f "$role_file" && -s "$role_file" ]]; then
+            cat "$role_file" >>"$out"
         fi
     done
     printf '%s\n' "$out"
