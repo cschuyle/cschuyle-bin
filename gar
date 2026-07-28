@@ -629,8 +629,10 @@ gar_can_prompt() {
     [[ -r /dev/tty ]] || [[ -t 0 ]]
 }
 
+# Prompt Y/n (default Y). Optional second arg: help text printed when the user
+# answers "?"; when set, the prompt suffix is [Y/n/?-Print install command].
 gar_prompt_yn() {
-    local prompt="$1" reply input
+    local prompt="$1" help="${2:-}" reply input suffix
     if [[ -r /dev/tty ]]; then
         input=/dev/tty
     elif [[ -t 0 ]]; then
@@ -639,8 +641,14 @@ gar_prompt_yn() {
         return 1
     fi
 
+    if [[ -n "$help" ]]; then
+        suffix='[Y/n/?-Print install command]'
+    else
+        suffix='[Y/n]'
+    fi
+
     while true; do
-        printf '%s [Y/n] ' "$prompt" >&2
+        printf '%s %s ' "$prompt" "$suffix" >&2
         if ! IFS= read -r reply <"$input"; then
             return 1
         fi
@@ -651,7 +659,20 @@ gar_prompt_yn() {
         case "$reply" in
             [Yy]|[Yy][Ee][Ss]) return 0 ;;
             [Nn]|[Nn][Oo]) return 1 ;;
-            *) printf 'Please answer Y or n.\n' >&2 ;;
+            \?)
+                if [[ -n "$help" ]]; then
+                    printf '%s\n' "$help" >&2
+                else
+                    printf 'Please answer Y or n.\n' >&2
+                fi
+                ;;
+            *)
+                if [[ -n "$help" ]]; then
+                    printf 'Please answer Y, n, or ?.\n' >&2
+                else
+                    printf 'Please answer Y or n.\n' >&2
+                fi
+                ;;
         esac
     done
 }
@@ -1371,7 +1392,7 @@ mac_secret_exists() {
 offer_brew_install_missing() {
     local brew_bin="$1"
     shift
-    local item name prompt
+    local item name prompt help
 
     gar_can_prompt || return 0
 
@@ -1379,7 +1400,8 @@ offer_brew_install_missing() {
         if [[ "$item" =~ ^Tap[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
             name="${BASH_REMATCH[1]}"
             prompt="Tap $name?"
-            gar_prompt_yn "$prompt" || continue
+            help="brew tap $name"
+            gar_prompt_yn "$prompt" "$help" || continue
             if "$brew_bin" tap "$name"; then
                 printf 'Tapped %s.\n' "$name"
             else
@@ -1388,7 +1410,12 @@ offer_brew_install_missing() {
         elif [[ "$item" =~ ^Formula[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
             name="${BASH_REMATCH[1]}"
             prompt="Install $name (brew)?"
-            gar_prompt_yn "$prompt" || continue
+            if [[ "$name" == gng || "$name" == */gng ]]; then
+                help=$'brew trust --formula gdubw/gng/gng\nbrew install '"$name"
+            else
+                help="brew install $name"
+            fi
+            gar_prompt_yn "$prompt" "$help" || continue
             if [[ "$name" == gng || "$name" == */gng ]]; then
                 if ! "$brew_bin" trust --formula gdubw/gng/gng; then
                     report_warn "Homebrew: could not trust gdubw/gng/gng"
@@ -1403,7 +1430,8 @@ offer_brew_install_missing() {
         elif [[ "$item" =~ ^Cask[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
             name="${BASH_REMATCH[1]}"
             prompt="Install $name (brew cask)?"
-            gar_prompt_yn "$prompt" || continue
+            help="brew install --cask $name"
+            gar_prompt_yn "$prompt" "$help" || continue
             if "$brew_bin" install --cask "$name"; then
                 printf 'Installed %s.\n' "$name"
             else
