@@ -1,0 +1,168 @@
+#!/usr/bin/env zsh
+# remindme-cschuyle — list aliases, functions, and scripts from this project.
+#
+#   remindme-cschuyle           # print everything
+#   remindme-cschuyle aliases   # only aliases
+#   remindme-cschuyle functions # only shell functions
+#   remindme-cschuyle scripts   # only scripts
+#
+# Works in two layouts:
+#   <repo>/bin/<this>   — zshrcs at <repo>/*.zshrc, scripts in <repo>/bin/
+#   <repo>/<this>       — zshrcs at <repo>/*.zshrc, scripts in <repo>/
+# Does not depend on a live shell having already sourced the zshrcs.
+
+emulate -L zsh
+setopt EXTENDED_GLOB
+set -u
+
+ME="${0:t}"
+HERE="${0:A:h}"
+if [[ "${HERE:t}" == bin ]]; then
+  ROOT="${HERE:h}"
+  BIN="$HERE"
+else
+  ROOT="$HERE"
+  BIN="$HERE"
+fi
+ZSHRCS=("$ROOT"/*.zshrc(N))
+
+# Leading comment immediately above a definition (blank lines ignored).
+# $1 = file, $2 = 1-based line number of the definition.
+_prev_comment() {
+  local file=$1 lineno=$2 line
+  local -a lines
+  lines=("${(@f)$(<$file)}")
+  local i=$((lineno - 1))
+  while (( i >= 1 )); do
+    line=$lines[i]
+    [[ -z "${line//[[:space:]]/}" ]] && { (( i-- )); continue; }
+    [[ "$line" == \#* ]] || break
+    # Skip heavy section banners / separators
+    [[ "$line" == \#\#* || "$line" == \#\ -* || "$line" == \#\ =* ]] && break
+    print -r -- "${${line#\# }#\#}"
+    return
+  done
+}
+
+_print_row() {
+  local name=$1 desc=$2
+  if [[ -n $desc ]]; then
+    printf '  %-28s  %s\n' "$name" "$desc"
+  else
+    printf '  %s\n' "$name"
+  fi
+}
+
+_list_aliases() {
+  local file line name rhs desc
+  local -a lines
+  local -i n
+  print 'Aliases'
+  for file in $ZSHRCS; do
+    lines=("${(@f)$(<$file)}")
+    for (( n = 1; n <= ${#lines}; n++ )); do
+      line=$lines[n]
+      [[ "$line" =~ '^[[:space:]]*alias[[:space:]]+([^=[:space:]]+)=(.*)$' ]] || continue
+      name=$match[1]
+      rhs=$match[2]
+      rhs=${rhs#\'}; rhs=${rhs%\'}
+      rhs=${rhs#\"}; rhs=${rhs%\"}
+      desc=$(_prev_comment "$file" $n)
+      [[ -z $desc ]] && desc=$rhs
+      _print_row "$name" "$desc"
+    done
+  done
+}
+
+_list_functions() {
+  local file line name desc
+  local -a lines
+  local -i n
+  print 'Functions'
+  for file in $ZSHRCS; do
+    lines=("${(@f)$(<$file)}")
+    for (( n = 1; n <= ${#lines}; n++ )); do
+      line=$lines[n]
+      if [[ "$line" =~ '^[[:space:]]*function[[:space:]]+([[:alnum:]_-]+)[[:space:]]*\{' ]]; then
+        name=$match[1]
+      elif [[ "$line" =~ '^[[:space:]]*([[:alnum:]_-]+)\(\)[[:space:]]*\{' ]]; then
+        name=$match[1]
+      else
+        continue
+      fi
+      desc=$(_prev_comment "$file" $n)
+      _print_row "$name" "$desc"
+    done
+  done
+}
+
+_script_blurb() {
+  # First meaningful comment after the shebang (prefer "name — desc").
+  local file=$1 line
+  local -i saw_shebang=0
+  for line in "${(@f)$(<$file)}"; do
+    if (( ! saw_shebang )); then
+      if [[ "$line" == \#!* ]]; then
+        saw_shebang=1
+        continue
+      fi
+    fi
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    [[ "$line" == \#* ]] || break
+    line=${${line#\# }#\#}
+    if [[ "$line" == *'—'* ]]; then
+      print -r -- "${line#*— }"
+      return
+    elif [[ "$line" == *' - '* ]]; then
+      print -r -- "${line#* - }"
+      return
+    fi
+    print -r -- "$line"
+    return
+  done
+}
+
+_is_script() {
+  local f=$1 first
+  [[ -x $f ]] && return 0
+  IFS= read -r first < "$f" || return 1
+  [[ "$first" == \#!* ]]
+}
+
+_list_scripts() {
+  local f name desc label
+  if [[ "$BIN" == "$ROOT" ]]; then
+    label=${BIN:t}
+  else
+    label=${BIN#$ROOT/}
+  fi
+  print "Scripts ($label)"
+  for f in "$BIN"/*(N.); do
+    _is_script "$f" || continue
+    name=${f:t}
+    desc=$(_script_blurb "$f")
+    _print_row "$name" "$desc"
+  done
+}
+
+usage() {
+  print -u2 "usage: $ME [ aliases | functions | scripts ]"
+}
+
+main() {
+  local what=${1:-all}
+  case $what in
+    -h|--help|help) usage; return 0 ;;
+    all)
+      _list_aliases; print
+      _list_functions; print
+      _list_scripts
+      ;;
+    aliases|alias)     _list_aliases ;;
+    functions|function|funcs|func) _list_functions ;;
+    scripts|script|bin) _list_scripts ;;
+    *) usage; return 1 ;;
+  esac
+}
+
+main "$@"
