@@ -311,7 +311,6 @@ gar_app_format_paths() {
     printf '%s\n' "$out"
 }
 
-
 # Basename of an .app path without the .app suffix (e.g. Rancher Desktop).
 gar_app_path_label() {
     local path="$1" base
@@ -406,6 +405,95 @@ brew_miss_hint() {
     return 1
 }
 
+# Classify a docker endpoint/context name as Docker Desktop, Rancher Desktop, or other.
+gar_docker_classify() {
+    local text="$1" path
+    path="${text#unix://}"
+    path="${path/#\~/$HOME}"
+    if [[ "$text" == *rancher-desktop* || "$path" == "$HOME/.rd/docker.sock" || "$path" == *"/.rd/docker.sock" ]]; then
+        printf 'Rancher Desktop\n'
+        return 0
+    fi
+    if [[ "$text" == *desktop-linux* || "$path" == "$HOME/.docker/run/docker.sock" || "$path" == *"/.docker/run/docker.sock" ]]; then
+        printf 'Docker Desktop\n'
+        return 0
+    fi
+    if [[ "$path" == /var/run/docker.sock ]]; then
+        if [[ -L /var/run/docker.sock ]]; then
+            gar_docker_classify "$(readlink /var/run/docker.sock 2>/dev/null || true)"
+            return
+        fi
+        printf 'default socket\n'
+        return 0
+    fi
+    printf 'other\n'
+}
+
+# Print which Docker engine the CLI currently targets (context / DOCKER_HOST).
+gar_print_docker_configured() {
+    local host_engine ctx endpoint ctx_engine name current ep
+    local docker_bin="" saved_ctx installed=""
+
+    printf '\nConfigured:\n'
+    if [[ -n "${DOCKER_HOST-}" ]]; then
+        host_engine=$(gar_docker_classify "$DOCKER_HOST")
+        printf '  DOCKER_HOST: %s (%s) — overrides docker context\n' "$DOCKER_HOST" "$host_engine"
+    else
+        printf '  DOCKER_HOST: (unset)\n'
+    fi
+
+    if [[ -f "$HOME/.docker/config.json" ]]; then
+        saved_ctx=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("currentContext") or "")' \
+            "$HOME/.docker/config.json" 2>/dev/null || true)
+    fi
+
+    if command -v docker >/dev/null 2>&1; then
+        docker_bin=$(command -v docker)
+    fi
+
+    if [[ -n "$docker_bin" ]]; then
+        ctx=$("$docker_bin" context show 2>/dev/null || true)
+        endpoint=$("$docker_bin" context inspect "$ctx" -f '{{.Endpoints.docker.Host}}' 2>/dev/null || true)
+        if [[ -n "$ctx" ]]; then
+            ctx_engine=$(gar_docker_classify "${endpoint:-$ctx}")
+            if [[ -n "$endpoint" ]]; then
+                printf '  active context: %s → %s (%s)\n' "$ctx" "$endpoint" "$ctx_engine"
+            else
+                printf '  active context: %s (%s)\n' "$ctx" "$ctx_engine"
+            fi
+        else
+            printf '  active context: (could not read)\n'
+        fi
+        if [[ -n "$saved_ctx" && "$saved_ctx" != "$ctx" ]]; then
+            printf '  saved context: %s (in ~/.docker/config.json)\n' "$saved_ctx"
+        fi
+        printf '  contexts:\n'
+        while IFS='|' read -r name current ep; do
+            [[ -n "$name" ]] || continue
+            ctx_engine=$(gar_docker_classify "${ep:-$name}")
+            if [[ "$current" == "true" ]]; then
+                printf '    * %s → %s (%s)\n' "$name" "${ep:-?}" "$ctx_engine"
+            else
+                printf '      %s → %s (%s)\n' "$name" "${ep:-?}" "$ctx_engine"
+            fi
+        done < <("$docker_bin" context ls --format '{{.Name}}|{{.Current}}|{{.DockerEndpoint}}' 2>/dev/null || true)
+    else
+        printf '  docker: not on PATH (cannot read context)\n'
+        if [[ -n "$saved_ctx" ]]; then
+            ctx_engine=$(gar_docker_classify "$saved_ctx")
+            printf '  saved context: %s (%s)\n' "$saved_ctx" "$ctx_engine"
+        fi
+    fi
+
+    if [[ -e /Applications/Docker.app ]]; then
+        installed="${installed:+$installed, }Docker Desktop"
+    fi
+    if [[ -e "/Applications/Rancher Desktop.app" ]]; then
+        installed="${installed:+$installed, }Rancher Desktop"
+    fi
+    printf '  engines installed: %s\n' "${installed:-(none)}"
+}
+
 cmd_info() {
     local query="$1" app_entry canonical path hint ext_entry browser ext_id label app_path app_found info
 
@@ -435,6 +523,9 @@ cmd_info() {
         if info=$(lookup_general_info "$query" 2>/dev/null) || \
            info=$(lookup_general_info "$canonical" 2>/dev/null); then
             gar_print_general_info "$info"
+        fi
+        if gar_name_eq "$canonical" Docker; then
+            gar_print_docker_configured
         fi
         exit 0
     fi

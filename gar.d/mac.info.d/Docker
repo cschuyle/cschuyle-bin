@@ -1,0 +1,11 @@
+Point the Docker CLI at exactly one engine (Docker Desktop or Rancher Desktop).
+
+Preferred — docker context (stored in ~/.docker/config.json):
+  docker context use desktop-linux     # Docker Desktop
+  docker context use rancher-desktop   # Rancher Desktop
+  docker context ls                    # * marks the active context
+
+Override for one shell (DOCKER_HOST wins over context):
+  export DOCKER_HOST=unix://$HOME/.docker/run/docker.sock   # Docker Desktop
+  export DOCKER_HOST=unix://$HOME/.rd/docker.sock           # Rancher Desktop
+  unset DOCKER_HOST                                         # fall back to context
