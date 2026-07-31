@@ -42,7 +42,7 @@ usage() {
 Usage: gar [-ah]
        gar apps [-r <role>]
        gar info [name]
-       gar roles
+       gar roles [-a|--all]
        gar --man
 
 Check the current machine's configuration against the desired state in gar.d/
@@ -81,7 +81,9 @@ Options and commands
                 a manifest root; empty by default). With a name: install hints
                 and general info for a tracked item (case-insensitive)
   roles         List known role ids (role.<id>.* under gar.d/ or ~/.config/gar/d/);
-                enabled roles are prefixed with "✓ " (others with two spaces)
+                enabled roles are prefixed with "✓ " (others with two spaces).
+                With -a/--all: also list each role's overlay contents (apps,
+                Homebrew, commands, login items, env, secrets, repos, etc.)
 
 Exit status: 0 if everything looks good, 1 if anything is missing.
 EOF
@@ -520,15 +522,153 @@ gar_role_is_active() {
     return 1
 }
 
+# Emit capability suffixes for role.<role>.* under all manifest roots (unique).
+gar_role_capabilities() {
+    local role="$1" dir f base cap
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        for f in "$dir"/role."$role".*; do
+            [[ -f "$f" ]] || continue
+            base=$(basename "$f")
+            cap="${base#role.$role.}"
+            [[ -n "$cap" && "$cap" != "$base" ]] || continue
+            printf '%s\n' "$cap"
+        done
+    done < <(gar_manifest_dirs) | sort -u
+}
+
+# Preferred display order for role capability sections; unknown caps follow A–Z.
+gar_role_capabilities_ordered() {
+    local role="$1" caps cap
+    caps=$(gar_role_capabilities "$role")
+    [[ -n "$caps" ]] || return 0
+    for cap in apps Brewfile commands login-items env secrets machine-env-repos; do
+        if printf '%s\n' "$caps" | grep -qxF "$cap"; then
+            printf '%s\n' "$cap"
+        fi
+    done
+    printf '%s\n' "$caps" | grep -vxF \
+        -e apps -e Brewfile -e commands -e login-items \
+        -e env -e secrets -e machine-env-repos | sort -u || true
+}
+
+gar_role_capability_label() {
+    case "$1" in
+        apps) printf 'Apps' ;;
+        Brewfile) printf 'Homebrew' ;;
+        commands) printf 'Commands' ;;
+        login-items) printf 'Login items' ;;
+        env) printf 'Env' ;;
+        secrets) printf 'Secrets' ;;
+        machine-env-repos) printf 'Machine env repos' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+gar_role_manifest_has_items() {
+    local manifest="$1" line
+    [[ -f "$manifest" ]] || return 1
+    while IFS= read -r line; do
+        return 0
+    done < <(read_manifest "$manifest")
+    return 1
+}
+
+# Print human-readable items for one role capability manifest.
+gar_print_role_capability_items() {
+    local capability="$1" manifest="$2" line label names name
+    case "$capability" in
+        apps)
+            while IFS= read -r line; do
+                printf '    %s\n' "${line%%|*}"
+            done < <(read_manifest "$manifest")
+            ;;
+        Brewfile)
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^brew[[:space:]]+\"([^\"]+)\" ]]; then
+                    printf '    %s\n' "${BASH_REMATCH[1]}"
+                elif [[ "$line" =~ ^cask[[:space:]]+\"([^\"]+)\" ]]; then
+                    printf '    cask %s\n' "${BASH_REMATCH[1]}"
+                elif [[ "$line" =~ ^tap[[:space:]]+\"([^\"]+)\" ]]; then
+                    printf '    tap %s\n' "${BASH_REMATCH[1]}"
+                else
+                    printf '    %s\n' "$line"
+                fi
+            done < <(read_manifest "$manifest")
+            ;;
+        login-items)
+            while IFS= read -r line; do
+                label="${line%%|*}"
+                names="${line#*|}"
+                if [[ "$names" == *'|'* ]]; then
+                    printf '    %s (exactly one of: %s)\n' "$label" "$(gar_app_format_paths "$names")"
+                else
+                    printf '    %s\n' "$label"
+                fi
+            done < <(read_manifest "$manifest")
+            ;;
+        machine-env-repos)
+            while IFS= read -r line; do
+                name="${line%%|*}"
+                printf '    %s\n' "$name"
+            done < <(read_manifest "$manifest")
+            ;;
+        *)
+            while IFS= read -r line; do
+                printf '    %s\n' "$line"
+            done < <(read_manifest "$manifest")
+            ;;
+    esac
+}
+
+gar_print_role_details() {
+    local role="$1" cap manifest
+    while IFS= read -r cap; do
+        [[ -n "$cap" ]] || continue
+        manifest=$(gar_collect_role_manifest_for_role "$role" "$cap")
+        gar_role_manifest_has_items "$manifest" || continue
+        printf '  %s\n' "$(gar_role_capability_label "$cap")"
+        gar_print_role_capability_items "$cap" "$manifest"
+    done < <(gar_role_capabilities_ordered "$role")
+}
+
 cmd_roles() {
-    local role
+    local role show_all=0 first=1
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -a|--all)
+                show_all=1
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option for roles: $1" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+
     detect_roles
+    if (( show_all )); then
+        gar_init_workdir
+    fi
     while IFS= read -r role; do
         [[ -n "$role" ]] || continue
+        if (( show_all && first == 0 )); then
+            printf '\n'
+        fi
+        first=0
         if gar_role_is_active "$role"; then
             printf '✓ %s\n' "$role"
         else
             printf '  %s\n' "$role"
+        fi
+        if (( show_all )); then
+            gar_print_role_details "$role"
         fi
     done < <(gar_known_roles)
 }
@@ -2021,7 +2161,8 @@ main() {
     fi
 
     if [[ "${1:-}" == "roles" ]]; then
-        cmd_roles
+        shift
+        cmd_roles "$@"
         return
     fi
 
