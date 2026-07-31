@@ -1700,7 +1700,8 @@ mac_login_item_listed() {
 }
 
 check_mac_login_items() {
-    local entry label login_name items_raw read_status=0
+    local entry label names_field items_raw read_status=0
+    local name candidates matched matched_list format
     local login_manifest="${1:-}"
     [[ -n "$login_manifest" ]] || login_manifest=$(gar_combined_capability_manifest mac login-items)
     read_status=0
@@ -1710,15 +1711,51 @@ check_mac_login_items() {
         return
     fi
 
-    while IFS='|' read -r label login_name; do
-        if [[ -z "$label" || -z "$login_name" ]]; then
-            report_miss "Login item manifest line (expected label|name): ${label}|${login_name}"
+    while IFS= read -r entry; do
+        label="${entry%%|*}"
+        names_field="${entry#*|}"
+        if [[ -z "$label" || -z "$names_field" || "$label" == "$entry" ]]; then
+            report_miss "Login item manifest line (expected label|name[|name...]): $entry"
             continue
         fi
-        if mac_login_item_listed "$login_name" "$items_raw"; then
-            report_ok "Login item $label"
+
+        candidates=0
+        matched=0
+        matched_list=""
+        while IFS= read -r name; do
+            [[ -n "$name" ]] || continue
+            candidates=$((candidates + 1))
+            if mac_login_item_listed "$name" "$items_raw"; then
+                matched=$((matched + 1))
+                if [[ -z "$matched_list" ]]; then
+                    matched_list="$name"
+                else
+                    matched_list="$matched_list, $name"
+                fi
+            fi
+        done < <(gar_app_candidate_paths "$names_field")
+
+        if (( candidates == 0 )); then
+            report_miss "Login item manifest line (expected label|name[|name...]): $entry"
+            continue
+        fi
+
+        if (( candidates == 1 )); then
+            if (( matched == 1 )); then
+                report_ok "Login item $label"
+            else
+                report_miss "Login item $label (add $names_field in System Settings → General → Login Items)"
+            fi
+            continue
+        fi
+
+        format=$(gar_app_format_paths "$names_field")
+        if (( matched == 1 )); then
+            report_ok "Login item $label ($matched_list)"
+        elif (( matched == 0 )); then
+            report_miss "Login item $label (add exactly one of: $format in System Settings → General → Login Items)"
         else
-            report_miss "Login item $label (add $login_name in System Settings → General → Login Items)"
+            report_miss "Login item $label (exactly one of: $format; found: $matched_list)"
         fi
     done < <(read_manifest "$login_manifest")
 }
