@@ -311,13 +311,38 @@ gar_app_format_paths() {
     printf '%s\n' "$out"
 }
 
+
+# Basename of an .app path without the .app suffix (e.g. Rancher Desktop).
+gar_app_path_label() {
+    local path="$1" base
+    base=$(basename "$path")
+    base="${base%.app}"
+    base="${base%.App}"
+    printf '%s\n' "$base"
+}
+
+# True if query matches display name or an alternate install path label
+# (full label or its first word), e.g. "rancher" → Rancher Desktop.app.
+gar_app_query_matches() {
+    local query="$1" display_name="$2" path_field="$3" path label first
+    gar_name_eq "$query" "$display_name" && return 0
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        label=$(gar_app_path_label "$path")
+        gar_name_eq "$query" "$label" && return 0
+        first="${label%%[[:space:]]*}"
+        [[ -n "$first" ]] && gar_name_eq "$query" "$first" && return 0
+    done < <(gar_app_candidate_paths "$path_field")
+    return 1
+}
+
 lookup_app_entry() {
     local query="$1" entry name path manifest
     while IFS= read -r manifest; do
         while IFS= read -r entry; do
             name="${entry%%|*}"
             path="${entry#*|}"
-            if gar_name_eq "$query" "$name"; then
+            if gar_app_query_matches "$query" "$name" "$path"; then
                 printf '%s|%s\n' "$name" "$path"
                 return 0
             fi
@@ -401,12 +426,14 @@ cmd_info() {
         else
             printf 'Status: not installed\n'
         fi
-        if hint=$(lookup_install_hint "$query"); then
+        if hint=$(lookup_install_hint "$query" 2>/dev/null) || \
+           hint=$(lookup_install_hint "$canonical" 2>/dev/null); then
             gar_print_install_hint 'Install: ' "$hint"
         else
             printf 'Install: download from the vendor or App Store\n'
         fi
-        if info=$(lookup_general_info "$query"); then
+        if info=$(lookup_general_info "$query" 2>/dev/null) || \
+           info=$(lookup_general_info "$canonical" 2>/dev/null); then
             gar_print_general_info "$info"
         fi
         exit 0
