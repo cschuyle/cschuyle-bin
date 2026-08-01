@@ -1,3 +1,4 @@
 # Commands added by the dev-tools role (developer CLIs; not for the NAS).
 aws
 gh
+claude
