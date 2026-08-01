@@ -485,14 +485,15 @@ encoder_run_handbrake() {
   if grep -q "Invalid preset" "$log" 2>/dev/null; then
     emit_status "HINT: preset name must match HandBrake GUI (custom presets need import; list: $BH_HANDBRAKE_CLI_BIN --preset-import-gui --preset-list)."
   fi
+  # Progress filter suppresses HandBrake scan/JSON noise, so the console did not
+  # show the real failure text — always dump the captured log on error.
   if ((_hb_streamed_stderr)); then
-    emit_status "INFO: stderr was already shown above; not repeating the full log."
-  else
-    local _elog
-    while IFS= read -r _elog || [[ -n "${_elog:-}" ]]; do
-      emit_status "$_elog"
-    done <"$log"
+    emit_status "INFO: HandBrake log (progress filter hid scan/JSON noise above):"
   fi
+  local _elog
+  while IFS= read -r _elog || [[ -n "${_elog:-}" ]]; do
+    emit_status "$_elog"
+  done <"$log"
   rm -f "$log"
   return "$st"
 }
@@ -549,6 +550,15 @@ can_remux() {
   _BH_REMUX_PROBE_ERR="$(grep -v '^[[:space:]]*$' "$log" | tail -n 40)"
   rm -f "$log"
   return 1
+}
+
+# True when remux probe failed because a subtitle codec cannot be muxed into MP4
+# (e.g. hdmv_pgs_subtitle / dvd_subtitle: "codec not currently supported in container").
+_bh_remux_err_is_mp4_subtitle() {
+  local e="${1:-}"
+  [[ -n "$e" ]] || return 1
+  [[ "$e" == *"not currently supported in container"* ]] || return 1
+  [[ "$e" == *[Ss]ubtitle* || "$e" == *"_pgs_"* || "$e" == *"dvdsub"* || "$e" == *"xsub"* ]]
 }
 
 # File size in bytes (0 if missing); GNU stat first, then BSD.
@@ -710,6 +720,9 @@ process_file() {
         emit_status "  $_line"
       done <<< "$_BH_REMUX_PROBE_ERR"
     fi
+    if _bh_remux_err_is_mp4_subtitle "${_BH_REMUX_PROBE_ERR:-}"; then
+      _BH_MP4_SUBTITLE+=("$in")
+    fi
     emit_status "INFO: ${_bh_ptag}MODE=ENCODE  (HandBrakeCLI; preset: $preset)"
 
     # Windows HandBrakeCLI.exe expects Z:\... paths, not /mnt/z/... (WSL) or MSYS POSIX.
@@ -783,6 +796,8 @@ declare -A _BH_ALREADY_DONE_OUT=()
 # inputs and 1 for any other encode/remux failure.
 declare -a _BH_UNREADABLE=()
 declare -a _BH_FAILED=()
+# Remux probe blocked because a subtitle codec cannot live in MP4 (still try HandBrake).
+declare -a _BH_MP4_SUBTITLE=()
 for ((_bh_i = 0; _bh_i < _BH_TASK_N; _bh_i++)); do
   f="${_BH_TASKS[_bh_i]}"
   [[ -z "$f" ]] && continue
@@ -797,22 +812,62 @@ for ((_bh_i = 0; _bh_i < _BH_TASK_N; _bh_i++)); do
   esac
 done
 
-if (( ${#_BH_UNREADABLE[@]} > 0 || ${#_BH_FAILED[@]} > 0 )); then
+# FAILURE SUMMARY: remux blocked because subtitle codec is not muxable into MP4.
+# With no other failures, collapse 2+ files that share a parent dir to "dir: N files".
+if (( ${#_BH_MP4_SUBTITLE[@]} > 0 )); then
   emit_status ""
-  emit_status "WARNING: $(( ${#_BH_UNREADABLE[@]} + ${#_BH_FAILED[@]} )) of ${_BH_TASK_N} input(s) did not produce output:"
-  if (( ${#_BH_UNREADABLE[@]} > 0 )); then
-    emit_status "  Unreadable / corrupt (matched the selection but libav could not open them;"
-    emit_status "  the HandBrake UI silently skips these during a folder scan):"
-    for f in "${_BH_UNREADABLE[@]}"; do
-      emit_status "    $(path_sq "$f")"
+  emit_status "FAILURE SUMMARY (cause: PGS subtitles not supported in MP4 container) (${#_BH_MP4_SUBTITLE[@]} file(s))"
+  if (( ${#_BH_UNREADABLE[@]} == 0 && ${#_BH_FAILED[@]} == 0 )); then
+    declare -A _bh_sub_dir_n=()
+    declare -a _bh_sub_dirs=()
+    _bh_d=""
+    for f in "${_BH_MP4_SUBTITLE[@]}"; do
+      _bh_d="$(dirname -- "$f")"
+      if [[ -z ${_bh_sub_dir_n["$_bh_d"]+x} ]]; then
+        _bh_sub_dirs+=("$_bh_d")
+        _bh_sub_dir_n["$_bh_d"]=0
+      fi
+      _bh_sub_dir_n["$_bh_d"]=$(( ${_bh_sub_dir_n["$_bh_d"]} + 1 ))
+    done
+    for _bh_d in "${_bh_sub_dirs[@]}"; do
+      if (( ${_bh_sub_dir_n["$_bh_d"]} >= 2 )); then
+        emit_status "  $(path_sq "$_bh_d"): ${_bh_sub_dir_n["$_bh_d"]} files"
+      else
+        for f in "${_BH_MP4_SUBTITLE[@]}"; do
+          if [[ "$(dirname -- "$f")" == "$_bh_d" ]]; then
+            emit_status "  $(path_sq "$f")"
+          fi
+        done
+      fi
+    done
+    unset _bh_sub_dir_n _bh_sub_dirs _bh_d
+  else
+    for f in "${_BH_MP4_SUBTITLE[@]}"; do
+      emit_status "  $(path_sq "$f")"
     done
   fi
-  if (( ${#_BH_FAILED[@]} > 0 )); then
-    emit_status "  Encode / remux failed:"
-    for f in "${_BH_FAILED[@]}"; do
-      emit_status "    $(path_sq "$f")"
+fi
+
+_bh_other_n=$(( ${#_BH_UNREADABLE[@]} + ${#_BH_FAILED[@]} ))
+if (( _bh_other_n > 0 )); then
+  # Do not re-list paths already covered by the PGS remux summary.
+  declare -A _bh_in_pgs=()
+  for f in "${_BH_MP4_SUBTITLE[@]}"; do
+    _bh_in_pgs["$f"]=1
+  done
+  declare -a _bh_other_files=()
+  for f in "${_BH_UNREADABLE[@]}" "${_BH_FAILED[@]}"; do
+    [[ -n ${_bh_in_pgs["$f"]+x} ]] && continue
+    _bh_other_files+=("$f")
+  done
+  if (( ${#_bh_other_files[@]} > 0 )); then
+    emit_status ""
+    emit_status "FAILURE SUMMARY (cause: other) (${#_bh_other_files[@]} file(s))"
+    for f in "${_bh_other_files[@]}"; do
+      emit_status "  $(path_sq "$f")"
     done
   fi
+  unset _bh_in_pgs _bh_other_files
   exit 1
 fi
 
