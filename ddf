@@ -8,15 +8,29 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<EOF
 Usage: $script_file
 
-Show disk availability for each directory in CS_DF_DATA_DIRS (from config.sh).
+Show disk availability for each configured data directory. The space-separated
+directory list resolves via config-get (key data_dirs): env DDF_DATA_DIRS, then
+ddf.{yaml,json}/config.{yaml,json} in this dir or ~/.config. Without config-get
+on PATH, DDF_DATA_DIRS is used directly.
 EOF
   exit 0
 fi
 
-source "$script_dir/config.sh"
+# Resolve config via config-get (expected on PATH). If config-get is not on
+# PATH, fall back to the DDF_DATA_DIRS environment variable directly.
+cfg() {
+  local key="$1" default="${2:-}"
+  if command -v config-get >/dev/null 2>&1; then
+    config-get -s "${BASH_SOURCE[0]}" --default "$default" "$key"
+  else
+    printf '%s\n' "$default"
+  fi
+}
 
-if [[ -z "$CS_DF_DATA_DIRS" ]] ; then
-    echo "ERROR: CS_DF_DATA_DIRS is not set."
+DATA_DIRS="$(cfg data_dirs "${DDF_DATA_DIRS:-}")"
+
+if [[ -z "$DATA_DIRS" ]] ; then
+    echo "ERROR: no data dirs configured (set DDF_DATA_DIRS or ddf's data-dirs via config-get)."
     exit 1
 fi
 
@@ -57,8 +71,8 @@ if [ -t 1 ]; then
 
 fi
 
-# echo CS_DF_DATA_DIRS [$CS_DF_DATA_DIRS]
-dirs=($CS_DF_DATA_DIRS)
+# echo DATA_DIRS [$DATA_DIRS]
+dirs=($DATA_DIRS)
 # echo dirs ${dirs[@]}
 
 for dir in ${dirs[@]}; do

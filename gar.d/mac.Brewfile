@@ -3,13 +3,12 @@
 
 tap "gdubw/gng"  # https://github.com/gdubw/gng
 
-brew "awscli"
 brew "csvkit"
 brew "direnv"
 brew "findutils"
+brew "gh"
 brew "gng"
 brew "gnu-sed"
-brew "handbrake"
 brew "imagemagick"
 brew "jq"
 brew "maven"

@@ -1,0 +1,3 @@
+# my-data-client: apps installed outside Homebrew (App Store or vendor site).
+# Format: display name|path
+SynologyAssistant|/Applications/SynologyAssistant.app

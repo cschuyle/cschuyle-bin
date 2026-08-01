@@ -1,0 +1,3 @@
+# Apps added by the dev-tools role (developer tools; not for every machine).
+# Format: display name|path[|path...]  (any listed path existing counts as installed)
+Docker|/Applications/Docker.app|/Applications/Rancher Desktop.app

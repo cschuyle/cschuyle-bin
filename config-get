@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""Resolve a single string config value for a command-line script.
+
+A key is resolved from these sources, first match wins:
+
+  1. Env var   <SCRIPT_BASE>_<KEY>  (uppercased; non-alphanumerics -> _)
+  2. <script dir>/<script base>.{yaml,yml,json}     top-level key <key>
+  3. ~/.config/<script base>.{yaml,yml,json}        top-level key <key>
+  4. <script dir>/config.{yaml,yml,json}            [<script base>][<key>]
+  5. ~/.config/config.{yaml,yml,json}               [<script base>][<key>]
+
+<script base> is the calling script's filename with its extension stripped
+(e.g. better-handbrake.sh -> better-handbrake). Provide the caller's path with
+--script (usually "$0" / "${BASH_SOURCE[0]}" / __file__); --name and --dir can
+override the derived base and directory.
+
+Hyphens and underscores are interchangeable in the script base and the key:
+in the env var both become '_' (data-dirs / data_dirs -> DDF_DATA_DIRS), and
+file lookups match either spelling.
+
+Within one file source, format variants are tried in the order yaml, yml, json,
+and the first file that contains the key wins. YAML is parsed with PyYAML when
+available, otherwise with a small built-in parser that handles nested mappings
+of scalar (string) values, which is all these config files need.
+
+The value is printed to stdout with no trailing processing. Exit status:
+  0  value found (or --default used)
+  1  key not found and no --default given
+  2  usage error
+
+Examples:
+  preset="$(config-get -s "${BASH_SOURCE[0]}" preset)"      # bash
+  root="$(config-get -s "$0" --default /tmp download_root)" # bash, with default
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+
+CONFIG_BASENAME = "config"
+YAML_SUFFIXES = ("yaml", "yml")
+JSON_SUFFIXES = ("json",)
+ALL_SUFFIXES = YAML_SUFFIXES + JSON_SUFFIXES
+
+
+def die(msg, code=2):
+    print("config-get: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def env_var_name(base, key):
+    return re.sub(r"[^A-Za-z0-9]", "_", "{}_{}".format(base, key)).upper()
+
+
+def user_config_dir():
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return xdg
+    return os.path.join(os.path.expanduser("~"), ".config")
+
+
+def scalar_to_str(value):
+    """Render a resolved scalar as a string; reject containers."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return None  # signals "not a scalar"
+    return str(value)
+
+
+# --------------------------------------------------------------------------
+# File loading (cached per path). Returns a dict, or None if unusable.
+# --------------------------------------------------------------------------
+_load_cache = {}
+
+
+def load_mapping(path):
+    if path in _load_cache:
+        return _load_cache[path]
+    result = None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        _load_cache[path] = None
+        return None
+
+    suffix = path.rsplit(".", 1)[-1].lower()
+    try:
+        if suffix in JSON_SUFFIXES:
+            data = json.loads(text)
+        else:
+            data = _parse_yaml(text)
+        if isinstance(data, dict):
+            result = data
+        else:
+            die("{}: top-level value must be a mapping".format(path), 2)
+    except ValueError as exc:
+        die("{}: parse error: {}".format(path, exc), 2)
+
+    _load_cache[path] = result
+    return result
+
+
+def _parse_yaml(text):
+    try:
+        import yaml  # PyYAML, if installed
+    except ImportError:
+        return _parse_yaml_minimal(text)
+    data = yaml.safe_load(text)
+    return {} if data is None else data
+
+
+def _strip_comment(line):
+    """Remove a trailing '#' comment that lies outside quotes."""
+    out = []
+    quote = None
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if quote:
+            out.append(c)
+            if c == quote:
+                quote = None
+        elif c in ("'", '"'):
+            quote = c
+            out.append(c)
+        elif c == "#" and (i == 0 or line[i - 1] in (" ", "\t")):
+            break
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _unquote(token):
+    token = token.strip()
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
+        return token[1:-1]
+    return token
+
+
+def _parse_yaml_minimal(text):
+    """Parse a nested mapping of scalar values (indentation-based subset)."""
+    root = {}
+    stack = [(-1, root)]  # (indent width, container dict)
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = _strip_comment(raw).rstrip()
+        if not line.strip():
+            continue
+        if line.lstrip().startswith(("- ", "-\t")) or line.strip() == "-":
+            raise ValueError("line {}: YAML sequences are not supported".format(lineno))
+        indent = len(line) - len(line.lstrip(" "))
+        stripped = line.strip()
+        if ":" not in stripped:
+            raise ValueError("line {}: expected 'key: value'".format(lineno))
+        key_part, _, val_part = stripped.partition(":")
+        key = _unquote(key_part)
+        val = val_part.strip()
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        if not stack:
+            raise ValueError("line {}: bad indentation".format(lineno))
+        parent = stack[-1][1]
+        if val == "":
+            child = {}
+            parent[key] = child
+            stack.append((indent, child))
+        else:
+            parent[key] = _unquote(val)
+    return root
+
+
+# --------------------------------------------------------------------------
+# Resolution
+# --------------------------------------------------------------------------
+def candidate_files(directory, basename):
+    for suffix in ALL_SUFFIXES:
+        yield os.path.join(directory, "{}.{}".format(basename, suffix))
+
+
+def dict_get(node, wanted):
+    """Look up `wanted` in a mapping, treating '-' and '_' as interchangeable.
+
+    An exact match wins; otherwise the first key (in sorted order, for
+    determinism) whose hyphens/underscores match is used.
+    """
+    if not isinstance(node, dict):
+        return None, False
+    if wanted in node:
+        return node[wanted], True
+    canon = wanted.replace("-", "_")
+    for k in sorted(node):
+        if isinstance(k, str) and k.replace("-", "_") == canon:
+            return node[k], True
+    return None, False
+
+
+def lookup_in_file(path, keys):
+    """keys is a list of nested keys, e.g. ['base', 'key'] or ['key']."""
+    data = load_mapping(path)
+    if data is None:
+        return None, False
+    node = data
+    for k in keys[:-1]:
+        sub, found = dict_get(node, k)
+        if not found or not isinstance(sub, dict):
+            return None, False
+        node = sub
+    return dict_get(node, keys[-1])
+
+
+def resolve(base, directory, key):
+    """Return (value, source_description) or (None, None)."""
+    env_name = env_var_name(base, key)
+    if env_name in os.environ:
+        return os.environ[env_name], "env:" + env_name
+
+    cfg_dir = user_config_dir()
+
+    slots = []
+    if directory is not None:
+        slots.append((directory, base, [key]))          # 2
+    slots.append((cfg_dir, base, [key]))                # 3
+    if directory is not None:
+        slots.append((directory, CONFIG_BASENAME, [base, key]))  # 4
+    slots.append((cfg_dir, CONFIG_BASENAME, [base, key]))        # 5
+
+    for directory_i, basename_i, keys in slots:
+        for path in candidate_files(directory_i, basename_i):
+            value, found = lookup_in_file(path, keys)
+            if found:
+                return value, "{} ({})".format(path, ".".join(keys))
+    return None, None
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(
+        prog="config-get",
+        description="Resolve a string config value for a command-line script.",
+        add_help=True,
+    )
+    parser.add_argument("key", help="config key to resolve")
+    parser.add_argument("-s", "--script",
+                        help="calling script path; base and dir are derived from it")
+    parser.add_argument("-n", "--name",
+                        help="override <script base> (default: from --script)")
+    parser.add_argument("-d", "--dir",
+                        help="override the script directory (default: from --script)")
+    parser.add_argument("--default",
+                        help="value to print (exit 0) if the key is not found")
+    parser.add_argument("--source", action="store_true",
+                        help="print the matched source to stderr")
+    args = parser.parse_args(argv)
+
+    base = args.name
+    directory = args.dir
+    if args.script:
+        script_base = os.path.splitext(os.path.basename(args.script))[0]
+        if base is None:
+            base = script_base
+        if directory is None:
+            script_dir = os.path.dirname(os.path.abspath(args.script))
+            directory = script_dir
+    if base is None:
+        die("need --name or --script to determine the script base", 2)
+
+    value, source = resolve(base, directory, args.key)
+
+    if value is None:
+        if args.default is not None:
+            print(args.default)
+            return 0
+        return 1
+
+    text = scalar_to_str(value)
+    if text is None:
+        die("value for '{}' is not a scalar".format(args.key), 2)
+
+    if args.source and source:
+        print("config-get: matched " + source, file=sys.stderr)
+    print(text)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

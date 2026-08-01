@@ -1,13 +1,12 @@
 # Apps installed outside Homebrew (App Store or vendor site).
-# Format: display name|path
+# Format: display name|path[|path...]  (any listed path existing counts as installed)
 # Role overlays add more (e.g. role.personal-machine.apps).
 Cursor|/Applications/Cursor.app
 1Password|/Applications/1Password.app
-ChatGPT|/Applications/ChatGPT.app
+ChatGPT|/Applications/ChatGPT.app|/Applications/ChatGPT Classic.app
 Roam Research|/Applications/Roam Research.app
 iTerm|/Applications/iTerm.app
 Flycut|/Applications/Flycut.app
 Rectangle|/Applications/Rectangle.app
-Docker|/Applications/Docker.app
 VS Code|/Applications/Visual Studio Code.app
 Zoom|/Applications/zoom.us.app

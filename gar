@@ -9,6 +9,19 @@ gar_section_header_printed=0
 gar_tmpdir=""
 gar_active_roles=()
 
+# Machine-local manifest overlays (same XDG base as ~/.config/gar/roles).
+gar_local_dir() {
+    printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/gar/d"
+}
+
+# Emit existing manifest roots in order: repo gar.d, then local ~/.config/gar/d.
+gar_manifest_dirs() {
+    local local_dir
+    printf '%s\n' "$GAR_DIR"
+    local_dir=$(gar_local_dir)
+    [[ -d "$local_dir" ]] && printf '%s\n' "$local_dir"
+}
+
 gar_init_workdir() {
     gar_tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/gar.XXXXXX")
     trap '[[ -n "$gar_tmpdir" ]] && rm -rf "$gar_tmpdir"' EXIT
@@ -27,37 +40,104 @@ gar_result_get() {
 usage() {
     cat <<'EOF'
 Usage: gar [-ah]
-       gar apps
+       gar apps [-r <role>]
        gar info [name]
+       gar roles [-a|--all]
+       gar --man
 
-Check the current machine's configuration against the desired state in gar.d/.
+Check the current machine's configuration against the desired state in gar.d/
+and optional machine-local overlays in ~/.config/gar/d/.
 Reports missing or out-of-date elements. Mac, Synology, and WSL checks are
 implemented; plain Linux is detected but not yet audited.
 
-Desired state is platform/shared manifests plus an additive union of role
-overlays enabled in ~/.config/gar/roles (one role id per line).
+Desired state is the platform/shared base plus an additive union of role
+overlays enabled for this machine. Manifest roots are the repo gar.d/ then
+~/.config/gar/d/ (if present); platform/shared files use first match (repo
+preferred), role overlays from both roots are concatenated.
 
+Roles
+  Enable roles in ~/.config/gar/roles (one role id per line). A missing file
+  means no roles are enabled. Blank lines and # comments are ignored.
+
+  Example ~/.config/gar/roles:
+
+    # overlays for this machine
+    personal-machine
+    my-data-client
+    dev-tools
+
+  Known role ids are listed by `gar roles` (those with role.<id>.* manifests
+  in gar.d/ or ~/.config/gar/d/). Unknown ids in the roles file produce a WARN
+  at audit time.
+
+Options and commands
   -a, --all     Show all checks, including OK (default: only MISS and WARN)
-  apps          List GUI apps tracked in gar.d/mac.apps (App Store or vendor site)
-  info [name]   With no name: show the platform info page (gar.d/<platform>.info;
-                empty by default). With a name: install hints and general info
-                for a tracked item (case-insensitive)
+  -h, --help, --man
+                Show this help
+  apps          List GUI apps tracked for this machine (platform base plus active
+                role overlays). With -r <role>: only that role's apps overlay
+                (role.<role>.apps under gar.d/ or ~/.config/gar/d/)
+  info [name]   With no name: show the platform info page (<platform>.info under
+                a manifest root; empty by default). With a name: install hints
+                and general info for a tracked item (case-insensitive)
+  roles         List known role ids (role.<id>.* under gar.d/ or ~/.config/gar/d/);
+                enabled roles are prefixed with "✓ " (others with two spaces).
+                With -a/--all: also list each role's overlay contents (apps,
+                Homebrew, commands, login items, env, secrets, repos, etc.)
 
 Exit status: 0 if everything looks good, 1 if anything is missing.
 EOF
 }
 
 cmd_apps() {
-    local entry name path hint apps_manifest
-    detect_roles
-    gar_init_workdir
-    apps_manifest=$(gar_combined_capability_manifest mac apps)
-    printf 'Tracked apps (installed outside Homebrew):\n\n'
+    local entry name path hint apps_manifest role="" role_file
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -r|--role)
+                if [[ -z "${2:-}" || "${2:-}" == -* ]]; then
+                    echo "apps: -r requires a role id" >&2
+                    exit 2
+                fi
+                role="$2"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option for apps: $1" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    if [[ -n "$role" ]]; then
+        if ! gar_role_is_known "$role"; then
+            echo "Unknown role: $role" >&2
+            exit 1
+        fi
+        gar_init_workdir
+        role_file=$(gar_collect_role_manifest_for_role "$role" apps)
+        if [[ ! -f "$role_file" || ! -s "$role_file" ]]; then
+            printf 'No apps for role %s\n' "$role"
+            return 0
+        fi
+        apps_manifest="$role_file"
+        printf 'Tracked apps for role %s:\n\n' "$role"
+    else
+        detect_roles
+        gar_init_workdir
+        apps_manifest=$(gar_combined_capability_manifest mac apps)
+        printf 'Tracked apps (installed outside Homebrew):\n\n'
+    fi
+
     while IFS= read -r entry; do
         name="${entry%%|*}"
         path="${entry#*|}"
         printf '%s\n' "$name"
-        printf '  Path: %s\n' "$path"
+        printf '  Path: %s\n' "$(gar_app_format_paths "$path")"
         if hint=$(lookup_install_hint "$name" 2>/dev/null); then
             printf '  Install: %s\n' "$hint"
         else
@@ -84,12 +164,21 @@ lookup_install_hint() {
 }
 
 gar_resolve_manifest() {
-    local platform="$1" name="$2"
-    if [[ -f "$GAR_DIR/$platform.$name" ]]; then
-        printf '%s\n' "$GAR_DIR/$platform.$name"
-    elif [[ -f "$GAR_DIR/shared.$name" ]]; then
-        printf '%s\n' "$GAR_DIR/shared.$name"
-    fi
+    local platform="$1" name="$2" dir
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        if [[ -f "$dir/$platform.$name" ]]; then
+            printf '%s\n' "$dir/$platform.$name"
+            return 0
+        fi
+    done < <(gar_manifest_dirs)
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        if [[ -f "$dir/shared.$name" ]]; then
+            printf '%s\n' "$dir/shared.$name"
+            return 0
+        fi
+    done < <(gar_manifest_dirs)
 }
 
 gar_hints_file() {
@@ -104,17 +193,30 @@ gar_hints_file() {
 }
 
 gar_info_dirs() {
-    # Platform-specific info first, then shared info (inherited). A
-    # platform file with the same name shadows the shared one.
-    local platform="$1"
-    [[ -d "$GAR_DIR/$platform.info.d" ]] && printf '%s\n' "$GAR_DIR/$platform.info.d"
-    [[ -d "$GAR_DIR/shared.info.d" ]] && printf '%s\n' "$GAR_DIR/shared.info.d"
+    # Platform-specific info first, then shared info (inherited), per manifest
+    # root (repo then local). A platform file with the same name shadows shared.
+    local platform="$1" dir
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        [[ -d "$dir/$platform.info.d" ]] && printf '%s\n' "$dir/$platform.info.d"
+    done < <(gar_manifest_dirs)
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        [[ -d "$dir/shared.info.d" ]] && printf '%s\n' "$dir/shared.info.d"
+    done < <(gar_manifest_dirs)
 }
 
-# Platform default page for `gar info` with no name: gar.d/<platform>.info
-# (missing or empty = no content).
+# Platform default page for `gar info` with no name: <platform>.info under a
+# manifest root (first match; missing or empty = no content).
 gar_platform_info_file() {
-    local platform="${1:-$(detect_platform)}"
+    local platform="${1:-$(detect_platform)}" dir
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        if [[ -f "$dir/$platform.info" ]]; then
+            printf '%s\n' "$dir/$platform.info"
+            return 0
+        fi
+    done < <(gar_manifest_dirs)
     printf '%s\n' "$GAR_DIR/$platform.info"
 }
 
@@ -165,16 +267,72 @@ gar_print_install_hint() {
 
 # List platform + all role.* manifests for a capability (for lookups / info).
 gar_all_capability_manifests() {
-    local platform="$1" capability="$2" f
-    if [[ -f "$GAR_DIR/$platform.$capability" ]]; then
-        printf '%s\n' "$GAR_DIR/$platform.$capability"
-    elif [[ -f "$GAR_DIR/shared.$capability" ]]; then
-        printf '%s\n' "$GAR_DIR/shared.$capability"
-    fi
-    for f in "$GAR_DIR"/role.*."$capability"; do
-        [[ -f "$f" ]] || continue
-        printf '%s\n' "$f"
-    done
+    local platform="$1" capability="$2" dir f base
+    base=$(gar_resolve_manifest "$platform" "$capability")
+    [[ -n "$base" && -f "$base" ]] && printf '%s\n' "$base"
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        for f in "$dir"/role.*."$capability"; do
+            [[ -f "$f" ]] || continue
+            printf '%s\n' "$f"
+        done
+    done < <(gar_manifest_dirs)
+}
+
+# Split a manifest path field on '|' into candidate paths, one per line. An app
+# entry may list several paths (name|path|path...); any existing one counts as
+# installed.
+gar_app_candidate_paths() {
+    local field="$1" path
+    while IFS= read -r path || [[ -n "$path" ]]; do
+        [[ -n "$path" ]] && printf '%s\n' "$path"
+    done < <(printf '%s' "$field" | tr '|' '\n')
+}
+
+# Print the first candidate path that exists on disk; return 1 if none do.
+gar_app_first_existing_path() {
+    local field="$1" path
+    while IFS= read -r path; do
+        [[ -e "$path" ]] && { printf '%s\n' "$path"; return 0; }
+    done < <(gar_app_candidate_paths "$field")
+    return 1
+}
+
+# Join candidate paths with " or " for display.
+gar_app_format_paths() {
+    local field="$1" path out=""
+    while IFS= read -r path; do
+        if [[ -z "$out" ]]; then
+            out="$path"
+        else
+            out="$out or $path"
+        fi
+    done < <(gar_app_candidate_paths "$field")
+    printf '%s\n' "$out"
+}
+
+# Basename of an .app path without the .app suffix (e.g. Rancher Desktop).
+gar_app_path_label() {
+    local path="$1" base
+    base=$(basename "$path")
+    base="${base%.app}"
+    base="${base%.App}"
+    printf '%s\n' "$base"
+}
+
+# True if query matches display name or an alternate install path label
+# (full label or its first word), e.g. "rancher" → Rancher Desktop.app.
+gar_app_query_matches() {
+    local query="$1" display_name="$2" path_field="$3" path label first
+    gar_name_eq "$query" "$display_name" && return 0
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        label=$(gar_app_path_label "$path")
+        gar_name_eq "$query" "$label" && return 0
+        first="${label%%[[:space:]]*}"
+        [[ -n "$first" ]] && gar_name_eq "$query" "$first" && return 0
+    done < <(gar_app_candidate_paths "$path_field")
+    return 1
 }
 
 lookup_app_entry() {
@@ -183,7 +341,7 @@ lookup_app_entry() {
         while IFS= read -r entry; do
             name="${entry%%|*}"
             path="${entry#*|}"
-            if gar_name_eq "$query" "$name"; then
+            if gar_app_query_matches "$query" "$name" "$path"; then
                 printf '%s|%s\n' "$name" "$path"
                 return 0
             fi
@@ -217,22 +375,24 @@ lookup_browser_extension_entry() {
 }
 
 lookup_brew_hint() {
-    local query="$1" line name
-    while IFS= read -r line; do
-        if [[ "$line" =~ ^brew[[:space:]]+\"([^\"]+)\" ]]; then
-            name="${BASH_REMATCH[1]}"
-            if gar_name_eq "$query" "$name"; then
-                printf 'brew install %s\n' "$name"
-                return 0
+    local query="$1" line name manifest
+    while IFS= read -r manifest; do
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^brew[[:space:]]+\"([^\"]+)\" ]]; then
+                name="${BASH_REMATCH[1]}"
+                if gar_name_eq "$query" "$name"; then
+                    printf 'brew install %s\n' "$name"
+                    return 0
+                fi
+            elif [[ "$line" =~ ^cask[[:space:]]+\"([^\"]+)\" ]]; then
+                name="${BASH_REMATCH[1]}"
+                if gar_name_eq "$query" "$name"; then
+                    printf 'brew install --cask %s\n' "$name"
+                    return 0
+                fi
             fi
-        elif [[ "$line" =~ ^cask[[:space:]]+\"([^\"]+)\" ]]; then
-            name="${BASH_REMATCH[1]}"
-            if gar_name_eq "$query" "$name"; then
-                printf 'brew install --cask %s\n' "$name"
-                return 0
-            fi
-        fi
-    done < <(read_manifest "$GAR_DIR/mac.Brewfile")
+        done < <(read_manifest "$manifest")
+    done < <(gar_all_capability_manifests mac Brewfile)
     return 1
 }
 
@@ -245,8 +405,97 @@ brew_miss_hint() {
     return 1
 }
 
+# Classify a docker endpoint/context name as Docker Desktop, Rancher Desktop, or other.
+gar_docker_classify() {
+    local text="$1" path
+    path="${text#unix://}"
+    path="${path/#\~/$HOME}"
+    if [[ "$text" == *rancher-desktop* || "$path" == "$HOME/.rd/docker.sock" || "$path" == *"/.rd/docker.sock" ]]; then
+        printf 'Rancher Desktop\n'
+        return 0
+    fi
+    if [[ "$text" == *desktop-linux* || "$path" == "$HOME/.docker/run/docker.sock" || "$path" == *"/.docker/run/docker.sock" ]]; then
+        printf 'Docker Desktop\n'
+        return 0
+    fi
+    if [[ "$path" == /var/run/docker.sock ]]; then
+        if [[ -L /var/run/docker.sock ]]; then
+            gar_docker_classify "$(readlink /var/run/docker.sock 2>/dev/null || true)"
+            return
+        fi
+        printf 'default socket\n'
+        return 0
+    fi
+    printf 'other\n'
+}
+
+# Print which Docker engine the CLI currently targets (context / DOCKER_HOST).
+gar_print_docker_configured() {
+    local host_engine ctx endpoint ctx_engine name current ep
+    local docker_bin="" saved_ctx installed=""
+
+    printf '\nConfigured:\n'
+    if [[ -n "${DOCKER_HOST-}" ]]; then
+        host_engine=$(gar_docker_classify "$DOCKER_HOST")
+        printf '  DOCKER_HOST: %s (%s) — overrides docker context\n' "$DOCKER_HOST" "$host_engine"
+    else
+        printf '  DOCKER_HOST: (unset)\n'
+    fi
+
+    if [[ -f "$HOME/.docker/config.json" ]]; then
+        saved_ctx=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("currentContext") or "")' \
+            "$HOME/.docker/config.json" 2>/dev/null || true)
+    fi
+
+    if command -v docker >/dev/null 2>&1; then
+        docker_bin=$(command -v docker)
+    fi
+
+    if [[ -n "$docker_bin" ]]; then
+        ctx=$("$docker_bin" context show 2>/dev/null || true)
+        endpoint=$("$docker_bin" context inspect "$ctx" -f '{{.Endpoints.docker.Host}}' 2>/dev/null || true)
+        if [[ -n "$ctx" ]]; then
+            ctx_engine=$(gar_docker_classify "${endpoint:-$ctx}")
+            if [[ -n "$endpoint" ]]; then
+                printf '  active context: %s → %s (%s)\n' "$ctx" "$endpoint" "$ctx_engine"
+            else
+                printf '  active context: %s (%s)\n' "$ctx" "$ctx_engine"
+            fi
+        else
+            printf '  active context: (could not read)\n'
+        fi
+        if [[ -n "$saved_ctx" && "$saved_ctx" != "$ctx" ]]; then
+            printf '  saved context: %s (in ~/.docker/config.json)\n' "$saved_ctx"
+        fi
+        printf '  contexts:\n'
+        while IFS='|' read -r name current ep; do
+            [[ -n "$name" ]] || continue
+            ctx_engine=$(gar_docker_classify "${ep:-$name}")
+            if [[ "$current" == "true" ]]; then
+                printf '    * %s → %s (%s)\n' "$name" "${ep:-?}" "$ctx_engine"
+            else
+                printf '      %s → %s (%s)\n' "$name" "${ep:-?}" "$ctx_engine"
+            fi
+        done < <("$docker_bin" context ls --format '{{.Name}}|{{.Current}}|{{.DockerEndpoint}}' 2>/dev/null || true)
+    else
+        printf '  docker: not on PATH (cannot read context)\n'
+        if [[ -n "$saved_ctx" ]]; then
+            ctx_engine=$(gar_docker_classify "$saved_ctx")
+            printf '  saved context: %s (%s)\n' "$saved_ctx" "$ctx_engine"
+        fi
+    fi
+
+    if [[ -e /Applications/Docker.app ]]; then
+        installed="${installed:+$installed, }Docker Desktop"
+    fi
+    if [[ -e "/Applications/Rancher Desktop.app" ]]; then
+        installed="${installed:+$installed, }Rancher Desktop"
+    fi
+    printf '  engines installed: %s\n' "${installed:-(none)}"
+}
+
 cmd_info() {
-    local query="$1" app_entry canonical path hint ext_entry browser ext_id label app_path info
+    local query="$1" app_entry canonical path hint ext_entry browser ext_id label app_path app_found info
 
     if [[ -z "$query" ]]; then
         if info=$(lookup_platform_info); then
@@ -259,19 +508,24 @@ cmd_info() {
         canonical="${app_entry%%|*}"
         path="${app_entry#*|}"
         printf '%s (app)\n' "$canonical"
-        printf 'Expected path: %s\n' "$path"
-        if [[ -e "$path" ]]; then
-            printf 'Status: installed\n'
+        printf 'Expected path: %s\n' "$(gar_app_format_paths "$path")"
+        if app_found=$(gar_app_first_existing_path "$path"); then
+            printf 'Status: installed (%s)\n' "$app_found"
         else
             printf 'Status: not installed\n'
         fi
-        if hint=$(lookup_install_hint "$query"); then
+        if hint=$(lookup_install_hint "$query" 2>/dev/null) || \
+           hint=$(lookup_install_hint "$canonical" 2>/dev/null); then
             gar_print_install_hint 'Install: ' "$hint"
         else
             printf 'Install: download from the vendor or App Store\n'
         fi
-        if info=$(lookup_general_info "$query"); then
+        if info=$(lookup_general_info "$query" 2>/dev/null) || \
+           info=$(lookup_general_info "$canonical" 2>/dev/null); then
             gar_print_general_info "$info"
+        fi
+        if gar_name_eq "$canonical" Docker; then
+            gar_print_docker_configured
         fi
         exit 0
     fi
@@ -351,12 +605,190 @@ gar_roles_file() {
 }
 
 gar_role_is_known() {
-    local role="$1" f
-    for f in "$GAR_DIR"/role."$role".*; do
-        [[ -e "$f" ]] || continue
-        [[ -f "$f" ]] && return 0
+    local role="$1" dir f
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        for f in "$dir"/role."$role".*; do
+            [[ -e "$f" ]] || continue
+            [[ -f "$f" ]] && return 0
+        done
+    done < <(gar_manifest_dirs)
+    return 1
+}
+
+# Emit known role ids (unique, sorted) from role.<id>.* under all manifest roots.
+gar_known_roles() {
+    local dir f base rest role
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        for f in "$dir"/role.*; do
+            [[ -f "$f" ]] || continue
+            base=$(basename "$f")
+            rest="${base#role.}"
+            role="${rest%.*}"
+            [[ -n "$role" && "$role" != "$rest" ]] || continue
+            printf '%s\n' "$role"
+        done
+    done < <(gar_manifest_dirs) | sort -u
+}
+
+gar_role_is_active() {
+    local role="$1" r
+    for r in "${gar_active_roles[@]}"; do
+        [[ "$r" == "$role" ]] && return 0
     done
     return 1
+}
+
+# Emit capability suffixes for role.<role>.* under all manifest roots (unique).
+gar_role_capabilities() {
+    local role="$1" dir f base cap
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        for f in "$dir"/role."$role".*; do
+            [[ -f "$f" ]] || continue
+            base=$(basename "$f")
+            cap="${base#role.$role.}"
+            [[ -n "$cap" && "$cap" != "$base" ]] || continue
+            printf '%s\n' "$cap"
+        done
+    done < <(gar_manifest_dirs) | sort -u
+}
+
+# Preferred display order for role capability sections; unknown caps follow A–Z.
+gar_role_capabilities_ordered() {
+    local role="$1" caps cap
+    caps=$(gar_role_capabilities "$role")
+    [[ -n "$caps" ]] || return 0
+    for cap in apps Brewfile commands login-items env secrets machine-env-repos; do
+        if printf '%s\n' "$caps" | grep -qxF "$cap"; then
+            printf '%s\n' "$cap"
+        fi
+    done
+    printf '%s\n' "$caps" | grep -vxF \
+        -e apps -e Brewfile -e commands -e login-items \
+        -e env -e secrets -e machine-env-repos | sort -u || true
+}
+
+gar_role_capability_label() {
+    case "$1" in
+        apps) printf 'Apps' ;;
+        Brewfile) printf 'Homebrew' ;;
+        commands) printf 'Commands' ;;
+        login-items) printf 'Login items' ;;
+        env) printf 'Env' ;;
+        secrets) printf 'Secrets' ;;
+        machine-env-repos) printf 'Machine env repos' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+gar_role_manifest_has_items() {
+    local manifest="$1" line
+    [[ -f "$manifest" ]] || return 1
+    while IFS= read -r line; do
+        return 0
+    done < <(read_manifest "$manifest")
+    return 1
+}
+
+# Print human-readable items for one role capability manifest.
+gar_print_role_capability_items() {
+    local capability="$1" manifest="$2" line label names name
+    case "$capability" in
+        apps)
+            while IFS= read -r line; do
+                printf '    %s\n' "${line%%|*}"
+            done < <(read_manifest "$manifest")
+            ;;
+        Brewfile)
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^brew[[:space:]]+\"([^\"]+)\" ]]; then
+                    printf '    %s\n' "${BASH_REMATCH[1]}"
+                elif [[ "$line" =~ ^cask[[:space:]]+\"([^\"]+)\" ]]; then
+                    printf '    cask %s\n' "${BASH_REMATCH[1]}"
+                elif [[ "$line" =~ ^tap[[:space:]]+\"([^\"]+)\" ]]; then
+                    printf '    tap %s\n' "${BASH_REMATCH[1]}"
+                else
+                    printf '    %s\n' "$line"
+                fi
+            done < <(read_manifest "$manifest")
+            ;;
+        login-items)
+            while IFS= read -r line; do
+                label="${line%%|*}"
+                names="${line#*|}"
+                if [[ "$names" == *'|'* ]]; then
+                    printf '    %s (exactly one of: %s)\n' "$label" "$(gar_app_format_paths "$names")"
+                else
+                    printf '    %s\n' "$label"
+                fi
+            done < <(read_manifest "$manifest")
+            ;;
+        machine-env-repos)
+            while IFS= read -r line; do
+                name="${line%%|*}"
+                printf '    %s\n' "$name"
+            done < <(read_manifest "$manifest")
+            ;;
+        *)
+            while IFS= read -r line; do
+                printf '    %s\n' "$line"
+            done < <(read_manifest "$manifest")
+            ;;
+    esac
+}
+
+gar_print_role_details() {
+    local role="$1" cap manifest
+    while IFS= read -r cap; do
+        [[ -n "$cap" ]] || continue
+        manifest=$(gar_collect_role_manifest_for_role "$role" "$cap")
+        gar_role_manifest_has_items "$manifest" || continue
+        printf '  %s\n' "$(gar_role_capability_label "$cap")"
+        gar_print_role_capability_items "$cap" "$manifest"
+    done < <(gar_role_capabilities_ordered "$role")
+}
+
+cmd_roles() {
+    local role show_all=0 first=1
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -a|--all)
+                show_all=1
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option for roles: $1" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    detect_roles
+    if (( show_all )); then
+        gar_init_workdir
+    fi
+    while IFS= read -r role; do
+        [[ -n "$role" ]] || continue
+        if (( show_all && first == 0 )); then
+            printf '\n'
+        fi
+        first=0
+        if gar_role_is_active "$role"; then
+            printf '✓ %s\n' "$role"
+        else
+            printf '  %s\n' "$role"
+        fi
+        if (( show_all )); then
+            gar_print_role_details "$role"
+        fi
+    done < <(gar_known_roles)
 }
 
 detect_roles() {
@@ -386,22 +818,38 @@ gar_warn_unknown_roles() {
     local role
     for role in "${gar_active_roles[@]}"; do
         if ! gar_role_is_known "$role"; then
-            printf 'WARN Unknown role: %s (no gar.d/role.%s.* manifests)\n' "$role" "$role"
+            printf 'WARN Unknown role: %s (no role.%s.* in gar.d/ or ~/.config/gar/d/)\n' "$role" "$role"
         fi
     done
+}
+
+# Concatenate role.<role>.<capability> from all manifest roots into a temp file.
+# Writes under gar_tmpdir; call gar_init_workdir first.
+gar_collect_role_manifest_for_role() {
+    local role="$1" capability="$2" out dir f
+    out="$gar_tmpdir/role.$role.$capability"
+    : >"$out"
+    while IFS= read -r dir; do
+        [[ -n "$dir" ]] || continue
+        f="$dir/role.$role.$capability"
+        if [[ -f "$f" ]]; then
+            cat "$f" >>"$out"
+            printf '\n' >>"$out"
+        fi
+    done < <(gar_manifest_dirs)
+    printf '%s\n' "$out"
 }
 
 # Concatenate role.<role>.<capability> for each active role into a temp file.
 # Writes under gar_tmpdir; call gar_init_workdir first.
 gar_collect_role_manifest() {
-    local capability="$1" out role f
+    local capability="$1" out role role_file
     out="$gar_tmpdir/role.$capability"
     : >"$out"
     for role in "${gar_active_roles[@]}"; do
-        f="$GAR_DIR/role.$role.$capability"
-        if [[ -f "$f" ]]; then
-            cat "$f" >>"$out"
-            printf '\n' >>"$out"
+        role_file=$(gar_collect_role_manifest_for_role "$role" "$capability")
+        if [[ -n "$role_file" && -f "$role_file" && -s "$role_file" ]]; then
+            cat "$role_file" >>"$out"
         fi
     done
     printf '%s\n' "$out"
@@ -501,8 +949,10 @@ gar_can_prompt() {
     [[ -r /dev/tty ]] || [[ -t 0 ]]
 }
 
+# Prompt Y/n (default Y). Optional second arg: help text printed when the user
+# answers "?"; when set, the prompt suffix is [Y/n/?-Print install command].
 gar_prompt_yn() {
-    local prompt="$1" reply input
+    local prompt="$1" help="${2:-}" reply input suffix
     if [[ -r /dev/tty ]]; then
         input=/dev/tty
     elif [[ -t 0 ]]; then
@@ -511,8 +961,14 @@ gar_prompt_yn() {
         return 1
     fi
 
+    if [[ -n "$help" ]]; then
+        suffix='[Y/n/?-Print install command]'
+    else
+        suffix='[Y/n]'
+    fi
+
     while true; do
-        printf '%s [Y/n] ' "$prompt" >&2
+        printf '%s %s ' "$prompt" "$suffix" >&2
         if ! IFS= read -r reply <"$input"; then
             return 1
         fi
@@ -523,7 +979,20 @@ gar_prompt_yn() {
         case "$reply" in
             [Yy]|[Yy][Ee][Ss]) return 0 ;;
             [Nn]|[Nn][Oo]) return 1 ;;
-            *) printf 'Please answer Y or n.\n' >&2 ;;
+            \?)
+                if [[ -n "$help" ]]; then
+                    printf '%s\n' "$help" >&2
+                else
+                    printf 'Please answer Y or n.\n' >&2
+                fi
+                ;;
+            *)
+                if [[ -n "$help" ]]; then
+                    printf 'Please answer Y, n, or ?.\n' >&2
+                else
+                    printf 'Please answer Y or n.\n' >&2
+                fi
+                ;;
         esac
     done
 }
@@ -889,6 +1358,8 @@ try:
 except Exception:
     raise SystemExit(1)
 entry = (data.get("AppleSymbolicHotKeys") or {}).get(hk)
+if entry is None and hk.isdigit():
+    entry = (data.get("AppleSymbolicHotKeys") or {}).get(int(hk))
 if not isinstance(entry, dict):
     raise SystemExit(2)
 enabled = 1 if entry.get("enabled") else 0
@@ -1062,19 +1533,41 @@ mac_fix_sound_menu_bar() {
     return 0
 }
 
-mac_fix_next_window_czech() {
-    # Symbolic hotkey 27 = "Move focus to next window". Bind it to keycode 10
-    # (the key that types < on Czech-QWERTY, after Karabiner's
-    # non_us_backslash/grave swap) with the Command modifier (1048576). The
-    # character is 65535 (none) on purpose: storing the glyph < makes macOS
-    # infer Shift and turn the combo into Command-Shift, so binding by keycode
-    # keeps it a plain Command-<.
-    defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 27 \
-        '{enabled = 1; value = {parameters = (65535, 10, 1048576); type = "standard";};}' \
-        || return 1
-    # Reload shortcut settings so the change takes effect without a full re-login.
+mac_fix_next_window_angle() {
+    # Symbolic hotkey 27 = "Move focus to next window". Bind to Command-<
+    # (keycap label; stored as ASCII 92 with keycode 50, Command 1048576) —
+    # same physical key as Command-`, differing only by character. Matches
+    # toggle-switch-key / System Settings on this layout.
+    defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 27 "
+<dict>
+  <key>enabled</key><true/>
+  <key>value</key>
+  <dict>
+    <key>type</key><string>standard</string>
+    <key>parameters</key>
+    <array>
+      <integer>92</integer>
+      <integer>50</integer>
+      <integer>1048576</integer>
+    </array>
+  </dict>
+</dict>
+" || return 1
+    defaults read com.apple.symbolichotkeys >/dev/null 2>&1 || true
     /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u \
         2>/dev/null || true
+    return 0
+}
+
+# Return 0 if hotkey 27 is Command-< (ASCII 92, keycode 50, Command) — the
+# expected binding under Czech-QWERTY + Karabiner. Command-` is the other
+# toggle-switch-key value but is not the desired state for this check.
+mac_next_window_is_switch_key_binding() {
+    local hk_char="" hk_key="" hk_mod="" hk_enabled="" hk_read=""
+    hk_read=$(mac_read_symbolic_hotkey 27) || return 1
+    read -r hk_char hk_key hk_mod hk_enabled <<<"$hk_read"
+    [[ "$hk_enabled" == 1 && "$hk_mod" == 1048576 && "$hk_key" == 50 ]] || return 1
+    [[ "$hk_char" == 92 ]] || return 1
     return 0
 }
 
@@ -1110,9 +1603,9 @@ offer_fix_mac_setting() {
                 report_warn "Setting $label (could not update Control Center)"
             fi
             ;;
-        next-window-czech-qwerty)
+        next-window-switch-key)
             gar_prompt_yn "Fix $label: map \"Move focus to next window\" to Command-<?" || return 0
-            if mac_fix_next_window_czech; then
+            if mac_fix_next_window_angle; then
                 printf 'Mapped Move focus to next window to Command-< (log out/in if it does not take effect right away).\n'
             else
                 report_warn "Setting $label (could not update symbolic hotkey)"
@@ -1129,22 +1622,16 @@ check_mac_settings() {
         actual=""
 
         case "$kind" in
-            next-window-czech-qwerty)
+            next-window-switch-key)
                 # Only relevant with Karabiner Elements installed and the
                 # Czech-QWERTY input source enabled; otherwise skip silently.
                 if ! mac_karabiner_installed || ! mac_czech_qwerty_enabled; then
                     continue
                 fi
-                hk_read=$(mac_read_symbolic_hotkey 27) || hk_read=""
-                read -r hk_char hk_key hk_mod hk_enabled <<<"$hk_read"
-                # Match on keycode 10 (the < key on Czech-QWERTY) with the
-                # Command modifier (1048576). The char is intentionally ignored:
-                # binding by keycode avoids macOS inferring Shift from the
-                # shifted glyph < and turning the combo into Command-Shift.
-                if [[ "$hk_enabled" == 1 && "$hk_key" == 10 && "$hk_mod" == 1048576 ]]; then
+                if mac_next_window_is_switch_key_binding; then
                     report_ok "Setting $label"
                 else
-                    report_warn "Setting $label (map to Command-< under System Settings → Keyboard → Keyboard Shortcuts → Keyboard → Move focus to next window)"
+                    report_warn "Setting $label (map to Command-<; toggle-switch-key toggles with Command-\`)"
                     offer_fix_mac_setting "$kind" "$location" "$key" "$expected" "$label"
                 fi
                 continue
@@ -1225,7 +1712,7 @@ mac_secret_exists() {
 offer_brew_install_missing() {
     local brew_bin="$1"
     shift
-    local item name prompt
+    local item name prompt help
 
     gar_can_prompt || return 0
 
@@ -1233,7 +1720,8 @@ offer_brew_install_missing() {
         if [[ "$item" =~ ^Tap[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
             name="${BASH_REMATCH[1]}"
             prompt="Tap $name?"
-            gar_prompt_yn "$prompt" || continue
+            help="brew tap $name"
+            gar_prompt_yn "$prompt" "$help" || continue
             if "$brew_bin" tap "$name"; then
                 printf 'Tapped %s.\n' "$name"
             else
@@ -1242,7 +1730,12 @@ offer_brew_install_missing() {
         elif [[ "$item" =~ ^Formula[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
             name="${BASH_REMATCH[1]}"
             prompt="Install $name (brew)?"
-            gar_prompt_yn "$prompt" || continue
+            if [[ "$name" == gng || "$name" == */gng ]]; then
+                help=$'brew trust --formula gdubw/gng/gng\nbrew install '"$name"
+            else
+                help="brew install $name"
+            fi
+            gar_prompt_yn "$prompt" "$help" || continue
             if [[ "$name" == gng || "$name" == */gng ]]; then
                 if ! "$brew_bin" trust --formula gdubw/gng/gng; then
                     report_warn "Homebrew: could not trust gdubw/gng/gng"
@@ -1257,7 +1750,8 @@ offer_brew_install_missing() {
         elif [[ "$item" =~ ^Cask[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
             name="${BASH_REMATCH[1]}"
             prompt="Install $name (brew cask)?"
-            gar_prompt_yn "$prompt" || continue
+            help="brew install --cask $name"
+            gar_prompt_yn "$prompt" "$help" || continue
             if "$brew_bin" install --cask "$name"; then
                 printf 'Installed %s.\n' "$name"
             else
@@ -1283,9 +1777,10 @@ check_mac_homebrew() {
     fi
     report_ok "Homebrew ($brew_bin)"
 
-    local brewfile="$GAR_DIR/mac.Brewfile"
-    if [[ ! -f "$brewfile" ]]; then
-        report_miss "Homebrew manifest ($brewfile missing)"
+    local brewfile
+    brewfile=$(gar_combined_capability_manifest mac Brewfile)
+    if [[ ! -f "$brewfile" || ! -s "$brewfile" ]]; then
+        report_miss "Homebrew manifest (mac.Brewfile missing)"
         return
     fi
 
@@ -1440,10 +1935,10 @@ check_mac_apps() {
             report_miss "App manifest line (expected name|path): $entry"
             continue
         fi
-        if [[ -e "$path" ]]; then
+        if gar_app_first_existing_path "$path" >/dev/null; then
             report_ok "App $name"
         else
-            report_miss "App $name ($path)"
+            report_miss "App $name ($(gar_app_format_paths "$path"))"
         fi
     done < <(read_manifest "$apps_manifest")
 }
@@ -1463,7 +1958,8 @@ mac_login_item_listed() {
 }
 
 check_mac_login_items() {
-    local entry label login_name items_raw read_status=0
+    local entry label names_field items_raw read_status=0
+    local name candidates matched matched_list format
     local login_manifest="${1:-}"
     [[ -n "$login_manifest" ]] || login_manifest=$(gar_combined_capability_manifest mac login-items)
     read_status=0
@@ -1473,15 +1969,51 @@ check_mac_login_items() {
         return
     fi
 
-    while IFS='|' read -r label login_name; do
-        if [[ -z "$label" || -z "$login_name" ]]; then
-            report_miss "Login item manifest line (expected label|name): ${label}|${login_name}"
+    while IFS= read -r entry; do
+        label="${entry%%|*}"
+        names_field="${entry#*|}"
+        if [[ -z "$label" || -z "$names_field" || "$label" == "$entry" ]]; then
+            report_miss "Login item manifest line (expected label|name[|name...]): $entry"
             continue
         fi
-        if mac_login_item_listed "$login_name" "$items_raw"; then
-            report_ok "Login item $label"
+
+        candidates=0
+        matched=0
+        matched_list=""
+        while IFS= read -r name; do
+            [[ -n "$name" ]] || continue
+            candidates=$((candidates + 1))
+            if mac_login_item_listed "$name" "$items_raw"; then
+                matched=$((matched + 1))
+                if [[ -z "$matched_list" ]]; then
+                    matched_list="$name"
+                else
+                    matched_list="$matched_list, $name"
+                fi
+            fi
+        done < <(gar_app_candidate_paths "$names_field")
+
+        if (( candidates == 0 )); then
+            report_miss "Login item manifest line (expected label|name[|name...]): $entry"
+            continue
+        fi
+
+        if (( candidates == 1 )); then
+            if (( matched == 1 )); then
+                report_ok "Login item $label"
+            else
+                report_miss "Login item $label (add $names_field in System Settings → General → Login Items)"
+            fi
+            continue
+        fi
+
+        format=$(gar_app_format_paths "$names_field")
+        if (( matched == 1 )); then
+            report_ok "Login item $label ($matched_list)"
+        elif (( matched == 0 )); then
+            report_miss "Login item $label (add exactly one of: $format in System Settings → General → Login Items)"
         else
-            report_miss "Login item $label (add $login_name in System Settings → General → Login Items)"
+            report_miss "Login item $label (exactly one of: $format; found: $matched_list)"
         fi
     done < <(read_manifest "$login_manifest")
 }
@@ -1741,13 +2273,20 @@ main() {
     fi
 
     if [[ "${1:-}" == "apps" ]]; then
-        cmd_apps
+        shift
+        cmd_apps "$@"
+        return
+    fi
+
+    if [[ "${1:-}" == "roles" ]]; then
+        shift
+        cmd_roles "$@"
         return
     fi
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -h|--help)
+            -h|--help|--man)
                 usage
                 exit 0
                 ;;

@@ -2,7 +2,8 @@
 # Format: name|hint
 Flycut|Download from https://github.com/TermiT/Flycut/releases and drag Flycut.app to /Applications
 Rectangle|Download from https://rectangleapp.com and drag Rectangle.app to /Applications
-Docker|Download from https://www.docker.com/products/docker-desktop/ and drag Docker.app to /Applications
+Docker|Install Docker Desktop (https://www.docker.com/products/docker-desktop/) or Rancher Desktop (https://rancherdesktop.io/) and drag the .app to /Applications
+Docker login|System Settings → General → Login Items → add exactly one of Docker or Rancher Desktop
 qBittorrent|Download from https://www.qbittorrent.org/download; if macOS blocks it: xattr -dr com.apple.quarantine /Applications/qbittorrent.app
 VS Code|Download from https://code.visualstudio.com/ and drag Visual Studio Code.app to /Applications
 Cursor|Download from https://cursor.com/ and drag Cursor.app to /Applications
@@ -28,6 +29,7 @@ imagemagick|brew install imagemagick
 HandBrakeCLI|brew install handbrake
 Text::Autoformat|Try:\n\n        cpan\n\n        (answer 'yes' to the question about setting up if this is the first time you're running cpan)\n        cpan[1]> install Text::Autoformat\n        cpan[2]> exit
 csvformat|brew install csvkit
+gh|brew install gh
 gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
 gdubw/gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
 mvn|brew install maven

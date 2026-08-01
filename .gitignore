@@ -4,3 +4,8 @@ __pycache__
 
 # Testing
 .dus*
+
+# Configuration files
+
+ddf.json
+ddf.yaml

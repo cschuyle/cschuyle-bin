@@ -1,0 +1,4 @@
+# Login items added by the dev-tools role.
+# Format: label|name  — must be present
+# Format: label|name1|name2|...  — exactly one of the names must be present
+Docker|Docker|Rancher Desktop
