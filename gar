@@ -405,6 +405,68 @@ brew_miss_hint() {
     return 1
 }
 
+# Collapse a leading $HOME to ~ for display (e.g. /Users/me/.local/bin -> ~/.local/bin).
+gar_tilde_path() {
+    local path="$1"
+    if [[ "$path" == "$HOME" ]]; then
+        printf '~\n'
+    elif [[ "$path" == "$HOME"/* ]]; then
+        printf '~%s\n' "${path#"$HOME"}"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
+# Emit command names that install-hints says are provided by a brew formula/cask.
+# The hint value is matched as a whole token so cask "claude-code" maps to the
+# command "claude" via `claude|brew install --cask claude-code`.
+gar_brew_hint_commands() {
+    local brew_name="$1" hints_file name hint
+    hints_file=$(gar_hints_file)
+    while IFS='|' read -r name hint; do
+        [[ -n "$name" && -n "$hint" ]] || continue
+        if [[ " $hint " == *" $brew_name "* ]]; then
+            printf '%s\n' "$name"
+        fi
+    done < <(read_manifest "$hints_file")
+}
+
+# If a missing brew formula/cask is actually already available on PATH from a
+# non-Homebrew location, print "command|path". Candidate command names are the
+# brew item name itself plus any command install-hints maps to it.
+gar_brew_item_elsewhere() {
+    local brew_name="$1" brew_bin="$2" brew_prefix cmd cmd_path
+    brew_prefix=$("$brew_bin" --prefix 2>/dev/null || true)
+    while IFS= read -r cmd; do
+        [[ -n "$cmd" ]] || continue
+        command -v "$cmd" >/dev/null 2>&1 || continue
+        cmd_path=$(command -v "$cmd")
+        # Ignore the Homebrew-provided copy; we only care about other locations.
+        [[ -n "$brew_prefix" && "$cmd_path" == "$brew_prefix"/* ]] && continue
+        printf '%s|%s\n' "$cmd" "$cmd_path"
+        return 0
+    done < <(printf '%s\n' "$brew_name"; gar_brew_hint_commands "$brew_name")
+    return 1
+}
+
+# Capitalize the first character (claude -> Claude) for the display name.
+gar_capitalize_first() {
+    local s="$1"
+    [[ -n "$s" ]] || return 0
+    printf '%s%s\n' "$(printf '%s' "${s:0:1}" | tr '[:lower:]' '[:upper:]')" "${s:1}"
+}
+
+# Extract the formula/cask name from a `brew bundle check` missing-item line
+# (e.g. "Cask claude-code needs to be installed" -> "claude-code").
+gar_brew_item_name() {
+    local item="$1"
+    if [[ "$item" =~ ^(Formula|Cask)[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
+        printf '%s\n' "${BASH_REMATCH[2]}"
+        return 0
+    fi
+    return 1
+}
+
 # Classify a docker endpoint/context name as Docker Desktop, Rancher Desktop, or other.
 gar_docker_classify() {
     local text="$1" path
@@ -1795,8 +1857,19 @@ check_mac_homebrew() {
         return
     fi
 
-    local item hint
+    local item hint brew_name elsewhere cmd cmd_path
+    local still_missing=()
     for item in "${missing[@]}"; do
+        if brew_name=$(gar_brew_item_name "$item") \
+            && elsewhere=$(gar_brew_item_elsewhere "$brew_name" "$brew_bin"); then
+            cmd="${elsewhere%%|*}"
+            cmd_path="${elsewhere#*|}"
+            gar_section_emit_header
+            printf '%s is brew-required but exists in another location (%s), so assuming you don'\''t want it brew-installed\n' \
+                "$(gar_capitalize_first "$cmd")" "$(gar_tilde_path "$cmd_path")"
+            continue
+        fi
+        still_missing+=("$item")
         if hint=$(brew_miss_hint "$item"); then
             report_miss "Homebrew: $item ($hint)"
         else
@@ -1804,7 +1877,9 @@ check_mac_homebrew() {
         fi
     done
 
-    offer_brew_install_missing "$brew_bin" "${missing[@]}"
+    if ((${#still_missing[@]} > 0)); then
+        offer_brew_install_missing "$brew_bin" "${still_missing[@]}"
+    fi
 }
 
 check_mac_secrets() {
