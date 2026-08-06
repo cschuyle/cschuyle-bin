@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: git-better-worktree-list [git-worktree-list-args...]
+
+Like `git worktree list`, but adds a MAIN / linked disambiguator column so you
+can tell the main working tree (the one holding the real .git directory) from
+the linked worktrees (whose .git is a pointer file into it).
+
+git lists the main working tree first in its porcelain output; that's how the
+MAIN row is identified. Any extra args are passed through to the underlying
+`git worktree list --porcelain` call (e.g. --expire, though most display flags
+don't apply to porcelain).
+
+Run from anywhere inside the repo (any worktree).
+EOF
+  exit 0
+fi
+
+# Collect porcelain records. Each worktree is a paragraph of "key value" lines
+# separated by a blank line; the first paragraph is always the main worktree.
+mapfile -t lines < <(git worktree list --porcelain "$@")
+
+# First pass: parse into parallel arrays and compute column widths.
+paths=()
+shas=()
+labels=()   # branch name, "(detached HEAD)", or "(bare)"
+kinds=()    # MAIN or linked
+
+path="" ; sha="" ; label="" ; first=1
+flush() {
+  [[ -z "$path" ]] && return
+  paths+=("$path")
+  shas+=("$sha")
+  labels+=("$label")
+  if [[ $first -eq 1 ]]; then kinds+=("MAIN"); first=0; else kinds+=("linked"); fi
+  path="" ; sha="" ; label=""
+}
+
+for line in "${lines[@]}"; do
+  if [[ -z "$line" ]]; then
+    flush
+    continue
+  fi
+  key=${line%% *}
+  val=${line#* }
+  case "$key" in
+    worktree) path="$val" ;;
+    HEAD)     sha="${val:0:11}" ;;                 # git shows an abbreviated sha
+    branch)   label="[${val#refs/heads/}]" ;;      # strip refs/heads/ prefix
+    detached) label="(detached HEAD)" ; sha="${sha:0:11}" ;;
+    bare)     label="(bare)" ;;
+  esac
+done
+flush   # last record has no trailing blank line
+
+# Compute path column width for alignment.
+pw=0
+for p in "${paths[@]}"; do (( ${#p} > pw )) && pw=${#p}; done
+
+# Second pass: print aligned rows with the kind column last.
+for i in "${!paths[@]}"; do
+  printf '%-*s  %s  %-8s %s\n' \
+    "$pw" "${paths[$i]}" "${shas[$i]}" "${kinds[$i]}" "${labels[$i]}"
+done
