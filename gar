@@ -1011,10 +1011,11 @@ gar_can_prompt() {
     [[ -r /dev/tty ]] || [[ -t 0 ]]
 }
 
-# Prompt Y/n (default Y). Optional second arg: help text printed when the user
-# answers "?"; when set, the prompt suffix is [Y/n/?-Print install command].
+# Prompt Y/n (default Y) or y/N (default N). Optional second arg: help text
+# printed when the user answers "?"; when set, the prompt suffix includes
+# ?-Print install command. Optional third arg: default reply Y or N (default Y).
 gar_prompt_yn() {
-    local prompt="$1" help="${2:-}" reply input suffix
+    local prompt="$1" help="${2:-}" default="${3:-Y}" reply input suffix
     if [[ -r /dev/tty ]]; then
         input=/dev/tty
     elif [[ -t 0 ]]; then
@@ -1023,10 +1024,23 @@ gar_prompt_yn() {
         return 1
     fi
 
-    if [[ -n "$help" ]]; then
-        suffix='[Y/n/?-Print install command]'
+    case "$default" in
+        [Nn]|[Nn][Oo]) default=N ;;
+        *) default=Y ;;
+    esac
+
+    if [[ "$default" == N ]]; then
+        if [[ -n "$help" ]]; then
+            suffix='[y/N/?-Print install command]'
+        else
+            suffix='[y/N]'
+        fi
     else
-        suffix='[Y/n]'
+        if [[ -n "$help" ]]; then
+            suffix='[Y/n/?-Print install command]'
+        else
+            suffix='[Y/n]'
+        fi
     fi
 
     while true; do
@@ -1037,7 +1051,7 @@ gar_prompt_yn() {
         reply="${reply//$'\r'/}"
         reply="${reply#"${reply%%[![:space:]]*}"}"
         reply="${reply%"${reply##*[![:space:]]}"}"
-        [[ -n "$reply" ]] || reply=Y
+        [[ -n "$reply" ]] || reply=$default
         case "$reply" in
             [Yy]|[Yy][Ee][Ss]) return 0 ;;
             [Nn]|[Nn][Oo]) return 1 ;;
@@ -1633,6 +1647,312 @@ mac_next_window_is_switch_key_binding() {
     return 0
 }
 
+mac_chrome_user_data_dir() {
+    printf '%s\n' "$HOME/Library/Application Support/Google/Chrome"
+}
+
+# Print "profile|value" for each selected profile; exit 2 if key absent.
+# Reads Secure Preferences first, then Preferences (dotted nested keys).
+# location: "*", "@last", or "" → last-used profile; "@all" → every user
+# profile; otherwise a profile directory name or display name / email.
+mac_chrome_read_pref() {
+    local location="$1" key="$2" root
+    root=$(mac_chrome_user_data_dir)
+    python3 - "$root" "$location" "$key" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+location = sys.argv[2]
+key = sys.argv[3]
+parts = key.split(".")
+
+skip = {
+    "System Profile", "Guest Profile", "Snap", "Snapshot", "Crashpad",
+    "GrShaderCache", "GraphiteDawnCache", "ShaderCache", "Safe Browsing",
+    "component_crx_cache", "extensions_crx_cache", "optimization_guide_model_store",
+}
+
+def load_json(path):
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+
+def info_cache():
+    data = load_json(root / "Local State") or {}
+    cache = (data.get("profile") or {}).get("info_cache") or {}
+    return data, cache if isinstance(cache, dict) else {}
+
+def last_used_profile():
+    data, _ = info_cache()
+    name = (data.get("profile") or {}).get("last_used")
+    if isinstance(name, str) and name:
+        return name
+    return "Default"
+
+def all_user_profiles():
+    if not root.is_dir():
+        return
+    for p in sorted(root.iterdir()):
+        if not p.is_dir() or p.name in skip:
+            continue
+        if (p / "Preferences").is_file() or (p / "Secure Preferences").is_file():
+            yield p.name
+
+def profiles():
+    if location in ("*", "@last", ""):
+        yield last_used_profile()
+        return
+    if location == "@all":
+        yield from all_user_profiles()
+        return
+    # Exact profile directory name.
+    if (root / location).is_dir():
+        yield location
+        return
+    # Match Local State display name or signed-in email (case-insensitive).
+    _, cache = info_cache()
+    needle = location.casefold()
+    for dirname, info in cache.items():
+        if not isinstance(info, dict):
+            continue
+        for field in ("name", "user_name", "gaia_name", "gaia_id"):
+            val = info.get(field)
+            if isinstance(val, str) and val.casefold() == needle:
+                yield dirname
+                return
+    # Fall back to treating location as a directory name even if missing.
+    yield location
+
+def nested_get(data, parts):
+    cur = data
+    for part in parts:
+        if not isinstance(cur, dict) or part not in cur:
+            return None, False
+        cur = cur[part]
+    return cur, True
+
+def profile_label(name):
+    _, cache = info_cache()
+    info = cache.get(name) or {}
+    label = info.get("name") or info.get("user_name")
+    if isinstance(label, str) and label and label != name:
+        return "%s (%s)" % (name, label)
+    return name
+
+def read_profile(name):
+    for fname in ("Secure Preferences", "Preferences"):
+        path = root / name / fname
+        data = load_json(path)
+        if not isinstance(data, dict):
+            continue
+        value, found = nested_get(data, parts)
+        if found:
+            return value
+    return None
+
+any_profile = False
+missing = False
+for name in profiles():
+    any_profile = True
+    value = read_profile(name)
+    label = profile_label(name)
+    if value is None:
+        print("%s|" % label)
+        missing = True
+        continue
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+    else:
+        text = str(value)
+    print("%s|%s" % (label, text))
+
+if not any_profile:
+    raise SystemExit(1)
+if missing:
+    raise SystemExit(2)
+raise SystemExit(0)
+PY
+}
+
+# Set a dotted nested key in Chrome Preferences and/or Secure Preferences for
+# each selected profile. Clears integrity MACs for that key so Chrome re-seals.
+# location semantics match mac_chrome_read_pref.
+mac_chrome_write_pref() {
+    local location="$1" key="$2" value="$3" root
+    root=$(mac_chrome_user_data_dir)
+    python3 - "$root" "$location" "$key" "$value" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+location = sys.argv[2]
+key = sys.argv[3]
+raw = sys.argv[4]
+parts = key.split(".")
+
+if raw in ("true", "false"):
+    value = raw == "true"
+elif re.fullmatch(r"-?\d+", raw):
+    value = int(raw)
+else:
+    value = raw
+
+skip = {
+    "System Profile", "Guest Profile", "Snap", "Snapshot", "Crashpad",
+    "GrShaderCache", "GraphiteDawnCache", "ShaderCache", "Safe Browsing",
+    "component_crx_cache", "extensions_crx_cache", "optimization_guide_model_store",
+}
+
+def load(path):
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+
+def info_cache():
+    data = load(root / "Local State") or {}
+    cache = (data.get("profile") or {}).get("info_cache") or {}
+    return data, cache if isinstance(cache, dict) else {}
+
+def last_used_profile():
+    data, _ = info_cache()
+    name = (data.get("profile") or {}).get("last_used")
+    if isinstance(name, str) and name:
+        return name
+    return "Default"
+
+def all_user_profiles():
+    if not root.is_dir():
+        return
+    for p in sorted(root.iterdir()):
+        if not p.is_dir() or p.name in skip:
+            continue
+        if (p / "Preferences").is_file() or (p / "Secure Preferences").is_file():
+            yield p.name
+
+def profiles():
+    if location in ("*", "@last", ""):
+        yield last_used_profile()
+        return
+    if location == "@all":
+        yield from all_user_profiles()
+        return
+    if (root / location).is_dir():
+        yield location
+        return
+    _, cache = info_cache()
+    needle = location.casefold()
+    for dirname, info in cache.items():
+        if not isinstance(info, dict):
+            continue
+        for field in ("name", "user_name", "gaia_name", "gaia_id"):
+            val = info.get(field)
+            if isinstance(val, str) and val.casefold() == needle:
+                yield dirname
+                return
+    yield location
+
+def nested_get(data, parts):
+    cur = data
+    for part in parts:
+        if not isinstance(cur, dict) or part not in cur:
+            return None, False
+        cur = cur[part]
+    return cur, True
+
+def current_value(name):
+    for fname in ("Secure Preferences", "Preferences"):
+        path = root / name / fname
+        data = load(path)
+        if not isinstance(data, dict):
+            continue
+        cur, found = nested_get(data, parts)
+        if found:
+            return cur, True
+    return None, False
+
+def nested_set(data, parts, value):
+    cur = data
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[part] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+
+def clear_macs(data, parts):
+    prot = data.get("protection")
+    if not isinstance(prot, dict):
+        return
+    macs = prot.get("macs")
+    if not isinstance(macs, dict):
+        return
+    leaf = parts[-1]
+    candidates = []
+    if len(parts) >= 2:
+        candidates.append(parts[0])
+        candidates.append("account_values." + parts[0])
+        candidates.append(".".join(parts[:-1]))
+        candidates.append("account_values." + ".".join(parts[:-1]))
+    for section in candidates:
+        node = macs
+        ok = True
+        for part in section.split("."):
+            if not isinstance(node, dict) or part not in node:
+                ok = False
+                break
+            node = node[part]
+        if not ok or not isinstance(node, dict):
+            continue
+        node.pop(leaf, None)
+        node.pop(leaf + "_encrypted_hash", None)
+
+for name in profiles():
+    cur, found = current_value(name)
+    if found and cur == value:
+        continue
+    # Resolve write target using the directory name (not a display label).
+    prof = root / name
+    secure_path = prof / "Secure Preferences"
+    prefs_path = prof / "Preferences"
+    secure = load(secure_path)
+    prefs = load(prefs_path)
+    in_secure = False
+    if isinstance(secure, dict):
+        _, in_secure = nested_get(secure, parts)
+    targets = []
+    if in_secure:
+        targets.append((secure_path, secure))
+    if isinstance(prefs, dict):
+        targets.append((prefs_path, prefs))
+    elif not targets:
+        prefs = {}
+        targets.append((prefs_path, prefs))
+    for path, data in targets:
+        nested_set(data, parts, value)
+        if path.name == "Secure Preferences":
+            clear_macs(data, parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, separators=(",", ":"), ensure_ascii=False))
+
+raise SystemExit(0)
+PY
+}
+
+mac_chrome_is_running() {
+    pgrep -xq "Google Chrome" 2>/dev/null
+}
+
 offer_fix_mac_setting() {
     local kind="$1" location="$2" key="$3" expected="$4" label="$5" settings_path
 
@@ -1657,6 +1977,19 @@ offer_fix_mac_setting() {
                 report_warn "Setting $label (could not update $settings_path)"
             fi
             ;;
+        chrome-json)
+            if mac_chrome_is_running; then
+                printf 'Quit Google Chrome before applying this fix (prefs are overwritten while it runs).\n'
+                gar_prompt_yn "Chrome still running — fix $label anyway (set $key to $expected)?" "" N || return 0
+            else
+                gar_prompt_yn "Fix $label: set $key to $expected in Chrome profile prefs?" || return 0
+            fi
+            if mac_chrome_write_pref "$location" "$key" "$expected"; then
+                printf 'Set Chrome %s to %s (restart Chrome if it was running).\n' "$key" "$expected"
+            else
+                report_warn "Setting $label (could not update Chrome preferences)"
+            fi
+            ;;
         sound-menu-bar-always)
             gar_prompt_yn "Fix $label: always show volume in the menu bar?" || return 0
             if mac_fix_sound_menu_bar; then
@@ -1679,6 +2012,7 @@ offer_fix_mac_setting() {
 check_mac_settings() {
     local label kind location key expected compare actual settings_path app_path read_status=0
     local hk_char hk_key hk_mod hk_enabled hk_read
+    local chrome_line chrome_profile chrome_value chrome_bad chrome_detail chrome_out
     while IFS='|' read -r label kind location key expected compare; do
         compare="${compare:-eq}"
         actual=""
@@ -1717,6 +2051,42 @@ check_mac_settings() {
                     fi
                 else
                     report_ok "Setting $label${actual:+ ($actual)}"
+                fi
+                continue
+                ;;
+            chrome-json)
+                app_path=$(mac_browser_app_path chrome)
+                if [[ -z "$app_path" || ! -e "$app_path" ]]; then
+                    continue
+                fi
+                read_status=0
+                chrome_bad=""
+                chrome_detail=""
+                chrome_out=$(mac_chrome_read_pref "$location" "$key" 2>/dev/null) || read_status=$?
+                if [[ -z "$chrome_out" ]]; then
+                    report_warn "Setting $label (no Chrome profiles found; want $key=$expected)"
+                    offer_fix_mac_setting "$kind" "$location" "$key" "$expected" "$label"
+                    continue
+                fi
+                while IFS= read -r chrome_line; do
+                    [[ -n "$chrome_line" ]] || continue
+                    chrome_profile="${chrome_line%%|*}"
+                    chrome_value="${chrome_line#*|}"
+                    if [[ -z "$chrome_value" ]]; then
+                        chrome_bad+="${chrome_bad:+, }${chrome_profile}=not set"
+                        continue
+                    fi
+                    if gar_setting_matches "$chrome_value" "$expected" "$compare"; then
+                        chrome_detail+="${chrome_detail:+, }${chrome_profile}=$chrome_value"
+                    else
+                        chrome_bad+="${chrome_bad:+, }${chrome_profile}=$chrome_value"
+                    fi
+                done <<<"$chrome_out"
+                if [[ -n "$chrome_bad" ]]; then
+                    report_warn "Setting $label (want $expected; ${chrome_bad})"
+                    offer_fix_mac_setting "$kind" "$location" "$key" "$expected" "$label"
+                else
+                    report_ok "Setting $label ($chrome_detail)"
                 fi
                 continue
                 ;;

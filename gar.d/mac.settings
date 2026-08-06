@@ -1,18 +1,26 @@
 # Mac settings checks (advisory — mismatches WARN, not MISS).
 # Format: label|kind|location|key|expected[|compare]
 # kind: json-editor (cursor or code), defaults, sound-menu-bar-always,
-#       machine-name-not-default, next-window-switch-key
-# location: editor id or "global" for NSGlobalDomain
+#       machine-name-not-default, next-window-switch-key, chrome-json
+# location: editor id, "global" for NSGlobalDomain, Chrome profile dir
+#           name (e.g. Default), profile display name (e.g. natera.com),
+#           "*" / "@last" for Chrome's last-used profile, or "@all" for every
+#           Chrome user profile
 # compare: eq (default), at_most (numeric actual <= expected)
 # In an interactive terminal gar offers to fix WARNs for json-editor,
-# defaults, sound-menu-bar-always, and next-window-switch-key kinds.
-# machine-name-not-default is advisory only.
+# defaults, sound-menu-bar-always, next-window-switch-key, and chrome-json
+# kinds. machine-name-not-default is advisory only.
 # next-window-switch-key only applies when Karabiner Elements is installed
 # and the Czech-QWERTY input source is enabled; it checks that "Move focus to
 # next window" (symbolic hotkey 27) is Command-< (ASCII 92, keycode 50) — the
 # expected binding on this layout. toggle-switch-key also toggles Command-`,
 # but that is not the desired state for this check. The fix writes (92, 50,
 # 1048576).
+# chrome-json reads Preferences / Secure Preferences under
+# ~/Library/Application Support/Google/Chrome; skipped if Chrome is not
+# installed. Startup prefs are per profile — "*" checks the last-used one
+# (the profile you pick in "Who's using Chrome?"). session.restore_on_startup=1
+# is "Continue where you left off".
 Cursor auto-save|json-editor|cursor|files.autoSave|onFocusChange
 VS Code auto-save|json-editor|code|files.autoSave|onFocusChange
 Keyboard repeat speed|defaults|global|KeyRepeat|2|at_most
@@ -21,3 +29,4 @@ Show all filename extensions|defaults|global|AppleShowAllExtensions|1
 Always show volume in menu bar|sound-menu-bar-always||||
 Machine name|machine-name-not-default||||
 Move focus to next window (Command-<)|next-window-switch-key||||
+Chrome On startup: continue where you left off|chrome-json|*|session.restore_on_startup|1
