@@ -163,8 +163,11 @@ class DusDB:
             (root, scanned_at, rootsize_kb, dircount),
         )
         for i in range(0, len(rows), BATCH):
+            # du can emit the same directory path twice in one scan (e.g. a file
+            # changed size mid-scan, or a hardlinked/bind-mounted subtree), so
+            # last-value-wins instead of erroring on the path PRIMARY KEY.
             self.conn.executemany(
-                "INSERT INTO entries (path, parent_path, scan_root, size_kb) VALUES (?,?,?,?)",
+                "INSERT OR REPLACE INTO entries (path, parent_path, scan_root, size_kb) VALUES (?,?,?,?)",
                 rows[i : i + BATCH],
             )
         self.conn.commit()
@@ -476,7 +479,7 @@ def resolve_size(
     if sz is None:
         du = du_bin()
         args: List[str] = []
-        if cfg.no_cache and cfg.excludes and du == "gdu":
+        if cfg.excludes and du == "gdu":
             args = [f"--exclude={p}" for p in cfg.excludes]
         cfg.vlog(f"+ {du} -sk {' '.join(args)} {np}")
         try:
@@ -721,17 +724,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             sibling_listing = True
             cfg.vstage(f"sibling prefetch from {progress_label(sibling_parent)}")
 
-    use_postfilter = bool(cfg.excludes) and not cfg.no_cache
     du = du_bin()
     du_scan_args: List[str] = []
-    if cfg.no_cache and cfg.excludes and du == "gdu":
+    if cfg.excludes and du == "gdu":
         du_scan_args = [f"--exclude={p}" for p in cfg.excludes]
-    elif cfg.excludes and not cfg.no_cache and du != "gdu":
+    elif cfg.excludes and du != "gdu":
         print(
             f"{PROG}: WARNING: GNU du (gdu) not available; --exclude filters by "
             "basename at output (sizes of excluded dirs still counted in parents)",
             file=sys.stderr,
         )
+    use_postfilter = bool(cfg.excludes)
 
     to_scan: List[str] = []
     for root in roots:
@@ -801,7 +804,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             assert db is not None
             cfg.vlog(f"cache MISS: {root}")
-            rootsize, dircount, rows = run_du_scan(cfg, root, du, [])
+            rootsize, dircount, rows = run_du_scan(cfg, root, du, du_scan_args)
             if dircount >= 500:
                 cfg.status(f"{progress_label(root)} processing {dircount} entries...")
             scanned_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
