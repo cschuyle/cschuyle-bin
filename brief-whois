@@ -28,6 +28,55 @@ is_valid_domain() {
   return 0
 }
 
+# Fallback for when RDAP says "not found": rdap.org relies on IANA's RDAP
+# bootstrap registry to route lookups, and some TLDs (e.g. .me) simply have no
+# entry there. For those, rdap.org 404s on every domain regardless of actual
+# registration status. The legacy WHOIS protocol still works for such TLDs, and
+# the system 'whois' client chases registry -> registrar referrals itself, so
+# use it as a second opinion before reporting "Not Registered".
+whois_fallback_classify() {
+  local out=$1
+  if [ -z "$out" ]; then
+    echo "unknown"
+    return
+  fi
+  if echo "$out" | grep -qiE 'Creation Date:|Registry Expiry Date:|Registrar:|Registrant Name:|Registrant Organization:'; then
+    echo "registered"
+    return
+  fi
+  if echo "$out" | grep -qiE 'No match for domain|Domain not found|No Data Found|No entries found|Status: *AVAILABLE|No object found|is available for registration'; then
+    echo "not_registered"
+    return
+  fi
+  echo "unknown"
+}
+
+report_not_registered() {
+  local d=$1
+  local wf_raw wf_status
+  wf_raw=$(whois "$d" 2>/dev/null)
+  wf_status=$(whois_fallback_classify "$wf_raw")
+  if [ "$wf_status" = "registered" ]; then
+    echo -e "$d\tRegistered (RDAP has no data for this TLD; confirmed via WHOIS)"
+  else
+    echo -e "$d\tNot Registered"
+  fi
+}
+
+report_not_registered_verbose() {
+  local d=$1
+  local reason=$2
+  local wf_raw wf_status
+  wf_raw=$(whois "$d" 2>/dev/null)
+  wf_status=$(whois_fallback_classify "$wf_raw")
+  if [ "$wf_status" = "registered" ]; then
+    echo "Registered (RDAP has no data for this TLD; confirmed via WHOIS fallback)"
+    echo "$wf_raw" | grep -iE 'Domain Name:|Creation Date:|Registry Expiry Date:|Registrar:|Name Server:'
+  else
+    echo "Not Registered ($reason)"
+  fi
+}
+
 brief_error_detail() {
   local data=$1
   local http_code=$2
@@ -100,10 +149,10 @@ for d in "${domains[@]}"; do
     if [ "$curl_status" -eq 0 ] && [ -z "$data" ] && [ "$http_code" = "404" ]; then
       if [ $verbose -eq 1 ]; then
         echo "=== $d ==="
-        echo "Not Registered (HTTP 404, empty body)"
+        report_not_registered_verbose "$d" "HTTP 404, empty body"
         echo
       else
-        echo -e "$d\tNot Registered"
+        report_not_registered "$d"
       fi
     elif [ $verbose -eq 1 ]; then
       echo "=== $d ==="
@@ -133,6 +182,11 @@ for d in "${domains[@]}"; do
 
   if [ $verbose -eq 1 ]; then
     echo "=== $d ==="
+    if echo "$data" | jq -e '.errorCode == 404' >/dev/null 2>&1; then
+      report_not_registered_verbose "$d" "RDAP errorCode 404"
+      echo
+      continue
+    fi
     parse_and_print "$data"
     jq_status=$?
     if [ $jq_status -ne 0 ]; then
@@ -173,7 +227,7 @@ for d in "${domains[@]}"; do
       # Try to detect not registered (rdap.org returns 404 JSON with errorCode 404)
       echo "$data" | jq -e '.errorCode == 404' >/dev/null 2>&1
       if [ $? -eq 0 ]; then
-        echo -e "$d\tNot Registered"
+        report_not_registered "$d"
       else
         echo -e "$d\tError: $(brief_error_detail "$data" "$http_code" 0)"
       fi
