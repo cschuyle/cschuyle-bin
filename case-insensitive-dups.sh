@@ -2,21 +2,21 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: case-insensitive-dups.sh [-r|--recursive] [DIR]"
+  echo "Usage: case-insensitive-dups.sh [-r|--recursive] [DIR ...]"
 }
 
 recursive=0
-dir=""
+dirs=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help)
       cat <<'EOF'
-Usage: case-insensitive-dups.sh [-r|--recursive] [DIR]
+Usage: case-insensitive-dups.sh [-r|--recursive] [DIR ...]
 
-Report files in DIR (default: .) whose names collide when compared
-case-insensitively. By default only the top level of DIR is checked;
--r/--recursive checks every directory in the tree. Exits 1 if any
+Report files in each DIR (default: .) whose names collide when compared
+case-insensitively. By default only the top level of each DIR is checked;
+-r/--recursive checks every directory in each tree. Exits 1 if any
 duplicates are found.
 EOF
       exit 0
@@ -31,26 +31,22 @@ EOF
       exit 1
       ;;
     *)
-      if [[ -n "$dir" ]]; then
-        echo "Unexpected argument: $1" >&2
-        usage >&2
-        exit 1
-      fi
-      dir="$1"
+      dirs+=("${1%/}")
       shift
       ;;
   esac
 done
 
-dir="${dir:-.}"
-dir="${dir%/}"
+if (( ${#dirs[@]} == 0 )); then
+  dirs=(.)
+fi
 
 declare -A seen
 declare -A originals
 
 found=0
 
-find_args=("$dir" -mindepth 1)
+find_args=("${dirs[@]}" -mindepth 1)
 if (( ! recursive )); then
   find_args+=(-maxdepth 1)
 fi
