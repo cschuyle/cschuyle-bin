@@ -1,17 +1,48 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  cat <<'EOF'
-Usage: case-insensitive-dups.sh [DIR]
+usage() {
+  echo "Usage: case-insensitive-dups.sh [-r|--recursive] [DIR]"
+}
 
-Report top-level files in DIR (default: .) whose names collide when compared
-case-insensitively. Exits 1 if any duplicates are found.
+recursive=0
+dir=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      cat <<'EOF'
+Usage: case-insensitive-dups.sh [-r|--recursive] [DIR]
+
+Report files in DIR (default: .) whose names collide when compared
+case-insensitively. By default only the top level of DIR is checked;
+-r/--recursive checks every directory in the tree. Exits 1 if any
+duplicates are found.
 EOF
-  exit 0
-fi
+      exit 0
+      ;;
+    -r|--recursive)
+      recursive=1
+      shift
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      if [[ -n "$dir" ]]; then
+        echo "Unexpected argument: $1" >&2
+        usage >&2
+        exit 1
+      fi
+      dir="$1"
+      shift
+      ;;
+  esac
+done
 
-dir="${1:-.}"
+dir="${dir:-.}"
 dir="${dir%/}"
 
 declare -A seen
@@ -19,11 +50,18 @@ declare -A originals
 
 found=0
 
+find_args=("$dir" -mindepth 1)
+if (( ! recursive )); then
+  find_args+=(-maxdepth 1)
+fi
+
 while IFS= read -r -d '' path; do
     name="$(basename "$path")"
+    parent="$(dirname "$path")"
 
-    # normalize for case-insensitive FS
-    key="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+    # normalize for case-insensitive FS; include parent so recursive
+    # mode only treats siblings as collisions
+    key="$parent/$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
 
     if [[ -n "${seen[$key]:-}" ]]; then
         if [[ "${seen[$key]}" == "1" ]]; then
@@ -38,10 +76,14 @@ while IFS= read -r -d '' path; do
         originals["$key"]="$path"
     fi
 
-done < <(find "$dir" -maxdepth 1 -mindepth 1 -print0)
+done < <(find "${find_args[@]}" -print0)
 
 if (( found )); then
     exit 1
 fi
 
-echo "No case-insensitive duplicates found at top level."
+if (( recursive )); then
+    echo "No case-insensitive duplicates found."
+else
+    echo "No case-insensitive duplicates found at top level."
+fi
