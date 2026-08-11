@@ -1002,9 +1002,20 @@ gar_repo_current_branch() {
     git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null
 }
 
-gar_repo_pull_main() {
-    local repo="$1"
-    git -C "$repo" pull -r origin main
+# Remote's default branch (origin/HEAD), with the "origin/" prefix stripped.
+# Returns non-zero (empty) when origin/HEAD is unset locally — callers treat
+# that as "unknown" and skip the configured-vs-default warning.
+gar_repo_remote_default_branch() {
+    local repo="$1" ref
+    [[ -d "$repo/.git" ]] || return 1
+    ref=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || return 1
+    [[ -n "$ref" ]] || return 1
+    printf '%s\n' "${ref#origin/}"
+}
+
+gar_repo_pull() {
+    local repo="$1" branch="${2:-main}"
+    git -C "$repo" pull -r origin "$branch"
 }
 
 gar_can_prompt() {
@@ -1073,33 +1084,33 @@ gar_prompt_yn() {
     done
 }
 
-gar_repo_main_unpushed_count() {
-    local repo="$1" ahead
+gar_repo_unpushed_count() {
+    local repo="$1" branch="${2:-main}" ahead
     [[ -d "$repo/.git" ]] || return 1
-    git -C "$repo" rev-parse --verify main >/dev/null 2>&1 || return 1
-    git -C "$repo" rev-parse --verify origin/main >/dev/null 2>&1 || return 1
-    ahead=$(git -C "$repo" rev-list --count origin/main..main 2>/dev/null) || return 1
+    git -C "$repo" rev-parse --verify "$branch" >/dev/null 2>&1 || return 1
+    git -C "$repo" rev-parse --verify "origin/$branch" >/dev/null 2>&1 || return 1
+    ahead=$(git -C "$repo" rev-list --count "origin/$branch..$branch" 2>/dev/null) || return 1
     (( ahead > 0 )) || return 1
     printf '%s\n' "$ahead"
 }
 
-gar_repo_main_behind_count() {
-    local repo="$1" behind
+gar_repo_behind_count() {
+    local repo="$1" branch="${2:-main}" behind
     [[ -d "$repo/.git" ]] || return 1
-    git -C "$repo" rev-parse --verify main >/dev/null 2>&1 || return 1
-    git -C "$repo" rev-parse --verify origin/main >/dev/null 2>&1 || return 1
-    behind=$(git -C "$repo" rev-list --count main..origin/main 2>/dev/null) || return 1
+    git -C "$repo" rev-parse --verify "$branch" >/dev/null 2>&1 || return 1
+    git -C "$repo" rev-parse --verify "origin/$branch" >/dev/null 2>&1 || return 1
+    behind=$(git -C "$repo" rev-list --count "$branch..origin/$branch" 2>/dev/null) || return 1
     (( behind > 0 )) || return 1
     printf '%s\n' "$behind"
 }
 
-gar_repo_try_fetch_main() {
-    local repo="$1"
+gar_repo_try_fetch() {
+    local repo="$1" branch="${2:-main}"
     [[ -d "$repo/.git" ]] || return 1
-    git -C "$repo" rev-parse --verify main >/dev/null 2>&1 || return 1
+    git -C "$repo" rev-parse --verify "$branch" >/dev/null 2>&1 || return 1
     git -C "$repo" remote get-url origin >/dev/null 2>&1 || return 1
-    git -C "$repo" fetch --quiet origin main 2>/dev/null || return 1
-    git -C "$repo" rev-parse --verify origin/main >/dev/null 2>&1
+    git -C "$repo" fetch --quiet origin "$branch" 2>/dev/null || return 1
+    git -C "$repo" rev-parse --verify "origin/$branch" >/dev/null 2>&1
 }
 
 gar_machine_env_skip_name() {
@@ -1112,17 +1123,21 @@ gar_machine_env_skip_name() {
 }
 
 gar_machine_env_list_repos() {
-    local repos_manifest="$1" skip_manifest="${2:-}" entry name path setup_dir setup_name seen=()
-    while IFS='|' read -r name path; do
+    local repos_manifest="$1" skip_manifest="${2:-}" name path branch setup_dir setup_name seen=()
+    while IFS='|' read -r name path branch; do
         if gar_machine_env_skip_name "$skip_manifest" "$name"; then
             continue
         fi
         path=$(gar_expand_home "$path")
+        # Optional 3rd field is the branch to track; trim whitespace and default to main.
+        branch="${branch#"${branch%%[![:space:]]*}"}"
+        branch="${branch%"${branch##*[![:space:]]}"}"
+        branch="${branch:-main}"
         if gar_path_seen "$path" "${seen[@]}"; then
             continue
         fi
         seen+=("$path")
-        printf '%s|%s\n' "$name" "$path"
+        printf '%s|%s|%s\n' "$name" "$path" "$branch"
     done < <(read_manifest "$repos_manifest")
 
     for setup_dir in "$HOME"/Yew/*-setup; do
@@ -1136,14 +1151,17 @@ gar_machine_env_list_repos() {
             continue
         fi
         seen+=("$setup_dir")
-        printf '%s|%s\n' "$setup_name" "$setup_dir"
+        printf '%s|%s|%s\n' "$setup_name" "$setup_dir" main
     done
 }
 
 gar_machine_env_prefetch_repo() {
-    local name="$1" path="$2" result_file="$3" ahead behind fetched=0
+    local name="$1" path="$2" branch="${3:-main}" result_file="$4"
+    local ahead behind fetched=0 current_branch remote_default
     {
-        printf 'name=%s\npath=%s\n' "$name" "$path"
+        # config_branch is the branch this repo is configured to track (manifest
+        # 3rd field, default main); branch= (below) is the current checked-out branch.
+        printf 'name=%s\npath=%s\nconfig_branch=%s\n' "$name" "$path" "$branch"
         if [[ ! -d "$path" ]]; then
             printf 'status=missing\n'
             exit 0
@@ -1153,26 +1171,31 @@ gar_machine_env_prefetch_repo() {
             exit 0
         fi
         printf 'status=ok\n'
-        branch=$(gar_repo_current_branch "$path" 2>/dev/null) || branch=""
-        printf 'branch=%s\n' "$branch"
+        current_branch=$(gar_repo_current_branch "$path" 2>/dev/null) || current_branch=""
+        printf 'branch=%s\n' "$current_branch"
+        if remote_default=$(gar_repo_remote_default_branch "$path" 2>/dev/null); then
+            printf 'remote_default=%s\n' "$remote_default"
+        else
+            printf 'remote_default=\n'
+        fi
         if gar_repo_dirty "$path"; then
             printf 'dirty=1\n'
         else
             printf 'dirty=0\n'
         fi
-        if gar_repo_try_fetch_main "$path"; then
+        if gar_repo_try_fetch "$path" "$branch"; then
             fetched=1
             printf 'fetched=1\n'
         else
             printf 'fetched=0\n'
         fi
-        if ahead=$(gar_repo_main_unpushed_count "$path" 2>/dev/null); then
+        if ahead=$(gar_repo_unpushed_count "$path" "$branch" 2>/dev/null); then
             printf 'ahead=%s\n' "$ahead"
         else
             printf 'ahead=0\n'
         fi
         behind=0
-        if (( fetched )) && behind=$(gar_repo_main_behind_count "$path" 2>/dev/null); then
+        if (( fetched )) && behind=$(gar_repo_behind_count "$path" "$branch" 2>/dev/null); then
             printf 'behind=%s\n' "$behind"
         else
             printf 'behind=0\n'
@@ -1181,19 +1204,20 @@ gar_machine_env_prefetch_repo() {
 }
 
 gar_machine_env_prefetch_all() {
-    local repos_manifest="$1" skip_manifest="${2:-}" name path slug result_file
+    local repos_manifest="$1" skip_manifest="${2:-}" name path branch slug result_file
     mkdir -p "$gar_tmpdir/repos"
-    while IFS='|' read -r name path; do
+    while IFS='|' read -r name path branch; do
+        branch="${branch:-main}"
         slug=$(gar_path_slug "$path")
         result_file="$gar_tmpdir/repos/$slug"
-        gar_machine_env_prefetch_repo "$name" "$path" "$result_file" &
+        gar_machine_env_prefetch_repo "$name" "$path" "$branch" "$result_file" &
     done < <(gar_machine_env_list_repos "$repos_manifest" "$skip_manifest")
     wait
 }
 
 report_machine_env_repo() {
     local name="$1" path="$2" result_file="$3"
-    local status dirty ahead behind fetched issues_found=0
+    local status dirty ahead behind fetched config_branch remote_default issues_found=0
     status=$(gar_result_get "$result_file" status)
     case "$status" in
         missing)
@@ -1205,6 +1229,9 @@ report_machine_env_repo() {
             return
             ;;
     esac
+    config_branch=$(gar_result_get "$result_file" config_branch)
+    [[ -n "$config_branch" ]] || config_branch=main
+    remote_default=$(gar_result_get "$result_file" remote_default)
     dirty=$(gar_result_get "$result_file" dirty)
     if [[ "$dirty" == 1 ]]; then
         report_warn "Machine env repo $name ($path — uncommitted changes)"
@@ -1213,9 +1240,9 @@ report_machine_env_repo() {
     ahead=$(gar_result_get "$result_file" ahead)
     if [[ "$ahead" =~ ^[0-9]+$ && "$ahead" -gt 0 ]]; then
         if (( ahead == 1 )); then
-            report_warn "Machine env repo $name ($path — 1 unpushed commit on main)"
+            report_warn "Machine env repo $name ($path — 1 unpushed commit on $config_branch)"
         else
-            report_warn "Machine env repo $name ($path — $ahead unpushed commits on main)"
+            report_warn "Machine env repo $name ($path — $ahead unpushed commits on $config_branch)"
         fi
         issues_found=1
     fi
@@ -1223,11 +1250,16 @@ report_machine_env_repo() {
     behind=$(gar_result_get "$result_file" behind)
     if [[ "$fetched" == 1 && "$behind" =~ ^[0-9]+$ && "$behind" -gt 0 ]]; then
         if (( behind == 1 )); then
-            report_warn "Machine env repo $name ($path — pull would update main; 1 commit behind origin/main)"
+            report_warn "Machine env repo $name ($path — pull would update $config_branch; 1 commit behind origin/$config_branch)"
         else
-            report_warn "Machine env repo $name ($path — pull would update main; $behind commits behind origin/main)"
+            report_warn "Machine env repo $name ($path — pull would update $config_branch; $behind commits behind origin/$config_branch)"
         fi
         issues_found=1
+    fi
+    # Advisory only (does not count as an issue): the configured branch isn't the
+    # repo's remote default. Skipped when the remote default is unknown.
+    if [[ -n "$remote_default" && "$remote_default" != "$config_branch" ]]; then
+        report_warn "Machine env repo $name ($path — configured to track $config_branch but origin default is $remote_default)"
     fi
     if (( issues_found == 0 )); then
         report_ok "Machine env repo $name ($path)"
@@ -1236,7 +1268,7 @@ report_machine_env_repo() {
 
 offer_machine_env_repo_pull() {
     local name="$1" path="$2" result_file="$3"
-    local status dirty branch fetched behind ahead prompt
+    local status dirty branch config_branch fetched behind ahead prompt
 
     gar_can_prompt || return 0
 
@@ -1246,17 +1278,22 @@ offer_machine_env_repo_pull() {
     dirty=$(gar_result_get "$result_file" dirty)
     [[ "$dirty" == 0 ]] || return 0
 
+    config_branch=$(gar_result_get "$result_file" config_branch)
+    [[ -n "$config_branch" ]] || config_branch=main
+
+    # Only offer a pull when the repo is currently checked out on the branch we
+    # track — don't pull it while the user sits on a feature branch.
     branch=$(gar_result_get "$result_file" branch)
-    [[ "$branch" == main ]] || return 0
+    [[ "$branch" == "$config_branch" ]] || return 0
 
     fetched=$(gar_result_get "$result_file" fetched)
     behind=$(gar_result_get "$result_file" behind)
     if [[ "$fetched" != 1 ]]; then
-        if ! gar_repo_try_fetch_main "$path"; then
+        if ! gar_repo_try_fetch "$path" "$config_branch"; then
             return 0
         fi
         behind=0
-        behind=$(gar_repo_main_behind_count "$path" 2>/dev/null) || behind=0
+        behind=$(gar_repo_behind_count "$path" "$config_branch" 2>/dev/null) || behind=0
     fi
     [[ "$behind" =~ ^[0-9]+$ && "$behind" -gt 0 ]] || return 0
 
@@ -1264,9 +1301,9 @@ offer_machine_env_repo_pull() {
     [[ "$ahead" =~ ^[0-9]+$ ]] || ahead=0
 
     if (( behind == 1 )); then
-        prompt="Pull $name ($path; 1 commit behind origin/main"
+        prompt="Pull $name ($path; 1 commit behind origin/$config_branch"
     else
-        prompt="Pull $name ($path; $behind commits behind origin/main"
+        prompt="Pull $name ($path; $behind commits behind origin/$config_branch"
     fi
     if (( ahead > 0 )); then
         if (( ahead == 1 )); then
@@ -1278,7 +1315,7 @@ offer_machine_env_repo_pull() {
     prompt+=")?"
 
     if gar_prompt_yn "$prompt"; then
-        if gar_repo_pull_main "$path"; then
+        if gar_repo_pull "$path" "$config_branch"; then
             printf 'Updated %s (%s)\n' "$name" "$path"
         else
             report_warn "Machine env repo $name ($path — pull failed)"
@@ -1287,9 +1324,9 @@ offer_machine_env_repo_pull() {
 }
 
 check_machine_env_repos() {
-    local repos_manifest="$1" skip_manifest="${2:-}" name path slug result_file
+    local repos_manifest="$1" skip_manifest="${2:-}" name path branch slug result_file
     gar_machine_env_prefetch_all "$repos_manifest" "$skip_manifest"
-    while IFS='|' read -r name path; do
+    while IFS='|' read -r name path branch; do
         slug=$(gar_path_slug "$path")
         result_file="$gar_tmpdir/repos/$slug"
         report_machine_env_repo "$name" "$path" "$result_file"

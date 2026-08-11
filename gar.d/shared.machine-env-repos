@@ -1,7 +1,7 @@
 # Machine environment repos under $HOME/Yew (Mac, Synology, WSL)
-# Format: name|path (path may use $HOME)
+# Format: name|path[|branch]  (path may use $HOME; branch defaults to main)
 # *-setup repos are discovered automatically via $HOME/Yew/*-setup
 # Role overlays (see ~/.config/gar/roles) add further repos, e.g.
 # role.my-data-client.machine-env-repos for dragnon/moocho/My-Data.
 cschuyle-bin|$HOME/Yew/cschuyle-bin
-ohmyzsh|$HOME/Yew/ohmyzsh
+ohmyzsh|$HOME/Yew/ohmyzsh|master
