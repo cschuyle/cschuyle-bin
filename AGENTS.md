@@ -35,12 +35,22 @@ pull a repo that is behind its tracked branch — but only if the tree has no
 genuine uncommitted changes and the checkout is on the tracked branch (it won't
 touch a dirty tree or a feature branch).
 
-**`gar info <repo>`.** Naming a machine-env repo shows its git status. If not OK
-it lists why: a *count* of files with genuine uncommitted local changes (never
-the filenames), whether it's on a non-tracked branch, ahead/behind counts, and
-remote-default mismatch. Any expected (skip-worktree'd) mods are then listed one
-file per line, indented and shell-quoted. The repo lookup runs before the app /
-install-hint / brew lookups in `cmd_info`.
+**`gar info <name>`.** `cmd_info` dispatches, in order: `brew`/`homebrew`
+(literal) → full Homebrew audit section (forces `gar_show_all`, runs
+`check_mac_homebrew`); a machine-env repo → its git status; an app; a
+browser extension; an install-hint; a brew hint; general info.
+
+- *Repo status.* If not OK it lists why: a *count* of files with genuine
+  uncommitted local changes (never the filenames), non-tracked branch,
+  ahead/behind counts, and remote-default mismatch. Any expected (skip-worktree'd)
+  mods are then listed one file per line, indented and shell-quoted.
+- *Homebrew status.* For a formula/cask (whether matched via the brew hint or an
+  install-hint whose value is a `brew install …` command), a `Status:` line led
+  by gar's OK/WARN/MISS vocabulary reports `OK - installed (up to date)` /
+  `WARN - installed (update available)` / `MISS - not installed`
+  (`gar_brew_installed` = `brew list --formula|--cask`; `gar_brew_outdated` =
+  non-empty `brew outdated --formula|--cask`). Helper `gar_brew_bin` resolves the
+  brew binary (shared with `check_mac_homebrew`).
 
 **skip-worktree & `EXPECTED MODS`.** git's `skip-worktree` flag hides local edits
 from `git status` (used for intentional local config tweaks, e.g. lims'

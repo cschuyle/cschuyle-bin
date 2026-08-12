@@ -79,10 +79,13 @@ Options and commands
                 (role.<role>.apps under gar.d/ or ~/.config/gar/d/)
   info [name]   With no name: show the platform info page (<platform>.info under
                 a manifest root; empty by default). With a name (case-insensitive):
-                for a machine-env repo, its git status (and, if not OK, why —
+                "brew" shows the full Homebrew audit section (like gar -a); a
+                machine-env repo shows its git status (and, if not OK, why —
                 local-mod count, branch/ahead/behind, plus any expected
-                skip-worktree'd mods listed by file); otherwise install hints and
-                general info for a tracked item
+                skip-worktree'd mods listed by file); a Homebrew formula/cask
+                shows install status (OK installed up to date / WARN update
+                available / MISS not installed); otherwise install hints and
+                general info
   roles         List known role ids (role.<id>.* under gar.d/ or ~/.config/gar/d/);
                 enabled roles are prefixed with "✓ " (others with two spaces).
                 With -a/--all: also list each role's overlay contents (apps,
@@ -399,6 +402,76 @@ lookup_brew_hint() {
     return 1
 }
 
+# Resolve the Homebrew binary (PATH first, then the standard Apple-silicon and
+# Intel prefixes). Prints the path, or nothing if brew isn't found.
+gar_brew_bin() {
+    if command -v brew >/dev/null 2>&1; then
+        command -v brew
+    elif [[ -x /opt/homebrew/bin/brew ]]; then
+        printf '%s\n' /opt/homebrew/bin/brew
+    elif [[ -x /usr/local/bin/brew ]]; then
+        printf '%s\n' /usr/local/bin/brew
+    fi
+}
+
+# True if the named Homebrew package is installed. kind is "cask" or "formula"
+# (anything but "cask" is treated as a formula). Requires a brew binary path.
+gar_brew_installed() {
+    local brew_bin="$1" kind="$2" name="$3"
+    [[ -n "$brew_bin" && -x "$brew_bin" ]] || return 1
+    if [[ "$kind" == cask ]]; then
+        "$brew_bin" list --cask "$name" >/dev/null 2>&1
+    else
+        "$brew_bin" list --formula "$name" >/dev/null 2>&1
+    fi
+}
+
+# True if the named installed Homebrew package has a newer version available.
+# `brew outdated <name>` prints the name when outdated, nothing when current
+# (exit status is 0 either way), so we test for non-empty output.
+gar_brew_outdated() {
+    local brew_bin="$1" kind="$2" name="$3" out
+    [[ -n "$brew_bin" && -x "$brew_bin" ]] || return 1
+    if [[ "$kind" == cask ]]; then
+        out=$("$brew_bin" outdated --cask "$name" 2>/dev/null)
+    else
+        out=$("$brew_bin" outdated --formula "$name" 2>/dev/null)
+    fi
+    [[ -n "$out" ]]
+}
+
+# Parse a "brew install [--cask] <name>" string into "kind|name" (kind is
+# "cask" or "formula"). Returns 1 if the string isn't a brew install command,
+# so callers can tell brew hints from other install hints.
+gar_brew_parse_hint() {
+    local hint="$1"
+    [[ "$hint" == brew\ install\ * ]] || return 1
+    if [[ "$hint" == *"--cask "* ]]; then
+        printf 'cask|%s\n' "${hint##*--cask }"
+    else
+        printf 'formula|%s\n' "${hint##* }"
+    fi
+}
+
+# Print a "Status: ..." line for a Homebrew package, led by gar's OK/WARN/MISS
+# vocabulary: OK when installed and current, WARN when an update is available,
+# MISS when not installed (or Homebrew itself is missing).
+gar_print_brew_status() {
+    local kind="$1" name="$2" brew_bin
+    brew_bin=$(gar_brew_bin)
+    if [[ -z "$brew_bin" ]]; then
+        printf 'Status: MISS - Homebrew not installed\n'
+    elif gar_brew_installed "$brew_bin" "$kind" "$name"; then
+        if gar_brew_outdated "$brew_bin" "$kind" "$name"; then
+            printf 'Status: WARN - installed (update available)\n'
+        else
+            printf 'Status: OK - installed (up to date)\n'
+        fi
+    else
+        printf 'Status: MISS - not installed\n'
+    fi
+}
+
 brew_miss_hint() {
     local item="$1"
     if [[ "$item" == *gdubw/gng* || "$item" == *"Formula gng"* ]]; then
@@ -647,7 +720,7 @@ cmd_info_repo() {
 }
 
 cmd_info() {
-    local query="$1" app_entry canonical path hint ext_entry browser ext_id label app_path app_found info repo_entry
+    local query="$1" app_entry canonical path hint ext_entry browser ext_id label app_path app_found info repo_entry brew_kn
 
     if [[ -z "$query" ]]; then
         if info=$(lookup_platform_info); then
@@ -658,6 +731,21 @@ cmd_info() {
 
     detect_roles
     gar_init_workdir
+
+    # `gar info brew` (literal) shows the full Homebrew audit section — the same
+    # output as `gar -a`'s Homebrew section — so you can see what's installed and
+    # what's out of date.
+    if gar_name_eq "$query" brew || gar_name_eq "$query" homebrew; then
+        if [[ "$(detect_platform)" != mac ]]; then
+            printf 'Homebrew checks are only implemented on mac.\n' >&2
+            exit 1
+        fi
+        gar_show_all=1
+        gar_section_begin "Homebrew"
+        check_mac_homebrew
+        exit 0
+    fi
+
     if repo_entry=$(lookup_machine_env_repo_entry "$query"); then
         cmd_info_repo "$repo_entry"
     fi
@@ -717,7 +805,14 @@ cmd_info() {
     fi
 
     if hint=$(lookup_install_hint "$query"); then
-        printf '%s\n' "$query"
+        # If the install hint is itself a Homebrew command, report brew status —
+        # many tracked CLIs (gh, awscli, …) install via "brew install <name>".
+        if brew_kn=$(gar_brew_parse_hint "$hint"); then
+            printf '%s (brew %s)\n' "$query" "${brew_kn%%|*}"
+            gar_print_brew_status "${brew_kn%%|*}" "${brew_kn#*|}"
+        else
+            printf '%s\n' "$query"
+        fi
         gar_print_install_hint 'Install: ' "$hint"
         if info=$(lookup_general_info "$query"); then
             gar_print_general_info "$info"
@@ -726,7 +821,10 @@ cmd_info() {
     fi
 
     if hint=$(lookup_brew_hint "$query"); then
-        printf '%s (brew)\n' "$query"
+        # hint is "brew install <name>" or "brew install --cask <name>".
+        brew_kn=$(gar_brew_parse_hint "$hint")
+        printf '%s (brew %s)\n' "$query" "${brew_kn%%|*}"
+        gar_print_brew_status "${brew_kn%%|*}" "${brew_kn#*|}"
         printf 'Install: %s\n' "$hint"
         if info=$(lookup_general_info "$query"); then
             gar_print_general_info "$info"
@@ -2407,14 +2505,8 @@ offer_brew_install_missing() {
 }
 
 check_mac_homebrew() {
-    local brew_bin=""
-    if command -v brew >/dev/null 2>&1; then
-        brew_bin=$(command -v brew)
-    elif [[ -x /opt/homebrew/bin/brew ]]; then
-        brew_bin=/opt/homebrew/bin/brew
-    elif [[ -x /usr/local/bin/brew ]]; then
-        brew_bin=/usr/local/bin/brew
-    fi
+    local brew_bin
+    brew_bin=$(gar_brew_bin)
 
     if [[ -z "$brew_bin" ]]; then
         report_miss "Homebrew (not installed)"
