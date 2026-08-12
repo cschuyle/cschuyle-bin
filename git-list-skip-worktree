@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+#
+# list-skip-worktree.sh — show (or undo) every file currently marked
+# `git update-index --skip-worktree` in this repo.
+#
+# WHY THIS EXISTS: skip-worktree hides local edits from `git status`, `git add -A`,
+# etc. That is exactly why it's easy to forget you set it. This script is your
+# "what did I skip, and how do I put it back" tool.
+#
+# Usage:
+#   ./list-skip-worktree.sh            # list all skip-worktree'd files
+#   ./list-skip-worktree.sh --undo     # clear skip-worktree on ALL of them
+#                                       #   (your local file contents are left as-is;
+#                                       #    this only makes git track changes again)
+#   ./list-skip-worktree.sh --undo <path> [<path>...]   # clear on specific files
+#   -h, --help
+#
+# After --undo, `git status` will again show any local modifications to those
+# files — commit or `git checkout -- <file>` to discard, as you would normally.
+set -euo pipefail
+
+git rev-parse --show-toplevel >/dev/null 2>&1 || {
+  echo "ERROR: not inside a git repository." >&2; exit 1; }
+
+# skip-worktree entries are flagged 'S' in the low-order bit of `git ls-files -v`.
+list_skipped() { git ls-files -v | grep '^S' | cut -c3-; }
+
+case "${1:-}" in
+  -h|--help)
+    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+  --undo)
+    shift
+    if [[ "$#" -gt 0 ]]; then
+      TARGETS=("$@")
+    else
+      mapfile -t TARGETS < <(list_skipped)
+    fi
+    if [[ "${#TARGETS[@]}" -eq 0 || -z "${TARGETS[0]:-}" ]]; then
+      echo "Nothing to undo — no skip-worktree files."
+      exit 0
+    fi
+    for f in "${TARGETS[@]}"; do
+      git update-index --no-skip-worktree "$f" && echo "cleared skip-worktree: $f"
+    done
+    echo
+    echo "Done. 'git status' now tracks changes to these files again."
+    echo "Their contents are UNCHANGED — use 'git checkout -- <file>' to discard edits."
+    ;;
+  "")
+    mapfile -t SKIPPED < <(list_skipped)
+    if [[ "${#SKIPPED[@]}" -eq 0 || -z "${SKIPPED[0]:-}" ]]; then
+      echo "No files are currently skip-worktree'd."
+      exit 0
+    fi
+    echo "Currently skip-worktree'd (${#SKIPPED[@]}):"
+    printf '  %s\n' "${SKIPPED[@]}"
+    echo
+    echo "Undo all:  ./list-skip-worktree.sh --undo"
+    ;;
+  *)
+    echo "Unknown argument: $1" >&2
+    echo "Try: ./list-skip-worktree.sh --help" >&2
+    exit 1
+    ;;
+esac
