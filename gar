@@ -78,8 +78,11 @@ Options and commands
                 role overlays). With -r <role>: only that role's apps overlay
                 (role.<role>.apps under gar.d/ or ~/.config/gar/d/)
   info [name]   With no name: show the platform info page (<platform>.info under
-                a manifest root; empty by default). With a name: install hints
-                and general info for a tracked item (case-insensitive)
+                a manifest root; empty by default). With a name (case-insensitive):
+                for a machine-env repo, its git status (and, if not OK, why —
+                local-mod count, branch/ahead/behind, plus any expected
+                skip-worktree'd mods listed by file); otherwise install hints and
+                general info for a tracked item
   roles         List known role ids (role.<id>.* under gar.d/ or ~/.config/gar/d/);
                 enabled roles are prefixed with "✓ " (others with two spaces).
                 With -a/--all: also list each role's overlay contents (apps,
@@ -556,14 +559,107 @@ gar_print_docker_configured() {
     printf '  engines installed: %s\n' "${installed:-(none)}"
 }
 
+# Render `gar info <repo>` for a machine-env repo entry ("name|path|branch").
+# Reports status; when not OK, says why. Local (tracked, non-skip-worktree) mods
+# are reported as a count only; expected (skip-worktree'd) mods are listed one
+# file per line, indented and shell-quoted.
+cmd_info_repo() {
+    local entry="$1" name path config_branch current_branch remote_default
+    local mod_count ahead behind reason f
+    name="${entry%%|*}"
+    path="${entry#*|}"; config_branch="${path##*|}"; path="${path%%|*}"
+    [[ -n "$config_branch" ]] || config_branch=main
+
+    printf '%s (machine-env repo)\n' "$name"
+    printf 'Path: %s\n' "$path"
+    printf 'Tracks: %s\n' "$config_branch"
+
+    if [[ ! -d "$path" ]]; then
+        printf 'Status: MISSING (no checkout at %s)\n' "$path"
+        exit 0
+    fi
+    if [[ ! -d "$path/.git" ]]; then
+        printf 'Status: NOT A GIT REPO\n'
+        exit 0
+    fi
+
+    current_branch=$(gar_repo_current_branch "$path" 2>/dev/null) || current_branch=""
+
+    # Collect reasons in report order; if none, status is OK.
+    reason=()
+    mod_count=$(gar_repo_local_mod_count "$path")
+    if [[ "$mod_count" =~ ^[0-9]+$ && "$mod_count" -gt 0 ]]; then
+        if (( mod_count == 1 )); then
+            reason+=("1 file with uncommitted local changes")
+        else
+            reason+=("$mod_count files with uncommitted local changes")
+        fi
+    fi
+    if [[ -n "$current_branch" && "$current_branch" != "$config_branch" ]]; then
+        reason+=("on branch $current_branch, not tracked branch $config_branch")
+    fi
+    if ahead=$(gar_repo_unpushed_count "$path" "$config_branch" 2>/dev/null); then
+        if (( ahead == 1 )); then
+            reason+=("1 unpushed commit on $config_branch")
+        else
+            reason+=("$ahead unpushed commits on $config_branch")
+        fi
+    fi
+    if gar_repo_try_fetch "$path" "$config_branch" >/dev/null 2>&1 && \
+       behind=$(gar_repo_behind_count "$path" "$config_branch" 2>/dev/null); then
+        if (( behind == 1 )); then
+            reason+=("1 commit behind origin/$config_branch (pull would update)")
+        else
+            reason+=("$behind commits behind origin/$config_branch (pull would update)")
+        fi
+    fi
+    remote_default=$(gar_repo_remote_default_branch "$path" 2>/dev/null) || remote_default=""
+    if [[ -n "$remote_default" && "$remote_default" != "$config_branch" ]]; then
+        reason+=("configured to track $config_branch but origin default is $remote_default")
+    fi
+
+    if (( ${#reason[@]} == 0 )); then
+        printf 'Status: OK\n'
+    else
+        printf 'Status: not OK\n'
+        for f in "${reason[@]}"; do
+            printf '  - %s\n' "$f"
+        done
+    fi
+
+    # Expected (skip-worktree'd) mods: list each differing file, indented and
+    # shell-quoted (printf %q uses '', "", or \ as appropriate).
+    local -a expected=()
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && expected+=("$f")
+    done < <(gar_repo_skip_worktree_modified_files "$path")
+    if (( ${#expected[@]} > 0 )); then
+        if (( ${#expected[@]} == 1 )); then
+            printf 'Expected local mods (skip-worktree), 1 file:\n'
+        else
+            printf 'Expected local mods (skip-worktree), %s files:\n' "${#expected[@]}"
+        fi
+        for f in "${expected[@]}"; do
+            printf '  %q\n' "$f"
+        done
+    fi
+    exit 0
+}
+
 cmd_info() {
-    local query="$1" app_entry canonical path hint ext_entry browser ext_id label app_path app_found info
+    local query="$1" app_entry canonical path hint ext_entry browser ext_id label app_path app_found info repo_entry
 
     if [[ -z "$query" ]]; then
         if info=$(lookup_platform_info); then
             printf '%s\n' "$info"
         fi
         exit 0
+    fi
+
+    detect_roles
+    gar_init_workdir
+    if repo_entry=$(lookup_machine_env_repo_entry "$query"); then
+        cmd_info_repo "$repo_entry"
     fi
 
     if app_entry=$(lookup_app_entry "$query"); then
@@ -1007,22 +1103,37 @@ gar_repo_dirty() {
     [[ -n "$(git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)" ]]
 }
 
-# Returns 0 if any skip-worktree'd tracked file's working-tree content differs
-# from its committed (HEAD) blob. These are intentional local edits hidden from
-# `git status` via the skip-worktree bit (e.g. log4j2.properties tweaks); they
-# are "expected mods", not a problem. git's diff plumbing honors the skip bit at
-# every level (status/diff/diff-files/diff-index all ignore these files), so we
-# compare the working-tree content hash to the HEAD blob directly, per file.
-gar_repo_skip_worktree_modified() {
+# Prints the skip-worktree'd tracked files whose working-tree content differs
+# from their committed (HEAD) blob, one path per line. These are intentional
+# local edits hidden from `git status` via the skip-worktree bit (e.g.
+# log4j2.properties tweaks); they are "expected mods", not a problem. git's diff
+# plumbing honors the skip bit at every level (status/diff/diff-files/diff-index
+# all ignore these files), so we compare the working-tree content hash to the
+# HEAD blob directly, per file.
+gar_repo_skip_worktree_modified_files() {
     local repo="$1" f wt head
-    [[ -d "$repo/.git" ]] || return 1
+    [[ -d "$repo/.git" ]] || return 0
     while IFS= read -r f; do
         [[ -n "$f" ]] || continue
         wt=$(git -C "$repo" hash-object -- "$f" 2>/dev/null) || continue
         head=$(git -C "$repo" rev-parse "HEAD:$f" 2>/dev/null) || continue
-        [[ "$wt" != "$head" ]] && return 0
+        [[ "$wt" != "$head" ]] && printf '%s\n' "$f"
     done < <(git -C "$repo" ls-files -v 2>/dev/null | grep '^S' | cut -c3-)
-    return 1
+}
+
+# Returns 0 if the repo has any expected (skip-worktree'd) mods.
+gar_repo_skip_worktree_modified() {
+    local repo="$1"
+    [[ -d "$repo/.git" ]] || return 1
+    [[ -n "$(gar_repo_skip_worktree_modified_files "$repo")" ]]
+}
+
+# Count of tracked files with genuine (non-skip-worktree, non-untracked) local
+# edits — the same set gar_repo_dirty tests for, but counted.
+gar_repo_local_mod_count() {
+    local repo="$1"
+    [[ -d "$repo/.git" ]] || { printf '0\n'; return; }
+    git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null | grep -c .
 }
 
 gar_repo_current_branch() {
@@ -1182,6 +1293,23 @@ gar_machine_env_list_repos() {
         seen+=("$setup_dir")
         printf '%s|%s|%s\n' "$setup_name" "$setup_dir" main
     done
+}
+
+# Find a machine-env repo by name for the current platform/roles. Echoes the
+# resolved "name|path|branch" entry (as gar_machine_env_list_repos would emit)
+# and returns 0, or returns 1 if no repo matches. Requires gar_init_workdir.
+lookup_machine_env_repo_entry() {
+    local query="$1" platform repos_manifest skip_manifest name path branch
+    platform=$(detect_platform)
+    repos_manifest=$(gar_combined_capability_manifest "$platform" machine-env-repos)
+    skip_manifest=$(gar_resolve_manifest "$platform" machine-env-skip)
+    while IFS='|' read -r name path branch; do
+        if gar_name_eq "$query" "$name"; then
+            printf '%s|%s|%s\n' "$name" "$path" "$branch"
+            return 0
+        fi
+    done < <(gar_machine_env_list_repos "$repos_manifest" "$skip_manifest")
+    return 1
 }
 
 gar_machine_env_prefetch_repo() {

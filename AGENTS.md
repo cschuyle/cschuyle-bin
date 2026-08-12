@@ -35,6 +35,13 @@ pull a repo that is behind its tracked branch — but only if the tree has no
 genuine uncommitted changes and the checkout is on the tracked branch (it won't
 touch a dirty tree or a feature branch).
 
+**`gar info <repo>`.** Naming a machine-env repo shows its git status. If not OK
+it lists why: a *count* of files with genuine uncommitted local changes (never
+the filenames), whether it's on a non-tracked branch, ahead/behind counts, and
+remote-default mismatch. Any expected (skip-worktree'd) mods are then listed one
+file per line, indented and shell-quoted. The repo lookup runs before the app /
+install-hint / brew lookups in `cmd_info`.
+
 **skip-worktree & `EXPECTED MODS`.** git's `skip-worktree` flag hides local edits
 from `git status` (used for intentional local config tweaks, e.g. lims'
 `log4j2.properties` files). git honors the skip bit at every level
