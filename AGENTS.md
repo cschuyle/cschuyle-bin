@@ -62,5 +62,14 @@ working-tree content (`git hash-object`) against its committed blob
 skip-worktree'd files is reported as `EXPECTED MODS` (advisory, not a problem)
 rather than `WARN`, and is still offered a pull (a rebase pull leaves
 skip-worktree'd files untouched). A genuine tracked edit takes precedence and
-still shows `WARN uncommitted changes`. `gar` does not manage the skip-worktree
-flag itself; the standalone `git-list-skip-worktree` script lists and clears it.
+still shows `WARN uncommitted changes`.
+
+`gar` does not manage the skip-worktree flag itself. The standalone
+`git-better-skip-worktree` script (usable as `git better-skip-worktree`; the
+user aliases it `gbsw`) is the CLI for it: `gbsw list` prints every
+skip-worktree'd file prefixed `SAME`/`DIFF`, `gbsw diff <file>` shows the real
+diff (temporarily clearing the flag, restoring via a trap), and `gbsw --undo`
+clears the flag. Note `gbsw` operates on the *current* repo (`git rev-parse
+--show-toplevel`), whereas `gar` inspects arbitrary repos *by path* via
+`git -C`, so `gar` keeps its own `gar_repo_skip_worktree_modified_files` (same
+`hash-object` vs `HEAD:` technique) rather than shelling out to `gbsw`.

@@ -1207,7 +1207,8 @@ gar_repo_dirty() {
 # log4j2.properties tweaks); they are "expected mods", not a problem. git's diff
 # plumbing honors the skip bit at every level (status/diff/diff-files/diff-index
 # all ignore these files), so we compare the working-tree content hash to the
-# HEAD blob directly, per file.
+# HEAD blob directly, per file. Same technique as the `git-better-skip-worktree`
+# (gbsw) CLI, but by repo path (git -C) since gar audits arbitrary repos.
 gar_repo_skip_worktree_modified_files() {
     local repo="$1" f wt head
     [[ -d "$repo/.git" ]] || return 0

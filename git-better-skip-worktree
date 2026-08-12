@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+#
+# git-better-skip-worktree (gbsw) — inspect files marked
+# `git update-index --skip-worktree` in the current repo.
+#
+# WHY THIS EXISTS: skip-worktree hides local edits from `git status`, `git diff`,
+# `git add -A`, etc. — git actively reports such a file as unchanged even when it
+# isn't. That's the point of the flag (locally-tweaked config you don't want to
+# commit), but it makes it easy to forget what you've skipped and to lose track
+# of real edits. This tool sees through the flag.
+#
+# Usage:
+#   gbsw list                 # list all skip-worktree'd files, each prefixed
+#                             #   SAME (matches HEAD) or DIFF (locally modified)
+#   gbsw diff <file>          # show the real diff of a skip-worktree'd file
+#                             #   (errors if <file> isn't skip-worktree'd)
+#   gbsw --undo [<path>...]   # clear skip-worktree on the given files, or on
+#                             #   ALL of them if none are named (file contents
+#                             #   are left as-is; git just tracks them again)
+#   gbsw -h | --help
+set -euo pipefail
+
+git rev-parse --show-toplevel >/dev/null 2>&1 || {
+  echo "ERROR: not inside a git repository." >&2; exit 1; }
+
+# skip-worktree entries are flagged 'S' in the low-order bit of `git ls-files -v`.
+list_skipped() { git ls-files -v | grep '^S' | cut -c3-; }
+
+# True if the file is currently skip-worktree'd.
+is_skipped() {
+  local f="$1"
+  git ls-files -v -- "$f" 2>/dev/null | grep -q '^S'
+}
+
+# True if the working-tree content of a (skip-worktree'd) file differs from its
+# committed HEAD blob. git's diff plumbing honors the skip bit, so we compare
+# content hashes directly, which does not.
+differs_from_head() {
+  local f="$1" wt head
+  wt=$(git hash-object -- "$f" 2>/dev/null) || return 0
+  head=$(git rev-parse "HEAD:$f" 2>/dev/null) || return 0
+  [[ "$wt" != "$head" ]]
+}
+
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    ;;
+
+  list|"")
+    mapfile -t SKIPPED < <(list_skipped)
+    if [[ "${#SKIPPED[@]}" -eq 0 || -z "${SKIPPED[0]:-}" ]]; then
+      echo "No files are currently skip-worktree'd."
+      exit 0
+    fi
+    for f in "${SKIPPED[@]}"; do
+      if differs_from_head "$f"; then
+        printf 'DIFF %s\n' "$f"
+      else
+        printf 'SAME %s\n' "$f"
+      fi
+    done
+    ;;
+
+  diff)
+    shift
+    if [[ "$#" -ne 1 ]]; then
+      echo "usage: gbsw diff <file>" >&2
+      exit 2
+    fi
+    file="$1"
+    if ! is_skipped "$file"; then
+      echo "ERROR: '$file' is not skip-worktree'd." >&2
+      echo "       (see 'gbsw list'; git diff already shows non-skipped files)" >&2
+      exit 1
+    fi
+    # git diff honors the skip bit, so temporarily clear it, diff, then restore.
+    # The trap guarantees the flag is put back even on error or interrupt.
+    trap 'git update-index --skip-worktree -- "$file" >/dev/null 2>&1 || true' EXIT
+    git update-index --no-skip-worktree -- "$file"
+    git diff -- "$file"
+    ;;
+
+  --undo)
+    shift
+    if [[ "$#" -gt 0 ]]; then
+      TARGETS=("$@")
+    else
+      mapfile -t TARGETS < <(list_skipped)
+    fi
+    if [[ "${#TARGETS[@]}" -eq 0 || -z "${TARGETS[0]:-}" ]]; then
+      echo "Nothing to undo — no skip-worktree files."
+      exit 0
+    fi
+    for f in "${TARGETS[@]}"; do
+      git update-index --no-skip-worktree "$f" && echo "cleared skip-worktree: $f"
+    done
+    echo
+    echo "Done. 'git status' now tracks changes to these files again."
+    echo "Their contents are UNCHANGED — use 'git checkout -- <file>' to discard edits."
+    ;;
+
+  *)
+    echo "Unknown argument: $1" >&2
+    echo "Try: gbsw --help" >&2
+    exit 1
+    ;;
+esac
