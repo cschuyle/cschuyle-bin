@@ -18,6 +18,16 @@ The same policy is mirrored for Cursor in [`.cursor/rules/git-and-commits.mdc`](
 `WARN` and `EXPECTED MODS` are advisory only). One of its checks audits a set of
 git repos ("machine environment repos") — the part most likely to need changes.
 
+**Startup config preflight.** Before the main audit run, `gar` validates its
+config paths — the repo's `gar.d/`, and the local `~/.config/gar` dir, its `d/`
+overlay dir, and its `roles` file — and hard-fails to stderr with `exit 2` if
+any is a broken (dangling) symlink, the wrong file type (e.g. `roles` is a
+directory), or unreadable. Plain *absence* of a local path is not an error: it
+remains the supported "no local config" state. This is distinct from `exit 1`
+(audit found problems). The `gar.d/` dir is also validated at script load (a
+missing/unreadable `gar.d/` next to the script exits 2 immediately). The
+subcommands `info` / `apps` / `roles` do not run this preflight.
+
 **Which repos.** Repos come from a `machine-env-repos` manifest (each line
 `name|path[|branch]`, branch defaulting to `main`), plus any `~/Yew/*-setup`
 repos discovered automatically. A separate name-based skip manifest can exclude
@@ -30,10 +40,17 @@ branch matches the configured branch, and — after fetching — how many commit
 is ahead (unpushed) or behind the tracked branch. It also advisory-warns when
 the configured branch differs from the repo's remote default branch.
 
+These findings print as an aligned table — status, repo name, `(path)`, and a
+short message in four columns, with the status prefix padded to a common width
+and the name / `(path)` columns sized to fit the repos in that run (one row per
+finding, so a repo with several issues repeats across rows). The buffered rows
+are all emitted before any pull offer.
+
 **Offer to pull.** When run in an interactive terminal, `gar` offers to rebase-
 pull a repo that is behind its tracked branch — but only if the tree has no
 genuine uncommitted changes and the checkout is on the tracked branch (it won't
-touch a dirty tree or a feature branch).
+touch a dirty tree or a feature branch). Pull offers run after the table above
+is printed.
 
 **`gar info <name>`.** `cmd_info` dispatches, in order: `brew`/`homebrew`
 (literal) → full Homebrew audit section (forces `gar_show_all`, runs

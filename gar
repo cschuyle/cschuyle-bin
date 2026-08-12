@@ -3,6 +3,10 @@
 set -o pipefail
 
 GAR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/gar.d" && pwd)"
+if [[ -z "$GAR_DIR" || ! -d "$GAR_DIR" || ! -r "$GAR_DIR" || ! -x "$GAR_DIR" ]]; then
+    echo "gar: cannot access config dir gar.d next to the script (missing, broken, or unreadable)" >&2
+    exit 2
+fi
 gar_show_all=0
 gar_section_name=""
 gar_section_header_printed=0
@@ -20,6 +24,64 @@ gar_manifest_dirs() {
     printf '%s\n' "$GAR_DIR"
     local_dir=$(gar_local_dir)
     [[ -d "$local_dir" ]] && printf '%s\n' "$local_dir"
+}
+
+# gar_check_config_path <dir|file> <required|optional> <path>
+# Returns 0 if OK (right type, or optional-and-absent); prints to stderr and
+# returns 1 on: dangling symlink, wrong file type, or unreadable path. The
+# -e/-d/-f guards below all follow symlinks and read false for a dangling
+# symlink, so that case must be tested first to distinguish it from absence.
+gar_check_config_path() {
+    local kind="$1" mode="$2" path="$3"
+
+    if [[ -L "$path" && ! -e "$path" ]]; then
+        echo "gar: config path is a broken symlink: $path -> $(readlink "$path")" >&2
+        return 1
+    fi
+
+    # Genuinely absent: OK for optional (intentional "no local config"),
+    # an error for required (the repo's own gar.d).
+    if [[ ! -e "$path" ]]; then
+        if [[ "$mode" == required ]]; then
+            echo "gar: required config path is missing: $path" >&2
+            return 1
+        fi
+        return 0
+    fi
+
+    # Present: enforce the expected type.
+    if [[ "$kind" == dir && ! -d "$path" ]]; then
+        echo "gar: config path should be a directory but is not: $path" >&2
+        return 1
+    fi
+    if [[ "$kind" == file && ! -f "$path" ]]; then
+        echo "gar: config path should be a regular file but is not: $path" >&2
+        return 1
+    fi
+
+    # Present and right type: require readability (dirs must also be searchable).
+    if [[ ! -r "$path" ]] || { [[ "$kind" == dir ]] && [[ ! -x "$path" ]]; }; then
+        echo "gar: config path is not readable: $path" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+# Fail fast on config paths that are broken rather than simply absent. Absence
+# of a local (~/.config/gar) path is intentional and OK; a dangling symlink,
+# wrong file type, or unreadable path is an unexpected setup error. Checks every
+# path before returning so one run reports all problems.
+gar_preflight_config() {
+    local rc=0 local_base
+    local_base="${XDG_CONFIG_HOME:-$HOME/.config}/gar"
+
+    gar_check_config_path dir  required "$GAR_DIR"          || rc=1
+    gar_check_config_path dir  optional "$local_base"       || rc=1
+    gar_check_config_path dir  optional "$(gar_local_dir)"  || rc=1
+    gar_check_config_path file optional "$(gar_roles_file)" || rc=1
+
+    return $rc
 }
 
 gar_init_workdir() {
@@ -1177,6 +1239,24 @@ report_expected_mods() {
     printf 'EXPECTED MODS %s\n' "$1"
 }
 
+# Emit a single line with the status prefix padded to a common column width, so
+# WARN / MISS / EXPECTED MODS / OK all align. Used by the machine-env-repo
+# section (which pre-aligns the rest of the line into columns of its own); the
+# plain report_* helpers above are unchanged and still used everywhere else.
+# report_line does NOT touch `issues` — callers that need the exit-status bump
+# (MISS) must do it themselves.
+GAR_STATUS_WIDTH=13   # width of the longest prefix, "EXPECTED MODS"
+
+report_line() {
+    gar_section_emit_header
+    printf '%-*s  %s\n' "$GAR_STATUS_WIDTH" "$1" "$2"
+}
+
+report_ok_preformatted() {
+    (( gar_show_all )) || return 0
+    report_line OK "$1"
+}
+
 gar_expand_home() {
     local path="$1"
     path="${path//\$HOME/$HOME}"
@@ -1477,6 +1557,53 @@ gar_machine_env_prefetch_all() {
     wait
 }
 
+# Machine-env-repo report rows are buffered rather than printed immediately, so
+# the section can measure name / (path) column widths across every row before
+# emitting an aligned table. Four parallel arrays hold one entry per line.
+gar_mer_status=()   # OK | MISS | WARN | EXPECTED MODS
+gar_mer_name=()
+gar_mer_path=()     # bare path; the surrounding "(...)" is added at emit time
+gar_mer_msg=()      # reason text only (no em-dash); "" for an OK row
+
+gar_mer_reset() {
+    gar_mer_status=(); gar_mer_name=(); gar_mer_path=(); gar_mer_msg=()
+}
+
+# gar_mer_row <status> <name> <path> <message>
+# Buffer one report line. A MISS still bumps the global issues counter here (the
+# emit pass uses report_line, which does not), preserving exit-status semantics.
+gar_mer_row() {
+    [[ "$1" == MISS ]] && issues=$((issues + 1))
+    gar_mer_status+=("$1"); gar_mer_name+=("$2")
+    gar_mer_path+=("$3");   gar_mer_msg+=("$4")
+}
+
+# Measure column widths across the buffered rows, then emit each as an aligned
+# "STATUS  name  (path)  message" line. OK rows only count/print under --all.
+gar_mer_flush() {
+    local i wname=0 wpath=0 nlen plen line
+    for i in "${!gar_mer_status[@]}"; do
+        [[ "${gar_mer_status[i]}" == OK && $gar_show_all -eq 0 ]] && continue
+        nlen=${#gar_mer_name[i]}
+        (( nlen > wname )) && wname=$nlen
+        plen=$(( ${#gar_mer_path[i]} + 2 ))   # +2 for the surrounding ()
+        (( plen > wpath )) && wpath=$plen
+    done
+    for i in "${!gar_mer_status[@]}"; do
+        printf -v line '%-*s  %-*s  %s' \
+            "$wname" "${gar_mer_name[i]}" \
+            "$wpath" "(${gar_mer_path[i]})" \
+            "${gar_mer_msg[i]}"
+        line="${line%"${line##*[![:space:]]}"}"   # rstrip trailing pad (OK rows)
+        case "${gar_mer_status[i]}" in
+            OK)              report_ok_preformatted "$line" ;;
+            MISS)            report_line MISS "$line" ;;
+            WARN)            report_line WARN "$line" ;;
+            "EXPECTED MODS") report_line "EXPECTED MODS" "$line" ;;
+        esac
+    done
+}
+
 report_machine_env_repo() {
     local name="$1" path="$2" result_file="$3"
     # reported tracks whether any line was printed for this repo (WARN or the
@@ -1487,11 +1614,11 @@ report_machine_env_repo() {
     status=$(gar_result_get "$result_file" status)
     case "$status" in
         missing)
-            report_miss "Machine env repo $name ($path — missing)"
+            gar_mer_row MISS "$name" "$path" "missing"
             return
             ;;
         not-git)
-            report_miss "Machine env repo $name ($path — not a git repo)"
+            gar_mer_row MISS "$name" "$path" "not a git repo"
             return
             ;;
     esac
@@ -1502,19 +1629,19 @@ report_machine_env_repo() {
     expected_mods=$(gar_result_get "$result_file" expected_mods)
     if [[ "$dirty" == 1 ]]; then
         # Genuine tracked edits win over expected mods: still an issue.
-        report_warn "Machine env repo $name ($path — uncommitted changes)"
+        gar_mer_row WARN "$name" "$path" "uncommitted changes"
         reported=1
     elif [[ "$expected_mods" == 1 ]]; then
         # Only skip-worktree'd edits present — expected, advisory, not an issue.
-        report_expected_mods "Machine env repo $name ($path — expected local mods (skip-worktree))"
+        gar_mer_row "EXPECTED MODS" "$name" "$path" "expected local mods (skip-worktree)"
         reported=1
     fi
     ahead=$(gar_result_get "$result_file" ahead)
     if [[ "$ahead" =~ ^[0-9]+$ && "$ahead" -gt 0 ]]; then
         if (( ahead == 1 )); then
-            report_warn "Machine env repo $name ($path — 1 unpushed commit on $config_branch)"
+            gar_mer_row WARN "$name" "$path" "1 unpushed commit on $config_branch"
         else
-            report_warn "Machine env repo $name ($path — $ahead unpushed commits on $config_branch)"
+            gar_mer_row WARN "$name" "$path" "$ahead unpushed commits on $config_branch"
         fi
         reported=1
     fi
@@ -1522,20 +1649,20 @@ report_machine_env_repo() {
     behind=$(gar_result_get "$result_file" behind)
     if [[ "$fetched" == 1 && "$behind" =~ ^[0-9]+$ && "$behind" -gt 0 ]]; then
         if (( behind == 1 )); then
-            report_warn "Machine env repo $name ($path — pull would update $config_branch; 1 commit behind origin/$config_branch)"
+            gar_mer_row WARN "$name" "$path" "pull would update $config_branch; 1 commit behind origin/$config_branch"
         else
-            report_warn "Machine env repo $name ($path — pull would update $config_branch; $behind commits behind origin/$config_branch)"
+            gar_mer_row WARN "$name" "$path" "pull would update $config_branch; $behind commits behind origin/$config_branch"
         fi
         reported=1
     fi
     # Advisory only (does not count as an issue): the configured branch isn't the
     # repo's remote default. Skipped when the remote default is unknown.
     if [[ -n "$remote_default" && "$remote_default" != "$config_branch" ]]; then
-        report_warn "Machine env repo $name ($path — configured to track $config_branch but origin default is $remote_default)"
+        gar_mer_row WARN "$name" "$path" "configured to track $config_branch but origin default is $remote_default"
         reported=1
     fi
     if (( reported == 0 )); then
-        report_ok "Machine env repo $name ($path)"
+        gar_mer_row OK "$name" "$path" ""
     fi
 }
 
@@ -1602,10 +1729,21 @@ offer_machine_env_repo_pull() {
 check_machine_env_repos() {
     local repos_manifest="$1" skip_manifest="${2:-}" name path branch slug result_file
     gar_machine_env_prefetch_all "$repos_manifest" "$skip_manifest"
+    gar_mer_reset
+
+    # Pass 1: buffer every repo's report rows so column widths can be measured.
     while IFS='|' read -r name path branch; do
         slug=$(gar_path_slug "$path")
         result_file="$gar_tmpdir/repos/$slug"
         report_machine_env_repo "$name" "$path" "$result_file"
+    done < <(gar_machine_env_list_repos "$repos_manifest" "$skip_manifest")
+
+    gar_mer_flush   # measure widths + emit the aligned table
+
+    # Pass 2: interactive pull offers, printed after the table (wording unchanged).
+    while IFS='|' read -r name path branch; do
+        slug=$(gar_path_slug "$path")
+        result_file="$gar_tmpdir/repos/$slug"
         offer_machine_env_repo_pull "$name" "$path" "$result_file"
     done < <(gar_machine_env_list_repos "$repos_manifest" "$skip_manifest")
 }
@@ -3055,6 +3193,7 @@ main() {
     done
 
     platform=$(detect_platform)
+    gar_preflight_config || exit 2
     detect_roles
     printf 'gar: platform %s; roles %s\n' "$platform" "$(gar_format_roles)"
     gar_warn_unknown_roles
