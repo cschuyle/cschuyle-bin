@@ -14,7 +14,9 @@
 #                             #   SAME (matches HEAD) or DIFF (locally modified)
 #   gbsw diff <file>          # show the real diff of a skip-worktree'd file
 #                             #   (errors if <file> isn't skip-worktree'd)
-#   gbsw --undo [<path>...]   # clear skip-worktree on the given files, or on
+#   gbsw skip <path>...       # set skip-worktree on the given files so git
+#                             #   ignores local changes to them
+#   gbsw undo [<path>...]     # clear skip-worktree on the given files, or on
 #                             #   ALL of them if none are named (file contents
 #                             #   are left as-is; git just tracks them again)
 #   gbsw -h | --help
@@ -42,7 +44,7 @@ differs_from_head() {
   [[ "$wt" != "$head" ]]
 }
 
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # Subcommand (param 1) is matched case-insensitively; file args below stay
 # case-sensitive.
@@ -86,7 +88,20 @@ case "${subcmd,,}" in
     git diff -- "$file"
     ;;
 
-  --undo)
+  skip)
+    shift
+    if [[ "$#" -eq 0 ]]; then
+      echo "usage: gbsw skip <path>..." >&2
+      exit 2
+    fi
+    for f in "$@"; do
+      git update-index --skip-worktree -- "$f" && echo "set skip-worktree: $f"
+    done
+    echo
+    echo "Done. 'git status' will now ignore local changes to these files."
+    ;;
+
+  undo)
     shift
     if [[ "$#" -gt 0 ]]; then
       TARGETS=("$@")

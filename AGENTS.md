@@ -68,8 +68,9 @@ still shows `WARN uncommitted changes`.
 `git-better-skip-worktree` script (usable as `git better-skip-worktree`; the
 user aliases it `gbsw`) is the CLI for it: `gbsw list` prints every
 skip-worktree'd file prefixed `SAME`/`DIFF`, `gbsw diff <file>` shows the real
-diff (temporarily clearing the flag, restoring via a trap), and `gbsw --undo`
-clears the flag. Note `gbsw` operates on the *current* repo (`git rev-parse
+diff (temporarily clearing the flag, restoring via a trap), `gbsw skip <path>...`
+sets skip-worktree on the given files, and `gbsw undo [<path>...]` clears the flag
+(on the named files, or all of them if none are named). Note `gbsw` operates on the *current* repo (`git rev-parse
 --show-toplevel`), whereas `gar` inspects arbitrary repos *by path* via
 `git -C`, so `gar` keeps its own `gar_repo_skip_worktree_modified_files` (same
 `hash-object` vs `HEAD:` technique) rather than shelling out to `gbsw`.
