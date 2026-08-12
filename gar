@@ -976,6 +976,13 @@ report_warn() {
     printf 'WARN %s\n' "$1"
 }
 
+# Advisory, like report_warn: does NOT bump issues / affect exit status. Used
+# for intentional skip-worktree'd local edits that are expected, not problems.
+report_expected_mods() {
+    gar_section_emit_header
+    printf 'EXPECTED MODS %s\n' "$1"
+}
+
 gar_expand_home() {
     local path="$1"
     path="${path//\$HOME/$HOME}"
@@ -991,9 +998,31 @@ gar_path_seen() {
 }
 
 gar_repo_dirty() {
+    # "Dirty" = tracked files with genuine local edits. Untracked files are
+    # ignored (--untracked-files=no) so a stray untracked file doesn't warn, and
+    # skip-worktree'd files are already excluded by git status by design (their
+    # expected mods are surfaced separately via gar_repo_skip_worktree_modified).
     local repo="$1"
     [[ -d "$repo/.git" ]] || return 1
-    [[ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]]
+    [[ -n "$(git -C "$repo" status --porcelain --untracked-files=no 2>/dev/null)" ]]
+}
+
+# Returns 0 if any skip-worktree'd tracked file's working-tree content differs
+# from its committed (HEAD) blob. These are intentional local edits hidden from
+# `git status` via the skip-worktree bit (e.g. log4j2.properties tweaks); they
+# are "expected mods", not a problem. git's diff plumbing honors the skip bit at
+# every level (status/diff/diff-files/diff-index all ignore these files), so we
+# compare the working-tree content hash to the HEAD blob directly, per file.
+gar_repo_skip_worktree_modified() {
+    local repo="$1" f wt head
+    [[ -d "$repo/.git" ]] || return 1
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        wt=$(git -C "$repo" hash-object -- "$f" 2>/dev/null) || continue
+        head=$(git -C "$repo" rev-parse "HEAD:$f" 2>/dev/null) || continue
+        [[ "$wt" != "$head" ]] && return 0
+    done < <(git -C "$repo" ls-files -v 2>/dev/null | grep '^S' | cut -c3-)
+    return 1
 }
 
 gar_repo_current_branch() {
@@ -1183,6 +1212,11 @@ gar_machine_env_prefetch_repo() {
         else
             printf 'dirty=0\n'
         fi
+        if gar_repo_skip_worktree_modified "$path"; then
+            printf 'expected_mods=1\n'
+        else
+            printf 'expected_mods=0\n'
+        fi
         if gar_repo_try_fetch "$path" "$branch"; then
             fetched=1
             printf 'fetched=1\n'
@@ -1217,7 +1251,11 @@ gar_machine_env_prefetch_all() {
 
 report_machine_env_repo() {
     local name="$1" path="$2" result_file="$3"
-    local status dirty ahead behind fetched config_branch remote_default issues_found=0
+    # reported tracks whether any line was printed for this repo (WARN or the
+    # EXPECTED MODS / default-mismatch advisories) so the trailing OK is emitted
+    # only when the repo was otherwise silent. Exit status is driven separately by
+    # report_miss (missing / not-git), which increments the global issues counter.
+    local status dirty expected_mods ahead behind fetched config_branch remote_default reported=0
     status=$(gar_result_get "$result_file" status)
     case "$status" in
         missing)
@@ -1233,9 +1271,15 @@ report_machine_env_repo() {
     [[ -n "$config_branch" ]] || config_branch=main
     remote_default=$(gar_result_get "$result_file" remote_default)
     dirty=$(gar_result_get "$result_file" dirty)
+    expected_mods=$(gar_result_get "$result_file" expected_mods)
     if [[ "$dirty" == 1 ]]; then
+        # Genuine tracked edits win over expected mods: still an issue.
         report_warn "Machine env repo $name ($path — uncommitted changes)"
-        issues_found=1
+        reported=1
+    elif [[ "$expected_mods" == 1 ]]; then
+        # Only skip-worktree'd edits present — expected, advisory, not an issue.
+        report_expected_mods "Machine env repo $name ($path — expected local mods (skip-worktree))"
+        reported=1
     fi
     ahead=$(gar_result_get "$result_file" ahead)
     if [[ "$ahead" =~ ^[0-9]+$ && "$ahead" -gt 0 ]]; then
@@ -1244,7 +1288,7 @@ report_machine_env_repo() {
         else
             report_warn "Machine env repo $name ($path — $ahead unpushed commits on $config_branch)"
         fi
-        issues_found=1
+        reported=1
     fi
     fetched=$(gar_result_get "$result_file" fetched)
     behind=$(gar_result_get "$result_file" behind)
@@ -1254,14 +1298,15 @@ report_machine_env_repo() {
         else
             report_warn "Machine env repo $name ($path — pull would update $config_branch; $behind commits behind origin/$config_branch)"
         fi
-        issues_found=1
+        reported=1
     fi
     # Advisory only (does not count as an issue): the configured branch isn't the
     # repo's remote default. Skipped when the remote default is unknown.
     if [[ -n "$remote_default" && "$remote_default" != "$config_branch" ]]; then
         report_warn "Machine env repo $name ($path — configured to track $config_branch but origin default is $remote_default)"
+        reported=1
     fi
-    if (( issues_found == 0 )); then
+    if (( reported == 0 )); then
         report_ok "Machine env repo $name ($path)"
     fi
 }
@@ -1275,6 +1320,9 @@ offer_machine_env_repo_pull() {
     status=$(gar_result_get "$result_file" status)
     [[ "$status" == ok ]] || return 0
 
+    # dirty excludes skip-worktree'd edits, so a repo with only expected mods
+    # passes this guard and is offered a pull — safe, since `git pull -r` leaves
+    # skip-worktree'd files untouched.
     dirty=$(gar_result_get "$result_file" dirty)
     [[ "$dirty" == 0 ]] || return 0
 
