@@ -44,7 +44,10 @@ differs_from_head() {
 
 usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; }
 
-case "${1:-}" in
+# Subcommand (param 1) is matched case-insensitively; file args below stay
+# case-sensitive.
+subcmd="${1:-}"
+case "${subcmd,,}" in
   -h|--help)
     usage
     ;;
