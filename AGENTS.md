@@ -65,12 +65,15 @@ skip-worktree'd files untouched). A genuine tracked edit takes precedence and
 still shows `WARN uncommitted changes`.
 
 `gar` does not manage the skip-worktree flag itself. The standalone
-`git-better-skip-worktree` script (usable as `git better-skip-worktree`; the
-user aliases it `gbsw`) is the CLI for it: `gbsw list` prints every
-skip-worktree'd file prefixed `SAME`/`DIFF`, `gbsw diff <file>` shows the real
-diff (temporarily clearing the flag, restoring via a trap), `gbsw skip <path>...`
-sets skip-worktree on the given files, and `gbsw undo [<path>...]` clears the flag
-(on the named files, or all of them if none are named). Note `gbsw` operates on the *current* repo (`git rev-parse
+`git-better-worktree` script (usable as `git better-worktree`; the user aliases
+it `gbw`) is the CLI for it, under its `skip` subcommand: `gbw skip list` prints
+every skip-worktree'd file prefixed `SAME`/`DIFF`, `gbw skip diff <file>` shows
+the real diff (temporarily clearing the flag, restoring via a trap),
+`gbw skip skip <path>...` sets skip-worktree on the given files, and
+`gbw skip undo [<path>...]` clears the flag (on the named files, or all of them
+if none are named). (`gbw` also has a `list` subcommand that annotates
+`git worktree list` with a MAIN/linked column — unrelated to skip-worktree.)
+Note `gbw` operates on the *current* repo (`git rev-parse
 --show-toplevel`), whereas `gar` inspects arbitrary repos *by path* via
 `git -C`, so `gar` keeps its own `gar_repo_skip_worktree_modified_files` (same
-`hash-object` vs `HEAD:` technique) rather than shelling out to `gbsw`.
+`hash-object` vs `HEAD:` technique) rather than shelling out to `gbw`.

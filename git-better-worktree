@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+git-better-worktree (gbw) — better views of, and control over, git worktrees.
+
+Usage:
+  gbw list [git-worktree-list-args...]
+        Like `git worktree list`, but adds a MAIN / linked disambiguator
+        column so you can tell the main working tree (the one holding the
+        real .git directory) from the linked worktrees (whose .git is a
+        pointer file into it). Extra args pass through to the underlying
+        `git worktree list --porcelain` call. Run from anywhere in the repo.
+
+  gbw skip <subcommand>     Inspect/control files marked
+                            `git update-index --skip-worktree` in the current
+                            repo. skip-worktree hides local edits from
+                            `git status`, `git diff`, `git add -A`, etc. — git
+                            reports such a file as unchanged even when it isn't.
+                            These subcommands see through the flag:
+
+    gbw skip list           # list all skip-worktree'd files, each prefixed
+                            #   SAME (matches HEAD) or DIFF (locally modified)
+    gbw skip diff <file>    # show the real diff of a skip-worktree'd file
+                            #   (errors if <file> isn't skip-worktree'd)
+    gbw skip skip <path>... # set skip-worktree on the given files so git
+                            #   ignores local changes to them
+    gbw skip undo [<path>...] # clear skip-worktree on the given files, or on
+                            #   ALL of them if none are named (file contents
+                            #   are left as-is; git just tracks them again)
+
+  gbw -h | --help
+EOF
+}
+
+# Top-level command (param 1) is matched case-insensitively; args below stay
+# case-sensitive.
+cmd="${1:-}"
+case "${cmd,,}" in
+  -h|--help|"")
+    usage
+    ;;
+
+  list)
+    shift
+    # Collect porcelain records. Each worktree is a paragraph of "key value"
+    # lines separated by a blank line; the first paragraph is always the main
+    # worktree. Extra args pass through to `git worktree list --porcelain`.
+    mapfile -t lines < <(git worktree list --porcelain "$@")
+
+    # First pass: parse into parallel arrays and compute column widths.
+    paths=()
+    shas=()
+    labels=()   # branch name, "(detached HEAD)", or "(bare)"
+    kinds=()    # MAIN or linked
+
+    path="" ; sha="" ; label="" ; first=1
+    flush() {
+      [[ -z "$path" ]] && return
+      paths+=("$path")
+      shas+=("$sha")
+      labels+=("$label")
+      if [[ $first -eq 1 ]]; then kinds+=("MAIN"); first=0; else kinds+=("linked"); fi
+      path="" ; sha="" ; label=""
+    }
+
+    for line in "${lines[@]}"; do
+      if [[ -z "$line" ]]; then
+        flush
+        continue
+      fi
+      key=${line%% *}
+      val=${line#* }
+      case "$key" in
+        worktree) path="$val" ;;
+        HEAD)     sha="${val:0:11}" ;;                 # git shows an abbreviated sha
+        branch)   label="[${val#refs/heads/}]" ;;      # strip refs/heads/ prefix
+        detached) label="(detached HEAD)" ; sha="${sha:0:11}" ;;
+        bare)     label="(bare)" ;;
+      esac
+    done
+    flush   # last record has no trailing blank line
+
+    # Compute path column width for alignment.
+    pw=0
+    for p in "${paths[@]}"; do (( ${#p} > pw )) && pw=${#p}; done
+
+    # Second pass: print aligned rows with the kind column last.
+    for i in "${!paths[@]}"; do
+      printf '%-*s  %s  %-8s %s\n' \
+        "$pw" "${paths[$i]}" "${shas[$i]}" "${kinds[$i]}" "${labels[$i]}"
+    done
+    ;;
+
+  skip)
+    shift
+
+    git rev-parse --show-toplevel >/dev/null 2>&1 || {
+      echo "ERROR: not inside a git repository." >&2; exit 1; }
+
+    # skip-worktree entries are flagged 'S' in the low-order bit of `git ls-files -v`.
+    list_skipped() { git ls-files -v | grep '^S' | cut -c3-; }
+
+    # True if the file is currently skip-worktree'd.
+    is_skipped() {
+      local f="$1"
+      git ls-files -v -- "$f" 2>/dev/null | grep -q '^S'
+    }
+
+    # True if the working-tree content of a (skip-worktree'd) file differs from
+    # its committed HEAD blob. git's diff plumbing honors the skip bit, so we
+    # compare content hashes directly, which does not.
+    differs_from_head() {
+      local f="$1" wt head
+      wt=$(git hash-object -- "$f" 2>/dev/null) || return 0
+      head=$(git rev-parse "HEAD:$f" 2>/dev/null) || return 0
+      [[ "$wt" != "$head" ]]
+    }
+
+    # Sub-subcommand is matched case-insensitively; file args stay case-sensitive.
+    subcmd="${1:-}"
+    case "${subcmd,,}" in
+      list|"")
+        mapfile -t SKIPPED < <(list_skipped)
+        if [[ "${#SKIPPED[@]}" -eq 0 || -z "${SKIPPED[0]:-}" ]]; then
+          echo "No files are currently skip-worktree'd."
+          exit 0
+        fi
+        for f in "${SKIPPED[@]}"; do
+          if differs_from_head "$f"; then
+            printf 'DIFF %s\n' "$f"
+          else
+            printf 'SAME %s\n' "$f"
+          fi
+        done
+        ;;
+
+      diff)
+        shift
+        if [[ "$#" -ne 1 ]]; then
+          echo "usage: gbw skip diff <file>" >&2
+          exit 2
+        fi
+        file="$1"
+        if ! is_skipped "$file"; then
+          echo "ERROR: '$file' is not skip-worktree'd." >&2
+          echo "       (see 'gbw skip list'; git diff already shows non-skipped files)" >&2
+          exit 1
+        fi
+        # git diff honors the skip bit, so temporarily clear it, diff, then restore.
+        # The trap guarantees the flag is put back even on error or interrupt.
+        trap 'git update-index --skip-worktree -- "$file" >/dev/null 2>&1 || true' EXIT
+        git update-index --no-skip-worktree -- "$file"
+        git diff -- "$file"
+        ;;
+
+      skip)
+        shift
+        if [[ "$#" -eq 0 ]]; then
+          echo "usage: gbw skip skip <path>..." >&2
+          exit 2
+        fi
+        for f in "$@"; do
+          git update-index --skip-worktree -- "$f" && echo "set skip-worktree: $f"
+        done
+        echo
+        echo "Done. 'git status' will now ignore local changes to these files."
+        ;;
+
+      undo)
+        shift
+        if [[ "$#" -gt 0 ]]; then
+          TARGETS=("$@")
+        else
+          mapfile -t TARGETS < <(list_skipped)
+        fi
+        if [[ "${#TARGETS[@]}" -eq 0 || -z "${TARGETS[0]:-}" ]]; then
+          echo "Nothing to undo — no skip-worktree files."
+          exit 0
+        fi
+        for f in "${TARGETS[@]}"; do
+          git update-index --no-skip-worktree "$f" && echo "cleared skip-worktree: $f"
+        done
+        echo
+        echo "Done. 'git status' now tracks changes to these files again."
+        echo "Their contents are UNCHANGED — use 'git checkout -- <file>' to discard edits."
+        ;;
+
+      *)
+        echo "Unknown skip subcommand: $1" >&2
+        echo "Try: gbw --help" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+
+  *)
+    echo "Unknown command: $1" >&2
+    echo "Try: gbw --help" >&2
+    exit 1
+    ;;
+esac
