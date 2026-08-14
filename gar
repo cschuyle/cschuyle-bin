@@ -1578,10 +1578,24 @@ gar_mer_row() {
     gar_mer_path+=("$3");   gar_mer_msg+=("$4")
 }
 
+# Sort rank for grouping the emitted rows best-to-worst: OK, then the advisory
+# EXPECTED MODS, then WARN, then the real problems (MISS) at the bottom, so the
+# eye travels down toward what needs attention.
+gar_mer_rank() {
+    case "$1" in
+        OK)              echo 0 ;;
+        "EXPECTED MODS") echo 1 ;;
+        WARN)            echo 2 ;;
+        MISS)            echo 3 ;;
+        *)               echo 9 ;;
+    esac
+}
+
 # Measure column widths across the buffered rows, then emit each as an aligned
-# "STATUS  name  (path)  message" line. OK rows only count/print under --all.
+# "STATUS  name  (path)  message" line, grouped by status (see gar_mer_rank) and
+# alphabetical by repo name within a group. OK rows only count/print under --all.
 gar_mer_flush() {
-    local i wname=0 wpath=0 nlen plen line
+    local i wname=0 wpath=0 nlen plen line key
     for i in "${!gar_mer_status[@]}"; do
         [[ "${gar_mer_status[i]}" == OK && $gar_show_all -eq 0 ]] && continue
         nlen=${#gar_mer_name[i]}
@@ -1589,7 +1603,20 @@ gar_mer_flush() {
         plen=$(( ${#gar_mer_path[i]} + 2 ))   # +2 for the surrounding ()
         (( plen > wpath )) && wpath=$plen
     done
+    # Build "<rank>\t<lower-name>\t<index>" keys and sort: rank groups the rows,
+    # lowercased name orders alphabetically within a group, and the original index
+    # is a stable tiebreaker (keeps a repo's multiple rows in emission order).
+    local -a order=()
     for i in "${!gar_mer_status[@]}"; do
+        printf -v key '%d\t%s\t%d' \
+            "$(gar_mer_rank "${gar_mer_status[i]}")" \
+            "${gar_mer_name[i],,}" "$i"
+        order+=("$key")
+    done
+    IFS=$'\n' order=($(sort <<<"${order[*]}"))
+    unset IFS
+    for key in "${order[@]}"; do
+        i=${key##*$'\t'}
         printf -v line '%-*s  %-*s  %s' \
             "$wname" "${gar_mer_name[i]}" \
             "$wpath" "(${gar_mer_path[i]})" \
