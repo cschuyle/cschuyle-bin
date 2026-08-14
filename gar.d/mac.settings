@@ -1,15 +1,16 @@
 # Mac settings checks (advisory — mismatches WARN, not MISS).
 # Format: label|kind|location|key|expected[|compare]
 # kind: json-editor (cursor or code), defaults, sound-menu-bar-always,
-#       machine-name-not-default, next-window-switch-key, chrome-json
+#       machine-name-not-default, next-window-switch-key, chrome-json,
+#       iterm-profiles
 # location: editor id, "global" for NSGlobalDomain, Chrome profile dir
 #           name (e.g. Default), profile display name (e.g. natera.com),
 #           "*" / "@last" for Chrome's last-used profile, or "@all" for every
 #           Chrome user profile
 # compare: eq (default), at_most (numeric actual <= expected)
 # In an interactive terminal gar offers to fix WARNs for json-editor,
-# defaults, sound-menu-bar-always, next-window-switch-key, and chrome-json
-# kinds. machine-name-not-default is advisory only.
+# defaults, sound-menu-bar-always, next-window-switch-key, chrome-json, and
+# iterm-profiles kinds. machine-name-not-default is advisory only.
 # next-window-switch-key only applies when Karabiner Elements is installed
 # and the Czech-QWERTY input source is enabled; it checks that "Move focus to
 # next window" (symbolic hotkey 27) is Command-< (ASCII 92, keycode 50) — the
@@ -21,6 +22,13 @@
 # installed. Startup prefs are per profile — "*" checks the last-used one
 # (the profile you pick in "Who's using Chrome?"). session.restore_on_startup=1
 # is "Continue where you left off".
+# iterm-profiles checks that iTerm has profiles named Default, Caution, and
+# Midcaution — by name, across both "New Bookmarks" and any *.json under
+# ~/Library/Application Support/iTerm2/DynamicProfiles; skipped if iTerm is
+# not installed. The fix clones the current Default profile's settings into
+# ~/Library/Application Support/iTerm2/DynamicProfiles/gar.json under the
+# missing name(s) — Dynamic Profiles reload live, no iTerm restart needed —
+# and is skipped if there's no Default profile to clone from.
 Cursor auto-save|json-editor|cursor|files.autoSave|onFocusChange
 VS Code auto-save|json-editor|code|files.autoSave|onFocusChange
 Keyboard repeat speed|defaults|global|KeyRepeat|2|at_most
@@ -30,3 +38,4 @@ Always show volume in menu bar|sound-menu-bar-always||||
 Machine name|machine-name-not-default||||
 Move focus to next window (Command-<)|next-window-switch-key||||
 Chrome On startup: continue where you left off|chrome-json|*|session.restore_on_startup|1
+iTerm profiles (Default, Caution, Midcaution)|iterm-profiles||||

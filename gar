@@ -1860,6 +1860,129 @@ mac_karabiner_installed() {
     [[ -d /Applications/Karabiner-Elements.app ]]
 }
 
+mac_iterm_installed() {
+    [[ -d /Applications/iTerm.app ]]
+}
+
+mac_iterm_dynamic_profiles_dir() {
+    printf '%s\n' "$HOME/Library/Application Support/iTerm2/DynamicProfiles"
+}
+
+# The Dynamic Profiles file gar itself writes to when creating a profile (see
+# offer_fix_iterm_profiles). iTerm watches its DynamicProfiles directory and
+# reloads it live — no restart needed, and unlike "New Bookmarks" (which iTerm
+# may rewrite wholesale on quit) it can't be clobbered by a running iTerm.
+mac_iterm_gar_profiles_file() {
+    printf '%s/gar.json\n' "$(mac_iterm_dynamic_profiles_dir)"
+}
+
+# Print one iTerm profile name per line: the "New Bookmarks" array (old-style
+# NeXTSTEP plist text from `defaults read`, converted to XML so it can hold
+# arbitrary <data> fields that plutil's JSON converter rejects) plus every
+# *.json file under the DynamicProfiles directory.
+mac_iterm_profile_names() {
+    local dyn_dir dyn_file
+    local -a dyn_files=()
+
+    defaults read com.googlecode.iterm2 "New Bookmarks" 2>/dev/null \
+        | plutil -convert xml1 -o - - 2>/dev/null \
+        | python3 -c '
+import plistlib
+import sys
+
+try:
+    data = plistlib.loads(sys.stdin.buffer.read())
+except Exception:
+    sys.exit(0)
+for bookmark in data:
+    if isinstance(bookmark, dict):
+        name = bookmark.get("Name")
+        if name:
+            print(name)
+'
+
+    dyn_dir=$(mac_iterm_dynamic_profiles_dir)
+    [[ -d "$dyn_dir" ]] || return 0
+    while IFS= read -r -d '' dyn_file; do
+        dyn_files+=("$dyn_file")
+    done < <(find "$dyn_dir" -maxdepth 1 -name '*.json' -print0 2>/dev/null)
+    ((${#dyn_files[@]} > 0)) || return 0
+
+    python3 -c '
+import json
+import sys
+
+for path in sys.argv[1:]:
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except Exception:
+        continue
+    for profile in data.get("Profiles", []) or []:
+        if isinstance(profile, dict):
+            name = profile.get("Name")
+            if name:
+                print(name)
+' "${dyn_files[@]}"
+}
+
+# Clone iTerm profile $1 (by Name, looked up in "New Bookmarks") into the
+# gar-managed Dynamic Profiles file under the name $2, upserting by a
+# deterministic Guid so re-running is idempotent rather than piling up
+# duplicates. Returns non-zero if the source profile doesn't exist or a
+# profile value can't round-trip through JSON.
+mac_iterm_create_profile() {
+    local source_name="$1" new_name="$2" out_file
+    out_file=$(mac_iterm_gar_profiles_file)
+    defaults read com.googlecode.iterm2 "New Bookmarks" 2>/dev/null \
+        | plutil -convert xml1 -o - - 2>/dev/null \
+        | python3 -c '
+import json
+import plistlib
+import sys
+from pathlib import Path
+
+source_name, new_name, out_path = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+
+try:
+    profiles = plistlib.loads(sys.stdin.buffer.read())
+except Exception:
+    sys.exit(1)
+
+source = next(
+    (p for p in profiles if isinstance(p, dict) and p.get("Name") == source_name),
+    None,
+)
+if source is None:
+    sys.exit(1)
+
+clone = dict(source)
+clone["Name"] = new_name
+clone["Guid"] = "gar-" + new_name.lower()
+
+existing = {"Profiles": []}
+if out_path.is_file():
+    try:
+        existing = json.loads(out_path.read_text())
+    except Exception:
+        existing = {"Profiles": []}
+existing.setdefault("Profiles", [])
+existing["Profiles"] = [
+    p for p in existing["Profiles"]
+    if isinstance(p, dict) and p.get("Guid") != clone["Guid"]
+]
+existing["Profiles"].append(clone)
+
+out_path.parent.mkdir(parents=True, exist_ok=True)
+try:
+    text = json.dumps(existing, indent=2, sort_keys=True) + "\n"
+except TypeError as exc:
+    print("could not serialize profile: %s" % exc, file=sys.stderr)
+    sys.exit(1)
+out_path.write_text(text)
+' "$source_name" "$new_name" "$out_file"
+}
+
 mac_czech_qwerty_enabled() {
     defaults read com.apple.HIToolbox AppleEnabledInputSources 2>/dev/null \
         | grep -q 'Czech-QWERTY'
@@ -2404,6 +2527,32 @@ mac_chrome_is_running() {
     pgrep -xq "Google Chrome" 2>/dev/null
 }
 
+# Offer to create each still-missing iTerm profile named in $1 (comma/space
+# separated, as produced by the iterm-profiles check) by cloning the current
+# Default profile's settings under the new name — see
+# mac_iterm_create_profile. Skipped entirely if Default itself doesn't exist,
+# since there is nothing to clone from.
+offer_fix_iterm_profiles() {
+    local missing_csv="$1" label="$2" source=Default name
+    local -a missing
+
+    IFS=', ' read -r -a missing <<<"$missing_csv"
+    if ! grep -qxF "$source" <<<"$(mac_iterm_profile_names)"; then
+        report_warn "Setting $label (no $source profile to clone from)"
+        return 0
+    fi
+
+    for name in "${missing[@]}"; do
+        [[ -n "$name" && "$name" != "$source" ]] || continue
+        gar_prompt_yn "Fix $label: create iTerm profile \"$name\" (clone of $source)?" || continue
+        if mac_iterm_create_profile "$source" "$name"; then
+            printf 'Created iTerm profile "%s" (clone of %s; iTerm reloads Dynamic Profiles automatically).\n' "$name" "$source"
+        else
+            report_warn "Setting $label (could not create profile \"$name\")"
+        fi
+    done
+}
+
 offer_fix_mac_setting() {
     local kind="$1" location="$2" key="$3" expected="$4" label="$5" settings_path
 
@@ -2441,6 +2590,9 @@ offer_fix_mac_setting() {
                 report_warn "Setting $label (could not update Chrome preferences)"
             fi
             ;;
+        iterm-profiles)
+            offer_fix_iterm_profiles "$expected" "$label"
+            ;;
         sound-menu-bar-always)
             gar_prompt_yn "Fix $label: always show volume in the menu bar?" || return 0
             if mac_fix_sound_menu_bar; then
@@ -2464,6 +2616,7 @@ check_mac_settings() {
     local label kind location key expected compare actual settings_path app_path read_status=0
     local hk_char hk_key hk_mod hk_enabled hk_read
     local chrome_line chrome_profile chrome_value chrome_bad chrome_detail chrome_out
+    local iterm_missing iterm_want
     while IFS='|' read -r label kind location key expected compare; do
         compare="${compare:-eq}"
         actual=""
@@ -2502,6 +2655,23 @@ check_mac_settings() {
                     fi
                 else
                     report_ok "Setting $label${actual:+ ($actual)}"
+                fi
+                continue
+                ;;
+            iterm-profiles)
+                mac_iterm_installed || continue
+                actual=$(mac_iterm_profile_names)
+                iterm_missing=""
+                for iterm_want in Default Caution Midcaution; do
+                    if ! grep -qxF "$iterm_want" <<<"$actual"; then
+                        iterm_missing+="${iterm_missing:+, }${iterm_want}"
+                    fi
+                done
+                if [[ -z "$iterm_missing" ]]; then
+                    report_ok "Setting $label"
+                else
+                    report_warn "Setting $label (missing: $iterm_missing)"
+                    offer_fix_mac_setting "$kind" "$location" "$key" "$iterm_missing" "$label"
                 fi
                 continue
                 ;;
