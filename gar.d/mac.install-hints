@@ -36,6 +36,7 @@ gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew 
 gdubw/gng|https://github.com/gdubw/gng — brew trust --formula gdubw/gng/gng && brew install gng
 mvn|brew install maven
 maven|brew install maven
+lintree|curl -fsSL https://get.lintree.sh | sh
 user.name|git config --global user.name "Your Name"
 user.email|git config --global user.email "you@example.com"
 1Password Nightly|Install in Chrome or Opera from https://chromewebstore.google.com/detail/1password-nightly-%E2%80%93-passw/gejiddohjgogedgjnonbofjigllpkmbf
