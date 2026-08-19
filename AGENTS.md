@@ -31,8 +31,8 @@ subcommands `info` / `apps` / `roles` do not run this preflight.
 **Which repos.** Repos come from a `machine-env-repos` manifest (each line
 `name|path[|branch]`, branch defaulting to `main`), plus any `~/Yew/*-setup`
 repos discovered automatically. A separate name-based skip manifest can exclude
-repos from auditing. A second name-based manifest, `machine-env-catchup`, marks
-repos for *catch-up* mode (see below).
+repos from auditing. A second manifest, `machine-env-catchup` (lines
+`name|mainline`), marks repos for *catch-up* mode (see below).
 
 **What it checks per repo.** For each repo it reports whether the checkout is
 missing / not a git repo, whether the working tree has genuine uncommitted
@@ -53,21 +53,27 @@ genuine uncommitted changes and the checkout is on the tracked branch (it won't
 touch a dirty tree or a feature branch). Pull offers run after the table above
 is printed. The pull itself is `git pull -r origin <config_branch>`.
 
-**Catch-up repos.** A repo whose *name* appears in a `machine-env-catchup`
-manifest (a name-based list, same format and matching as the skip manifest) is
-audited and updated differently: instead of comparing/pulling `config_branch`
-against `origin`, `gar` measures how far the *current* branch is behind its own
-git upstream (`@{u}`, i.e. `HEAD..@{u}`) and — interactively — offers `git fetch`
-+ `git rebase @{u}` on **whatever branch is checked out** (the tracked-branch
+**Catch-up repos.** A repo named in a `machine-env-catchup` manifest is audited
+and updated differently: instead of comparing/pulling `config_branch` against
+`origin`, `gar` rebases the *current* branch onto a configured **mainline** ref.
+Manifest lines are `name|mainline` (pipe-delimited, same matching as the skip
+manifest), where `mainline` is a remote-tracking ref like `origin/main`; a bare
+`name` defaults the mainline to `origin/<the repo's remote default branch>`.
+`gar` measures how far the current branch is behind the mainline
+(`HEAD..<mainline>`) and — interactively — offers `git fetch <remote>` +
+`git rebase <mainline>` on **whatever branch is checked out** (the tracked-branch
 guard is relaxed; a clean tree is still required). This suits repos where you sit
-on a feature branch and want it caught up to mainline. A catch-up repo whose
-current branch has no upstream is flagged with a WARN rather than silently
-skipped. Catch-up findings are advisory (WARN), so they don't affect the exit
-code, and the configured-vs-remote-default advisory is suppressed for them (the
-upstream is per-branch, not `config_branch`). The catch-up helpers key off `@{u}`
-and make no `origin`/`config_branch` assumption, unlike the pull path. `gar info
-<name>` shows a `Catch-up:` line and reports behind-vs-`@{u}` for these repos.
-The manifest is resolved per platform (`<platform>.machine-env-catchup`, else
+on a feature branch and periodically rebase it onto mainline. Crucially the
+rebase does **not** touch the branch's own upstream (`@{u}`), so `git push` still
+goes to the feature branch — `gar` never pushes. A catch-up repo whose mainline
+can't be resolved (no explicit value and no remote default) is flagged with a
+WARN rather than silently skipped. Catch-up findings are advisory (WARN), so they
+don't affect the exit code, and the configured-vs-remote-default advisory is
+suppressed for them (a catch-up repo doesn't track `config_branch`). The catch-up
+helpers take the resolved mainline ref as an argument and make no `@{u}`
+assumption, unlike the pull path. `gar info <name>` shows a `Catch-up:` line with
+the mainline and reports behind-vs-mainline for these repos. The manifest is
+resolved per platform (`<platform>.machine-env-catchup`, else
 `shared.machine-env-catchup`) and wired into all three platform runners (mac,
 wsl, synology); mac now also honors its `machine-env-skip` manifest, which it
 previously ignored.

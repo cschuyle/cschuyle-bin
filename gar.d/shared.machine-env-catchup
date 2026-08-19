@@ -1,21 +1,28 @@
-# Repos to "catch up" instead of pull.
+# Repos to "catch up" (rebase onto mainline) instead of pull.
 #
-# List a machine-env repo NAME here (one per line, same names as in a
-# *.machine-env-repos manifest, or an auto-discovered $HOME/Yew/*-setup repo) to
-# switch it into catch-up mode. Comments (#) and blank lines are ignored.
+# Each line is `name|mainline` (pipe-delimited, like machine-env-repos):
+#   - name: a machine-env repo NAME (same names as in a *.machine-env-repos
+#     manifest, or an auto-discovered $HOME/Yew/*-setup repo).
+#   - mainline: the branch to rebase onto, as a remote-tracking ref like
+#     `origin/main`. Optional — a bare `name` (no `|`) defaults the mainline to
+#     `origin/<the repo's remote default branch>`.
+# Comments (#) and blank lines are ignored.
 #
-# In catch-up mode gar measures how far the CURRENT branch is behind its own git
-# upstream (@{u}) and offers to run `git fetch` + `git rebase @{u}` on whatever
+# In catch-up mode gar measures how far the CURRENT branch is behind the mainline
+# and offers to run `git fetch <remote>` + `git rebase <mainline>` on whatever
 # branch is checked out (a clean working tree is still required). This suits
-# repos where you sit on a feature branch and want it caught up to mainline,
-# rather than pulling the configured branch from origin.
+# repos where you sit on a feature branch and periodically rebase it onto
+# mainline, rather than pulling the configured branch from origin.
 #
-# A catch-up repo whose current branch has no upstream is flagged (WARN) rather
-# than silently skipped. Catch-up findings are advisory (WARN) — they never fail
-# the run.
+# The rebase leaves the feature branch's own upstream (@{u}) untouched, so
+# `git push` still goes to the feature branch — gar never pushes.
+#
+# A catch-up repo whose mainline can't be resolved (no explicit value and no
+# remote default) is flagged (WARN) rather than silently skipped. Catch-up
+# findings are advisory (WARN) — they never fail the run.
 #
 # Machine-local overlays live in ~/.config/gar/d/ and can add platform- or
 # role-scoped catch-up lists (e.g. mac.machine-env-catchup).
 #
 # Example:
-# my-feature-repo
+# my-feature-repo|origin/main
