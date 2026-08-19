@@ -1,0 +1,21 @@
+# Repos to "catch up" instead of pull.
+#
+# List a machine-env repo NAME here (one per line, same names as in a
+# *.machine-env-repos manifest, or an auto-discovered $HOME/Yew/*-setup repo) to
+# switch it into catch-up mode. Comments (#) and blank lines are ignored.
+#
+# In catch-up mode gar measures how far the CURRENT branch is behind its own git
+# upstream (@{u}) and offers to run `git fetch` + `git rebase @{u}` on whatever
+# branch is checked out (a clean working tree is still required). This suits
+# repos where you sit on a feature branch and want it caught up to mainline,
+# rather than pulling the configured branch from origin.
+#
+# A catch-up repo whose current branch has no upstream is flagged (WARN) rather
+# than silently skipped. Catch-up findings are advisory (WARN) — they never fail
+# the run.
+#
+# Machine-local overlays live in ~/.config/gar/d/ and can add platform- or
+# role-scoped catch-up lists (e.g. mac.machine-env-catchup).
+#
+# Example:
+# my-feature-repo

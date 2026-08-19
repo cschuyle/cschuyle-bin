@@ -700,25 +700,40 @@ gar_print_docker_configured() {
 # file per line, indented and shell-quoted.
 cmd_info_repo() {
     local entry="$1" name path config_branch current_branch remote_default
-    local mod_count ahead behind reason f
+    local mod_count ahead behind reason f catchup=0 upstream="" catchup_manifest
     name="${entry%%|*}"
     path="${entry#*|}"; config_branch="${path##*|}"; path="${path%%|*}"
     [[ -n "$config_branch" ]] || config_branch=main
+
+    catchup_manifest=$(gar_resolve_manifest "$(detect_platform)" machine-env-catchup)
+    if gar_machine_env_catchup_name "$catchup_manifest" "$name"; then
+        catchup=1
+    fi
 
     printf '%s (machine-env repo)\n' "$name"
     printf 'Path: %s\n' "$path"
     printf 'Tracks: %s\n' "$config_branch"
 
     if [[ ! -d "$path" ]]; then
+        (( catchup )) && printf 'Catch-up: yes (rebase current branch onto its upstream)\n'
         printf 'Status: MISSING (no checkout at %s)\n' "$path"
         exit 0
     fi
     if [[ ! -d "$path/.git" ]]; then
+        (( catchup )) && printf 'Catch-up: yes (rebase current branch onto its upstream)\n'
         printf 'Status: NOT A GIT REPO\n'
         exit 0
     fi
 
     current_branch=$(gar_repo_current_branch "$path" 2>/dev/null) || current_branch=""
+    if (( catchup )); then
+        upstream=$(gar_repo_upstream_ref "$path" 2>/dev/null) || upstream=""
+        if [[ -n "$upstream" ]]; then
+            printf 'Catch-up: yes (upstream %s)\n' "$upstream"
+        else
+            printf 'Catch-up: yes (no upstream set for %s)\n' "${current_branch:-current branch}"
+        fi
+    fi
 
     # Collect reasons in report order; if none, status is OK.
     reason=()
@@ -730,27 +745,51 @@ cmd_info_repo() {
             reason+=("$mod_count files with uncommitted local changes")
         fi
     fi
-    if [[ -n "$current_branch" && "$current_branch" != "$config_branch" ]]; then
-        reason+=("on branch $current_branch, not tracked branch $config_branch")
-    fi
-    if ahead=$(gar_repo_unpushed_count "$path" "$config_branch" 2>/dev/null); then
-        if (( ahead == 1 )); then
-            reason+=("1 unpushed commit on $config_branch")
+    # For catch-up repos, sitting on a feature branch is expected — don't flag the
+    # branch mismatch, and report behind/action against the upstream (@{u}).
+    if (( catchup )); then
+        if [[ -z "$upstream" ]]; then
+            reason+=("catch-up repo but no upstream set for ${current_branch:-current branch}")
         else
-            reason+=("$ahead unpushed commits on $config_branch")
+            if ahead=$(gar_repo_unpushed_count "$path" "$config_branch" 2>/dev/null); then
+                if (( ahead == 1 )); then
+                    reason+=("1 unpushed commit on $config_branch")
+                else
+                    reason+=("$ahead unpushed commits on $config_branch")
+                fi
+            fi
+            if gar_repo_catchup_fetch "$path" >/dev/null 2>&1 && \
+               behind=$(gar_repo_upstream_behind_count "$path" 2>/dev/null); then
+                if (( behind == 1 )); then
+                    reason+=("1 commit behind $upstream (rebase would catch up)")
+                else
+                    reason+=("$behind commits behind $upstream (rebase would catch up)")
+                fi
+            fi
         fi
-    fi
-    if gar_repo_try_fetch "$path" "$config_branch" >/dev/null 2>&1 && \
-       behind=$(gar_repo_behind_count "$path" "$config_branch" 2>/dev/null); then
-        if (( behind == 1 )); then
-            reason+=("1 commit behind origin/$config_branch (pull would update)")
-        else
-            reason+=("$behind commits behind origin/$config_branch (pull would update)")
+    else
+        if [[ -n "$current_branch" && "$current_branch" != "$config_branch" ]]; then
+            reason+=("on branch $current_branch, not tracked branch $config_branch")
         fi
-    fi
-    remote_default=$(gar_repo_remote_default_branch "$path" 2>/dev/null) || remote_default=""
-    if [[ -n "$remote_default" && "$remote_default" != "$config_branch" ]]; then
-        reason+=("configured to track $config_branch but origin default is $remote_default")
+        if ahead=$(gar_repo_unpushed_count "$path" "$config_branch" 2>/dev/null); then
+            if (( ahead == 1 )); then
+                reason+=("1 unpushed commit on $config_branch")
+            else
+                reason+=("$ahead unpushed commits on $config_branch")
+            fi
+        fi
+        if gar_repo_try_fetch "$path" "$config_branch" >/dev/null 2>&1 && \
+           behind=$(gar_repo_behind_count "$path" "$config_branch" 2>/dev/null); then
+            if (( behind == 1 )); then
+                reason+=("1 commit behind origin/$config_branch (pull would update)")
+            else
+                reason+=("$behind commits behind origin/$config_branch (pull would update)")
+            fi
+        fi
+        remote_default=$(gar_repo_remote_default_branch "$path" 2>/dev/null) || remote_default=""
+        if [[ -n "$remote_default" && "$remote_default" != "$config_branch" ]]; then
+            reason+=("configured to track $config_branch but origin default is $remote_default")
+        fi
     fi
 
     if (( ${#reason[@]} == 0 )); then
@@ -1338,6 +1377,69 @@ gar_repo_pull() {
     git -C "$repo" pull -r origin "$branch"
 }
 
+# --- Catch-up repos --------------------------------------------------------
+# A "catch-up" repo (named in a machine-env-catchup manifest) is updated by
+# rebasing the *current* branch onto its own git upstream (@{u}) — `git fetch`
+# + `git rebase @{u}` — rather than pulling config_branch from origin. This
+# suits repos where you sit on a feature branch and want it caught up to
+# mainline. These helpers are all keyed off the current branch's @{u}, so they
+# make no assumption that the local branch name, remote branch name, or remote
+# match config_branch/origin (unlike the pull-path helpers above).
+
+# Current branch's upstream ref (e.g. "origin/main"). Non-zero (empty) when the
+# current branch has no upstream configured.
+gar_repo_upstream_ref() {
+    local repo="$1" ref
+    [[ -d "$repo/.git" ]] || return 1
+    ref=$(git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || return 1
+    [[ -n "$ref" ]] || return 1
+    printf '%s\n' "$ref"
+}
+
+# Remote that the current branch's upstream lives on (e.g. "origin"). Non-zero
+# (empty) when there is no upstream. Reads branch.<cur>.remote directly, which is
+# exactly the remote @{u} resolves through.
+gar_repo_upstream_remote() {
+    local repo="$1" cur remote
+    [[ -d "$repo/.git" ]] || return 1
+    cur=$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+    remote=$(git -C "$repo" config --get "branch.$cur.remote" 2>/dev/null) || return 1
+    [[ -n "$remote" ]] || return 1
+    printf '%s\n' "$remote"
+}
+
+# How many commits the current branch is behind its upstream (HEAD..@{u}).
+# Non-zero (empty) when there is no upstream or the count is 0.
+gar_repo_upstream_behind_count() {
+    local repo="$1" behind
+    [[ -d "$repo/.git" ]] || return 1
+    git -C "$repo" rev-parse --verify --quiet '@{u}' >/dev/null 2>&1 || return 1
+    behind=$(git -C "$repo" rev-list --count 'HEAD..@{u}' 2>/dev/null) || return 1
+    (( behind > 0 )) || return 1
+    printf '%s\n' "$behind"
+}
+
+# Fetch the current branch's upstream remote (so @{u} is current). Falls back to
+# a bare `git fetch` when the upstream remote can't be resolved. Non-zero when
+# there's no upstream or the fetch fails.
+gar_repo_catchup_fetch() {
+    local repo="$1" remote
+    [[ -d "$repo/.git" ]] || return 1
+    gar_repo_upstream_ref "$repo" >/dev/null 2>&1 || return 1
+    if remote=$(gar_repo_upstream_remote "$repo" 2>/dev/null) && [[ -n "$remote" ]]; then
+        git -C "$repo" fetch --quiet "$remote" 2>/dev/null || return 1
+    else
+        git -C "$repo" fetch --quiet 2>/dev/null || return 1
+    fi
+    git -C "$repo" rev-parse --verify --quiet '@{u}' >/dev/null 2>&1
+}
+
+# Catch up the current branch: rebase it onto its upstream (@{u}).
+gar_repo_rebase_upstream() {
+    local repo="$1"
+    git -C "$repo" rebase '@{u}'
+}
+
 gar_can_prompt() {
     [[ -r /dev/tty ]] || [[ -t 0 ]]
 }
@@ -1442,6 +1544,18 @@ gar_machine_env_skip_name() {
     return 1
 }
 
+# Is <name> in the catch-up manifest? Same one-name-per-line format and matching
+# as the skip manifest above; being listed switches the repo to catch-up mode
+# (rebase current branch onto @{u}) instead of the config_branch pull.
+gar_machine_env_catchup_name() {
+    local catchup_manifest="$1" want="$2" name
+    [[ -n "$catchup_manifest" && -f "$catchup_manifest" ]] || return 1
+    while IFS= read -r name; do
+        [[ "$name" == "$want" ]] && return 0
+    done < <(read_manifest "$catchup_manifest")
+    return 1
+}
+
 gar_machine_env_list_repos() {
     local repos_manifest="$1" skip_manifest="${2:-}" name path branch setup_dir setup_name seen=()
     while IFS='|' read -r name path branch; do
@@ -1493,12 +1607,19 @@ lookup_machine_env_repo_entry() {
 }
 
 gar_machine_env_prefetch_repo() {
-    local name="$1" path="$2" branch="${3:-main}" result_file="$4"
-    local ahead behind fetched=0 current_branch remote_default
+    local name="$1" path="$2" branch="${3:-main}" result_file="$4" catchup_manifest="${5:-}"
+    local ahead behind fetched=0 current_branch remote_default catchup=0 upstream=""
     {
         # config_branch is the branch this repo is configured to track (manifest
         # 3rd field, default main); branch= (below) is the current checked-out branch.
         printf 'name=%s\npath=%s\nconfig_branch=%s\n' "$name" "$path" "$branch"
+        # catchup=1 when the repo is named in the catch-up manifest: behind/fetch
+        # are measured against the current branch's upstream (@{u}), and the update
+        # action is a rebase onto @{u} rather than a config_branch pull.
+        if gar_machine_env_catchup_name "$catchup_manifest" "$name"; then
+            catchup=1
+        fi
+        printf 'catchup=%s\n' "$catchup"
         if [[ ! -d "$path" ]]; then
             printf 'status=missing\n'
             exit 0
@@ -1515,6 +1636,10 @@ gar_machine_env_prefetch_repo() {
         else
             printf 'remote_default=\n'
         fi
+        # upstream= is the current branch's @{u} (empty if none); only meaningful
+        # for catch-up repos, but harmless to record either way.
+        upstream=$(gar_repo_upstream_ref "$path" 2>/dev/null) || upstream=""
+        printf 'upstream=%s\n' "$upstream"
         if gar_repo_dirty "$path"; then
             printf 'dirty=1\n'
         else
@@ -1525,34 +1650,57 @@ gar_machine_env_prefetch_repo() {
         else
             printf 'expected_mods=0\n'
         fi
-        if gar_repo_try_fetch "$path" "$branch"; then
-            fetched=1
-            printf 'fetched=1\n'
+        if (( catchup )); then
+            # Catch-up: fetch/behind keyed off the current branch's upstream.
+            if gar_repo_catchup_fetch "$path"; then
+                fetched=1
+                printf 'fetched=1\n'
+            else
+                printf 'fetched=0\n'
+            fi
+            # ahead stays measured against origin/config_branch (unpushed work is
+            # still worth flagging); behind switches to HEAD..@{u}.
+            if ahead=$(gar_repo_unpushed_count "$path" "$branch" 2>/dev/null); then
+                printf 'ahead=%s\n' "$ahead"
+            else
+                printf 'ahead=0\n'
+            fi
+            behind=0
+            if (( fetched )) && behind=$(gar_repo_upstream_behind_count "$path" 2>/dev/null); then
+                printf 'behind=%s\n' "$behind"
+            else
+                printf 'behind=0\n'
+            fi
         else
-            printf 'fetched=0\n'
-        fi
-        if ahead=$(gar_repo_unpushed_count "$path" "$branch" 2>/dev/null); then
-            printf 'ahead=%s\n' "$ahead"
-        else
-            printf 'ahead=0\n'
-        fi
-        behind=0
-        if (( fetched )) && behind=$(gar_repo_behind_count "$path" "$branch" 2>/dev/null); then
-            printf 'behind=%s\n' "$behind"
-        else
-            printf 'behind=0\n'
+            if gar_repo_try_fetch "$path" "$branch"; then
+                fetched=1
+                printf 'fetched=1\n'
+            else
+                printf 'fetched=0\n'
+            fi
+            if ahead=$(gar_repo_unpushed_count "$path" "$branch" 2>/dev/null); then
+                printf 'ahead=%s\n' "$ahead"
+            else
+                printf 'ahead=0\n'
+            fi
+            behind=0
+            if (( fetched )) && behind=$(gar_repo_behind_count "$path" "$branch" 2>/dev/null); then
+                printf 'behind=%s\n' "$behind"
+            else
+                printf 'behind=0\n'
+            fi
         fi
     } >"$result_file"
 }
 
 gar_machine_env_prefetch_all() {
-    local repos_manifest="$1" skip_manifest="${2:-}" name path branch slug result_file
+    local repos_manifest="$1" skip_manifest="${2:-}" catchup_manifest="${3:-}" name path branch slug result_file
     mkdir -p "$gar_tmpdir/repos"
     while IFS='|' read -r name path branch; do
         branch="${branch:-main}"
         slug=$(gar_path_slug "$path")
         result_file="$gar_tmpdir/repos/$slug"
-        gar_machine_env_prefetch_repo "$name" "$path" "$branch" "$result_file" &
+        gar_machine_env_prefetch_repo "$name" "$path" "$branch" "$result_file" "$catchup_manifest" &
     done < <(gar_machine_env_list_repos "$repos_manifest" "$skip_manifest")
     wait
 }
@@ -1638,6 +1786,7 @@ report_machine_env_repo() {
     # only when the repo was otherwise silent. Exit status is driven separately by
     # report_miss (missing / not-git), which increments the global issues counter.
     local status dirty expected_mods ahead behind fetched config_branch remote_default reported=0
+    local catchup upstream branch
     status=$(gar_result_get "$result_file" status)
     case "$status" in
         missing)
@@ -1651,6 +1800,9 @@ report_machine_env_repo() {
     esac
     config_branch=$(gar_result_get "$result_file" config_branch)
     [[ -n "$config_branch" ]] || config_branch=main
+    catchup=$(gar_result_get "$result_file" catchup)
+    upstream=$(gar_result_get "$result_file" upstream)
+    branch=$(gar_result_get "$result_file" branch)
     remote_default=$(gar_result_get "$result_file" remote_default)
     dirty=$(gar_result_get "$result_file" dirty)
     expected_mods=$(gar_result_get "$result_file" expected_mods)
@@ -1674,7 +1826,22 @@ report_machine_env_repo() {
     fi
     fetched=$(gar_result_get "$result_file" fetched)
     behind=$(gar_result_get "$result_file" behind)
-    if [[ "$fetched" == 1 && "$behind" =~ ^[0-9]+$ && "$behind" -gt 0 ]]; then
+    if [[ "$catchup" == 1 ]]; then
+        # Catch-up repo: behind is measured against the current branch's upstream
+        # (@{u}), and the fix is a rebase, not a pull. A catch-up repo with no
+        # upstream configured is flagged so it isn't silently ignored.
+        if [[ -z "$upstream" ]]; then
+            gar_mer_row WARN "$name" "$path" "catch-up repo but no upstream set for ${branch:-current branch}"
+            reported=1
+        elif [[ "$fetched" == 1 && "$behind" =~ ^[0-9]+$ && "$behind" -gt 0 ]]; then
+            if (( behind == 1 )); then
+                gar_mer_row WARN "$name" "$path" "catch-up: rebase ${branch:-HEAD} onto $upstream; 1 commit behind"
+            else
+                gar_mer_row WARN "$name" "$path" "catch-up: rebase ${branch:-HEAD} onto $upstream; $behind commits behind"
+            fi
+            reported=1
+        fi
+    elif [[ "$fetched" == 1 && "$behind" =~ ^[0-9]+$ && "$behind" -gt 0 ]]; then
         if (( behind == 1 )); then
             gar_mer_row WARN "$name" "$path" "pull would update $config_branch; 1 commit behind origin/$config_branch"
         else
@@ -1683,8 +1850,9 @@ report_machine_env_repo() {
         reported=1
     fi
     # Advisory only (does not count as an issue): the configured branch isn't the
-    # repo's remote default. Skipped when the remote default is unknown.
-    if [[ -n "$remote_default" && "$remote_default" != "$config_branch" ]]; then
+    # repo's remote default. Skipped when the remote default is unknown, and for
+    # catch-up repos (which don't track config_branch — the upstream is per-branch).
+    if [[ "$catchup" != 1 && -n "$remote_default" && "$remote_default" != "$config_branch" ]]; then
         gar_mer_row WARN "$name" "$path" "configured to track $config_branch but origin default is $remote_default"
         reported=1
     fi
@@ -1695,7 +1863,7 @@ report_machine_env_repo() {
 
 offer_machine_env_repo_pull() {
     local name="$1" path="$2" result_file="$3"
-    local status dirty branch config_branch fetched behind ahead prompt
+    local status dirty branch config_branch catchup upstream fetched behind ahead prompt
 
     gar_can_prompt || return 0
 
@@ -1703,17 +1871,51 @@ offer_machine_env_repo_pull() {
     [[ "$status" == ok ]] || return 0
 
     # dirty excludes skip-worktree'd edits, so a repo with only expected mods
-    # passes this guard and is offered a pull — safe, since `git pull -r` leaves
-    # skip-worktree'd files untouched.
+    # passes this guard and is offered a pull/rebase — safe, since both `git pull
+    # -r` and `git rebase @{u}` leave skip-worktree'd files untouched.
     dirty=$(gar_result_get "$result_file" dirty)
     [[ "$dirty" == 0 ]] || return 0
 
     config_branch=$(gar_result_get "$result_file" config_branch)
     [[ -n "$config_branch" ]] || config_branch=main
+    branch=$(gar_result_get "$result_file" branch)
+    catchup=$(gar_result_get "$result_file" catchup)
+    upstream=$(gar_result_get "$result_file" upstream)
+
+    if [[ "$catchup" == 1 ]]; then
+        # Catch-up: rebase the *current* branch onto its upstream, regardless of
+        # which branch is checked out (that's the point). Requires an upstream.
+        [[ -n "$upstream" ]] || return 0
+
+        fetched=$(gar_result_get "$result_file" fetched)
+        behind=$(gar_result_get "$result_file" behind)
+        if [[ "$fetched" != 1 ]]; then
+            if ! gar_repo_catchup_fetch "$path"; then
+                return 0
+            fi
+            behind=0
+            behind=$(gar_repo_upstream_behind_count "$path" 2>/dev/null) || behind=0
+        fi
+        [[ "$behind" =~ ^[0-9]+$ && "$behind" -gt 0 ]] || return 0
+
+        if (( behind == 1 )); then
+            prompt="Catch up $name ($path; rebase ${branch:-HEAD} onto $upstream, 1 commit behind)?"
+        else
+            prompt="Catch up $name ($path; rebase ${branch:-HEAD} onto $upstream, $behind commits behind)?"
+        fi
+
+        if gar_prompt_yn "$prompt"; then
+            if gar_repo_rebase_upstream "$path"; then
+                printf 'Updated %s (%s)\n' "$name" "$path"
+            else
+                report_warn "Machine env repo $name ($path — rebase failed)"
+            fi
+        fi
+        return 0
+    fi
 
     # Only offer a pull when the repo is currently checked out on the branch we
     # track — don't pull it while the user sits on a feature branch.
-    branch=$(gar_result_get "$result_file" branch)
     [[ "$branch" == "$config_branch" ]] || return 0
 
     fetched=$(gar_result_get "$result_file" fetched)
@@ -1754,8 +1956,8 @@ offer_machine_env_repo_pull() {
 }
 
 check_machine_env_repos() {
-    local repos_manifest="$1" skip_manifest="${2:-}" name path branch slug result_file
-    gar_machine_env_prefetch_all "$repos_manifest" "$skip_manifest"
+    local repos_manifest="$1" skip_manifest="${2:-}" catchup_manifest="${3:-}" name path branch slug result_file
+    gar_machine_env_prefetch_all "$repos_manifest" "$skip_manifest" "$catchup_manifest"
     gar_mer_reset
 
     # Pass 1: buffer every repo's report rows so column widths can be measured.
@@ -3250,8 +3452,10 @@ check_mac_browser_extensions() {
 }
 
 run_mac_checks() {
-    local repos_manifest secrets_manifest env_manifest login_manifest apps_manifest hints_file git_config_manifest
+    local repos_manifest skip_manifest catchup_manifest secrets_manifest env_manifest login_manifest apps_manifest hints_file git_config_manifest
     repos_manifest=$(gar_combined_capability_manifest mac machine-env-repos)
+    skip_manifest=$(gar_resolve_manifest mac machine-env-skip)
+    catchup_manifest=$(gar_resolve_manifest mac machine-env-catchup)
     secrets_manifest=$(gar_combined_capability_manifest mac secrets)
     env_manifest=$(gar_combined_capability_manifest mac env)
     login_manifest=$(gar_combined_capability_manifest mac login-items)
@@ -3287,7 +3491,7 @@ run_mac_checks() {
     check_mac_browser_extensions
 
     gar_section_begin "Machine environment repos"
-    check_machine_env_repos "$repos_manifest"
+    check_machine_env_repos "$repos_manifest" "$skip_manifest" "$catchup_manifest"
 
     gar_section_begin "Git config"
     check_git_config "$git_config_manifest" "$hints_file"
@@ -3305,9 +3509,10 @@ check_wsl_mount() {
 }
 
 run_wsl_checks() {
-    local repos_manifest skip_manifest commands_manifest env_manifest git_config_manifest hints_file
+    local repos_manifest skip_manifest catchup_manifest commands_manifest env_manifest git_config_manifest hints_file
     repos_manifest=$(gar_combined_capability_manifest wsl machine-env-repos)
     skip_manifest=$(gar_resolve_manifest wsl machine-env-skip)
+    catchup_manifest=$(gar_resolve_manifest wsl machine-env-catchup)
     commands_manifest=$(gar_combined_capability_manifest wsl commands)
     env_manifest=$(gar_combined_capability_manifest wsl env)
     git_config_manifest=$(gar_resolve_manifest wsl git-config)
@@ -3325,16 +3530,17 @@ run_wsl_checks() {
     check_commands "$commands_manifest" "$hints_file"
 
     gar_section_begin "Machine environment repos"
-    check_machine_env_repos "$repos_manifest" "$skip_manifest"
+    check_machine_env_repos "$repos_manifest" "$skip_manifest" "$catchup_manifest"
 
     gar_section_begin "Git config"
     check_git_config "$git_config_manifest" "$hints_file"
 }
 
 run_synology_checks() {
-    local repos_manifest skip_manifest commands_manifest git_config_manifest hints_file
+    local repos_manifest skip_manifest catchup_manifest commands_manifest git_config_manifest hints_file
     repos_manifest=$(gar_combined_capability_manifest synology machine-env-repos)
     skip_manifest=$(gar_resolve_manifest synology machine-env-skip)
+    catchup_manifest=$(gar_resolve_manifest synology machine-env-catchup)
     commands_manifest=$(gar_combined_capability_manifest synology commands)
     git_config_manifest=$(gar_resolve_manifest synology git-config)
     hints_file="$GAR_DIR/synology.install-hints"
@@ -3343,7 +3549,7 @@ run_synology_checks() {
     check_commands "$commands_manifest" "$hints_file"
 
     gar_section_begin "Machine environment repos"
-    check_machine_env_repos "$repos_manifest" "$skip_manifest"
+    check_machine_env_repos "$repos_manifest" "$skip_manifest" "$catchup_manifest"
 
     gar_section_begin "Git config"
     check_git_config "$git_config_manifest" "$hints_file"
