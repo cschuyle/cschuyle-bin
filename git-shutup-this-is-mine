@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# git-shutup-this-is-mine — a friendly front-end for "files I edit freely but
+# never want committed or pushed, yet still want to see what changed upstream."
+#
+# The mechanism is git's skip-worktree bit (the only one that keeps the file
+# tracked, hides your edits from commit/push, AND still lets you inspect the
+# upstream version). This tool drives the low-level `git-better-skip-worktree` script
+# for the mechanism and adds an `upstream` view that plain skip-worktree can't
+# give you. It is stateless: `list` scans git's live state, so a file's
+# "mechanism" is simply whatever it's actually in.
+
+usage() {
+  cat <<'EOF'
+git-shutup-this-is-mine — files I edit freely but never commit/push, while
+still being able to see what changed upstream.
+
+Invoke as `git shutup-this-is-mine <subcommand>`.
+
+  add <path>...        Mark file(s) as "mine": git stops noticing your local
+                       edits (they are never staged or pushed). Uses
+                       skip-worktree under the hood.
+
+  list                 Show every file in this repo that git has been told to
+                       leave alone, and by which mechanism:
+                         skip-worktree   — tracked, edits hidden (the good one;
+                                           supports `diff` and `upstream`)
+                         local-exclude   — .git/info/exclude entry (untracked;
+                                           no upstream to compare)
+                         other           — e.g. assume-unchanged (unsafe cousin
+                                           of skip-worktree)
+                       skip-worktree rows are tagged SAME/DIFF vs the committed
+                       version.
+
+  diff <path>          Show YOUR local edit to a "mine" file vs the committed
+                       version (sees through the skip bit). skip-worktree only.
+
+  upstream [<path>]    Fetch, then show what changed ON THE REMOTE for a "mine"
+                       file, ignoring your local edit. With no path, does every
+                       skip-worktree'd file. This is the thing plain
+                       skip-worktree can't show you. skip-worktree only.
+
+  undo [<path>...]     Stop treating file(s) as mine (clears skip-worktree; file
+                       contents are left as-is). With no path, undoes all
+                       skip-worktree'd files.
+
+  pull [--dry-run]     Update the current branch without the usual abort when
+                       the remote changed a "mine" file: round-trips your edits
+                       through a stash across a fast-forward, then re-hides them.
+
+  -h | --help
+EOF
+}
+
+# Locate the low-level mechanism script. Prefer a sibling next to this file
+# (works regardless of PATH ordering); fall back to git's subcommand dispatch.
+script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+if [[ -x "$script_dir/git-better-skip-worktree" ]]; then
+  skipwt() { "$script_dir/git-better-skip-worktree" "$@"; }
+elif command -v git-better-skip-worktree >/dev/null 2>&1; then
+  skipwt() { git-better-skip-worktree "$@"; }
+else
+  skipwt() { git better-skip-worktree "$@"; }
+fi
+
+require_repo() {
+  git rev-parse --show-toplevel >/dev/null 2>&1 || {
+    echo "ERROR: not inside a git repository." >&2; exit 1; }
+}
+
+# --- helpers for the unified `list` view ------------------------------------
+
+# skip-worktree'd paths: 'S' flag in `git ls-files -v`.
+list_skip_worktree() { git ls-files -v | grep '^S' | cut -c3-; }
+
+# assume-unchanged'd paths: a lowercase flag letter in `git ls-files -v`
+# (e.g. 'h'). These are the "other" mechanism — recognized but discouraged.
+list_assume_unchanged() { git ls-files -v | grep '^[a-z]' | cut -c3-; }
+
+# local-exclude patterns: non-comment, non-blank lines of .git/info/exclude.
+# These are patterns, not necessarily paths, and apply only to untracked files;
+# we surface them verbatim so they show up in the unified view.
+list_local_exclude() {
+  local gitdir excl
+  gitdir=$(git rev-parse --git-dir 2>/dev/null) || return 0
+  excl="$gitdir/info/exclude"
+  [[ -f "$excl" ]] || return 0
+  grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$excl" || true
+}
+
+# SAME/DIFF for a skip-worktree'd file: compare working-tree content hash to the
+# committed HEAD blob (git's diff plumbing honors the skip bit; hashes don't).
+head_status() {
+  local f="$1" wt head
+  wt=$(git hash-object -- "$f" 2>/dev/null) || { echo '----'; return; }
+  head=$(git rev-parse "HEAD:$f" 2>/dev/null) || { echo '----'; return; }
+  [[ "$wt" != "$head" ]] && echo 'DIFF' || echo 'SAME'
+}
+
+cmd="${1:-}"
+case "${cmd,,}" in
+  -h|--help|"")
+    usage
+    ;;
+
+  add)
+    shift
+    if [[ "$#" -eq 0 ]]; then
+      echo "usage: git shutup-this-is-mine add <path>..." >&2
+      exit 2
+    fi
+    require_repo
+    skipwt skip "$@"
+    echo
+    echo "These files are now yours. Edit them freely — git won't stage or push"
+    echo "your changes. See upstream changes with: git shutup-this-is-mine upstream"
+    ;;
+
+  list)
+    shift
+    require_repo
+
+    # Gather (status, mechanism, path) rows across all mechanisms.
+    statuses=() ; mechs=() ; paths=()
+
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      statuses+=("$(head_status "$f")")
+      mechs+=("skip-worktree")
+      paths+=("$f")
+    done < <(list_skip_worktree)
+
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      statuses+=("----")
+      mechs+=("other (assume-unchanged)")
+      paths+=("$f")
+    done < <(list_assume_unchanged)
+
+    while IFS= read -r f; do
+      [[ -z "$f" ]] && continue
+      statuses+=("----")
+      mechs+=("local-exclude")
+      paths+=("$f")
+    done < <(list_local_exclude)
+
+    if [[ "${#paths[@]}" -eq 0 ]]; then
+      echo "No files are 'mine' in this repo."
+      echo "Mark one with: git shutup-this-is-mine add <path>"
+      exit 0
+    fi
+
+    # Width the mechanism column to fit; print an aligned table.
+    mw=0
+    for m in "${mechs[@]}"; do (( ${#m} > mw )) && mw=${#m}; done
+    for i in "${!paths[@]}"; do
+      printf '%-4s  %-*s  %s\n' \
+        "${statuses[$i]}" "$mw" "${mechs[$i]}" "${paths[$i]}"
+    done
+    echo
+    echo "(Only skip-worktree files support 'diff' and 'upstream'.)"
+    ;;
+
+  diff)
+    shift
+    if [[ "$#" -ne 1 ]]; then
+      echo "usage: git shutup-this-is-mine diff <path>" >&2
+      exit 2
+    fi
+    require_repo
+    skipwt diff "$1"
+    ;;
+
+  upstream)
+    shift
+    if [[ "$#" -gt 1 ]]; then
+      echo "usage: git shutup-this-is-mine upstream [<path>]" >&2
+      exit 2
+    fi
+    require_repo
+
+    upstream_ref=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null) || {
+      branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')
+      echo "ERROR: branch '$branch' has no upstream configured." >&2
+      echo "       set one with: git branch --set-upstream-to=origin/$branch" >&2
+      exit 1; }
+    remote=$(git rev-parse --abbrev-ref '@{upstream}' | cut -d/ -f1)
+
+    # Decide the target set: the named path, or all skip-worktree'd files.
+    if [[ "$#" -eq 1 ]]; then
+      TARGETS=("$1")
+    else
+      mapfile -t TARGETS < <(list_skip_worktree)
+      if [[ "${#TARGETS[@]}" -eq 0 || -z "${TARGETS[0]:-}" ]]; then
+        echo "No skip-worktree'd files to compare against upstream."
+        echo "Mark one with: git shutup-this-is-mine add <path>"
+        exit 0
+      fi
+    fi
+
+    echo "Fetching $remote ..."
+    git fetch "$remote"
+    echo
+
+    for f in "${TARGETS[@]}"; do
+      [[ -z "$f" ]] && continue
+      # Does the file exist in both HEAD and upstream? If not, say so plainly.
+      if ! git rev-parse "HEAD:$f" >/dev/null 2>&1; then
+        echo "== $f =="
+        echo "  (not tracked at HEAD; nothing to compare)"
+        echo
+        continue
+      fi
+      if ! git rev-parse "$upstream_ref:$f" >/dev/null 2>&1; then
+        echo "== $f =="
+        echo "  (not present upstream at $upstream_ref)"
+        echo
+        continue
+      fi
+      echo "== $f =="
+      # Which upstream commits touched it (context), then the committed-vs-committed
+      # delta. Both read committed blobs, so your local working edit is ignored.
+      log=$(git log --oneline "HEAD..$upstream_ref" -- "$f" || true)
+      if [[ -n "$log" ]]; then
+        echo "  upstream commits touching this file:"
+        printf '    %s\n' "$log"
+      fi
+      if git diff --quiet "HEAD:$f" "$upstream_ref:$f" 2>/dev/null; then
+        echo "  (no upstream change vs your committed version)"
+      else
+        git diff "HEAD:$f" "$upstream_ref:$f" || true
+      fi
+      echo
+    done
+    ;;
+
+  undo)
+    shift
+    require_repo
+    skipwt undo "$@"
+    ;;
+
+  pull)
+    shift
+    require_repo
+    skipwt sync "$@"
+    ;;
+
+  *)
+    echo "Unknown command: $cmd" >&2
+    echo "Try: git shutup-this-is-mine --help" >&2
+    exit 1
+    ;;
+esac

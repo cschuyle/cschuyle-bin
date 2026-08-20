@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+git-better-skip-worktree — inspect and control files marked
+`git update-index --skip-worktree` in the current repo.
+
+skip-worktree hides local edits from `git status`, `git diff`, `git add -A`,
+etc. — git reports such a file as unchanged even when it isn't. These
+subcommands see through the flag.
+
+Usage (invoke as `git better-skip-worktree <subcommand>`):
+
+  git better-skip-worktree list           # list all skip-worktree'd files, each prefixed
+                                          #   SAME (matches HEAD) or DIFF (locally modified)
+  git better-skip-worktree diff <file>    # show the real diff of a skip-worktree'd file
+                                          #   (errors if <file> isn't skip-worktree'd)
+  git better-skip-worktree skip <path>... # set skip-worktree on the given files so git
+                                          #   ignores local changes to them
+  git better-skip-worktree undo [<path>...] # clear skip-worktree on the given files, or on
+                                          #   ALL of them if none are named (file contents
+                                          #   are left as-is; git just tracks them again)
+  git better-skip-worktree sync [--dry-run] # propagate upstream changes into locally-modified
+                                          #   skip-worktree'd files. Round-trips their edits
+                                          #   through a stash across a fast-forward of the
+                                          #   current branch: clears the skip bit on the DIFF
+                                          #   files, stashes them, `git pull --ff-only`, pops,
+                                          #   then restores the skip bit. Stops with resume
+                                          #   instructions on any conflict or non-fast-forward.
+                                          #   --dry-run prints the DIFF set and planned pull
+                                          #   without touching anything.
+
+  git better-skip-worktree -h | --help
+
+See also `git shutup-this-is-mine`, a friendlier front-end for the
+"files I edit but never commit/push, yet still want to see upstream changes to"
+workflow (adds an `upstream` diff view on top of these primitives).
+EOF
+}
+
+git rev-parse --show-toplevel >/dev/null 2>&1 || {
+  echo "ERROR: not inside a git repository." >&2; exit 1; }
+
+# skip-worktree entries are flagged 'S' in the low-order bit of `git ls-files -v`.
+list_skipped() { git ls-files -v | grep '^S' | cut -c3-; }
+
+# True if the file is currently skip-worktree'd.
+is_skipped() {
+  local f="$1"
+  git ls-files -v -- "$f" 2>/dev/null | grep -q '^S'
+}
+
+# True if the working-tree content of a (skip-worktree'd) file differs from
+# its committed HEAD blob. git's diff plumbing honors the skip bit, so we
+# compare content hashes directly, which does not.
+differs_from_head() {
+  local f="$1" wt head
+  wt=$(git hash-object -- "$f" 2>/dev/null) || return 0
+  head=$(git rev-parse "HEAD:$f" 2>/dev/null) || return 0
+  [[ "$wt" != "$head" ]]
+}
+
+# Sub-subcommand is matched case-insensitively; file args stay case-sensitive.
+subcmd="${1:-}"
+case "${subcmd,,}" in
+  -h|--help)
+    usage
+    ;;
+
+  list|"")
+    mapfile -t SKIPPED < <(list_skipped)
+    if [[ "${#SKIPPED[@]}" -eq 0 || -z "${SKIPPED[0]:-}" ]]; then
+      echo "No files are currently skip-worktree'd."
+      exit 0
+    fi
+    for f in "${SKIPPED[@]}"; do
+      if differs_from_head "$f"; then
+        printf 'DIFF %s\n' "$f"
+      else
+        printf 'SAME %s\n' "$f"
+      fi
+    done
+    ;;
+
+  diff)
+    shift
+    if [[ "$#" -ne 1 ]]; then
+      echo "usage: git better-skip-worktree diff <file>" >&2
+      exit 2
+    fi
+    file="$1"
+    if ! is_skipped "$file"; then
+      echo "ERROR: '$file' is not skip-worktree'd." >&2
+      echo "       (see 'git better-skip-worktree list'; git diff already shows non-skipped files)" >&2
+      exit 1
+    fi
+    # git diff honors the skip bit, so temporarily clear it, diff, then restore.
+    # The trap guarantees the flag is put back even on error or interrupt.
+    trap 'git update-index --skip-worktree -- "$file" >/dev/null 2>&1 || true' EXIT
+    git update-index --no-skip-worktree -- "$file"
+    git diff -- "$file"
+    ;;
+
+  skip)
+    shift
+    if [[ "$#" -eq 0 ]]; then
+      echo "usage: git better-skip-worktree skip <path>..." >&2
+      exit 2
+    fi
+    for f in "$@"; do
+      git update-index --skip-worktree -- "$f" && echo "set skip-worktree: $f"
+    done
+    echo
+    echo "Done. 'git status' will now ignore local changes to these files."
+    ;;
+
+  undo)
+    shift
+    if [[ "$#" -gt 0 ]]; then
+      TARGETS=("$@")
+    else
+      mapfile -t TARGETS < <(list_skipped)
+    fi
+    if [[ "${#TARGETS[@]}" -eq 0 || -z "${TARGETS[0]:-}" ]]; then
+      echo "Nothing to undo — no skip-worktree files."
+      exit 0
+    fi
+    for f in "${TARGETS[@]}"; do
+      git update-index --no-skip-worktree "$f" && echo "cleared skip-worktree: $f"
+    done
+    echo
+    echo "Done. 'git status' now tracks changes to these files again."
+    echo "Their contents are UNCHANGED — use 'git checkout -- <file>' to discard edits."
+    ;;
+
+  sync)
+    shift
+    dry_run=false
+    case "${1:-}" in
+      --dry-run) dry_run=true; shift ;;
+      "") ;;
+      *) echo "usage: git better-skip-worktree sync [--dry-run]" >&2; exit 2 ;;
+    esac
+
+    # --- 1. Preflight -----------------------------------------------------
+    branch=$(git rev-parse --abbrev-ref HEAD)
+    if [[ "$branch" == "HEAD" ]]; then
+      echo "ERROR: detached HEAD — check out a branch before syncing." >&2
+      exit 1
+    fi
+    upstream=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null) || {
+      echo "ERROR: branch '$branch' has no upstream configured." >&2
+      echo "       set one with: git branch --set-upstream-to=origin/$branch" >&2
+      exit 1; }
+    # A prior aborted run may have left an unresolved stash pop in progress.
+    if git ls-files --unmerged | grep -q .; then
+      echo "ERROR: the working tree has unmerged paths (a conflict is in progress)." >&2
+      echo "       Resolve them, restore skip-worktree on the affected files with" >&2
+      echo "       'git better-skip-worktree skip <file>...', then re-run." >&2
+      exit 1
+    fi
+
+    # --- 2. Discover the DIFF set ----------------------------------------
+    mapfile -t SKIPPED < <(list_skipped)
+    DIFF_SET=()
+    for f in "${SKIPPED[@]}"; do
+      [[ -z "$f" ]] && continue
+      differs_from_head "$f" && DIFF_SET+=("$f")
+    done
+
+    # --- 3. Dry run -------------------------------------------------------
+    if $dry_run; then
+      echo "Branch:   $branch"
+      echo "Upstream: $upstream"
+      echo "Planned:  git pull --ff-only"
+      if [[ "${#DIFF_SET[@]}" -eq 0 ]]; then
+        echo "DIFF set: (none — no skip-worktree'd files differ from HEAD)"
+      else
+        echo "Would round-trip these skip-worktree'd files through a stash:"
+        printf '  DIFF %s\n' "${DIFF_SET[@]}"
+      fi
+      exit 0
+    fi
+
+    # --- 4. Clear the skip bit on the DIFF set ---------------------------
+    if [[ "${#DIFF_SET[@]}" -gt 0 ]]; then
+      git update-index --no-skip-worktree -- "${DIFF_SET[@]}"
+      echo "Cleared skip-worktree on ${#DIFF_SET[@]} file(s) for the sync."
+    else
+      echo "No skip-worktree'd files differ from HEAD; fast-forwarding only."
+    fi
+
+    # Helper: re-set skip-worktree on the cleared set. Used on the clean path.
+    restore_flags() {
+      [[ "${#DIFF_SET[@]}" -eq 0 ]] && return 0
+      git update-index --skip-worktree -- "${DIFF_SET[@]}"
+      echo "Restored skip-worktree on ${#DIFF_SET[@]} file(s)."
+    }
+
+    # --- 5. Stash only the DIFF paths ------------------------------------
+    stashed=false
+    if [[ "${#DIFF_SET[@]}" -gt 0 ]]; then
+      if git diff --quiet -- "${DIFF_SET[@]}"; then
+        # Cleared files that git now sees as unmodified — shouldn't happen
+        # given differs_from_head, but don't create an empty stash.
+        echo "WARNING: cleared files show no diff to stash; skipping stash step." >&2
+      else
+        ts=$(date +%Y-%m-%d_%H:%M:%S)
+        git stash push -m "git-better-skip-worktree sync $branch $ts" -- "${DIFF_SET[@]}"
+        stashed=true
+      fi
+    fi
+
+    # --- 6. Fast-forward --------------------------------------------------
+    if ! git pull --ff-only; then
+      echo >&2
+      echo "ERROR: 'git pull --ff-only' failed (branch diverged or non-fast-forward)." >&2
+      if $stashed; then
+        echo "       Your local edits are safe in the stash. To recover manually:" >&2
+        echo "         git stash pop" >&2
+        echo "         git better-skip-worktree skip ${DIFF_SET[*]}" >&2
+      else
+        echo "       Re-apply the skip bit with: git better-skip-worktree skip ${DIFF_SET[*]}" >&2
+      fi
+      exit 1
+    fi
+
+    # --- 7. Pop the stash -------------------------------------------------
+    if $stashed; then
+      if ! git stash pop; then
+        echo >&2
+        echo "CONFLICT: local edits could not be cleanly reapplied after the update." >&2
+        echo "  Conflicted files are left un-flagged and in-conflict on purpose." >&2
+        echo "  1. Resolve the conflicts in your editor (they overlap upstream's changes)." >&2
+        echo "  2. Once each file looks right, drop the leftover stash entry:" >&2
+        echo "         git stash drop" >&2
+        echo "  3. Restore skip-worktree on the round-tripped files:" >&2
+        echo "         git better-skip-worktree skip ${DIFF_SET[*]}" >&2
+        exit 1
+      fi
+    fi
+
+    # --- 8. Restore the skip bit (clean path only) -----------------------
+    restore_flags
+
+    # --- 9. Report --------------------------------------------------------
+    echo
+    if [[ "${#DIFF_SET[@]}" -gt 0 ]]; then
+      echo "Done. Synced $branch with $upstream and reapplied local edits to:"
+      printf '  %s\n' "${DIFF_SET[@]}"
+    else
+      echo "Done. Synced $branch with $upstream (no skip-worktree edits to reapply)."
+    fi
+    ;;
+
+  *)
+    echo "Unknown subcommand: $subcmd" >&2
+    echo "Try: git better-skip-worktree --help" >&2
+    exit 1
+    ;;
+esac

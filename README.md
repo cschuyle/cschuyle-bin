@@ -42,9 +42,21 @@ Scan a tree for paths that may break on exFAT or Windows: reserved names, invali
 
 Audit machine configuration against manifests in `gar.d/`. Desired state is the platform/shared base plus an additive union of role overlays enabled in `~/.config/gar/roles` (one role id per line; missing file means no roles). Role `my-data-client` adds the dragnon/moocho/My-Data stack: machine-env repos (`dragnon-config`, `datagator`, `moocho`, `moocho-overseer`, `My-Data`, `trovester-bin`), secrets (`DRAGNON_SYNOLOGY_*`), env (`DRAGNON_*`), login item Proton VPN, app SynologyAssistant, and Homebrew `ffmpeg`. Role `personal-machine` adds personal apps (Opera, Waterfox, WhatsApp, ProtonVPN, qBittorrent, Spotify, VLC, HandBrake, Kindle, Karakeep, Ground News, Amphetamine, Mondly Languages, Telegram), the `HandBrakeCLI` command, and Homebrew `handbrake`. Omit a role to exclude its items. Mac: Homebrew, secrets, env, Java, apps, browser extensions, commands, machine environment repos, settings. Synology: commands, machine environment repos, git config. WSL: env, `/mnt/z` mount, commands, machine environment repos, git config. `gar apps` lists tracked GUI apps; `gar info` (no name) shows the platform info page from `gar.d/<platform>.info` (empty by default); `gar info NAME` shows install hints and plain-text general info from `gar.d/*.info.d/`. In an interactive terminal, offers to pull `main` for machine env repos with no uncommitted changes that are behind `origin/main`, and offers to fix settings warnings it can apply automatically (`defaults` values, Cursor/VS Code `settings.json` keys, and the menu-bar volume toggle).
 
+### git-better-skip-worktree
+
+Low-level CLI for git's `skip-worktree` bit (files git is told to ignore local edits to). Invokable as `git better-skip-worktree`. `list` shows skip-worktree'd files as SAME/DIFF vs HEAD; `diff <file>` shows a skip-worktree'd file's real diff; `skip <path>...` / `undo [<path>...]` set/clear the bit; `sync` round-trips locally-modified skip-worktree'd files through a stash across a fast-forward so upstream changes come in without losing your edits.
+
+### git-better-worktree
+
+Better views of git worktrees. Aliased `gbw`; invokable as `git better-worktree`. `gbw list` is like `git worktree list` but adds a MAIN / linked column so you can tell the main working tree from the linked ones. (Skip-worktree management, formerly `gbw skip`, now lives in `git-better-skip-worktree` / `git-shutup-this-is-mine`.)
+
 ### git-pull-repos.sh
 
 In the current directory, run `git pull -r` in every immediate subdirectory that is a git repo.
+
+### git-shutup-this-is-mine
+
+Manage files you edit freely but never want committed or pushed — while still being able to see what changed to them upstream. Invokable as `git shutup-this-is-mine`. `add` marks a file as yours (via skip-worktree, so git ignores your edits); `list` shows every "mine" file and its mechanism (skip-worktree / local-exclude / other); `diff` shows your local edit; `upstream` fetches and shows what changed on the remote for the file, ignoring your local edit; `pull` updates the branch without the usual abort when the remote changed a "mine" file; `undo` stops treating a file as yours. A friendly front-end over `git-better-skip-worktree`.
 
 ### just-the-meat
 

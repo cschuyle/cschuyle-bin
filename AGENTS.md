@@ -108,15 +108,29 @@ skip-worktree'd files untouched). A genuine tracked edit takes precedence and
 still shows `WARN uncommitted changes`.
 
 `gar` does not manage the skip-worktree flag itself. The standalone
-`git-better-worktree` script (usable as `git better-worktree`; the user aliases
-it `gbw`) is the CLI for it, under its `skip` subcommand: `gbw skip list` prints
-every skip-worktree'd file prefixed `SAME`/`DIFF`, `gbw skip diff <file>` shows
-the real diff (temporarily clearing the flag, restoring via a trap),
-`gbw skip skip <path>...` sets skip-worktree on the given files, and
-`gbw skip undo [<path>...]` clears the flag (on the named files, or all of them
-if none are named). (`gbw` also has a `list` subcommand that annotates
-`git worktree list` with a MAIN/linked column — unrelated to skip-worktree.)
-Note `gbw` operates on the *current* repo (`git rev-parse
+`git-better-skip-worktree` script (usable as `git better-skip-worktree`) is the low-level CLI
+for it: `git better-skip-worktree list` prints every skip-worktree'd file prefixed
+`SAME`/`DIFF`, `git better-skip-worktree diff <file>` shows the real diff (temporarily
+clearing the flag, restoring via a trap), `git better-skip-worktree skip <path>...`
+sets skip-worktree on the given files, `git better-skip-worktree undo [<path>...]`
+clears the flag (on the named files, or all of them if none are named), and
+`git better-skip-worktree sync [--dry-run]` round-trips locally-modified
+skip-worktree'd files through a stash across a fast-forward. (This machinery
+used to live in `git-better-worktree` as its `gbw skip` subcommand; `gbw` now
+only has its `list` subcommand, which annotates `git worktree list` with a
+MAIN/linked column — unrelated to skip-worktree.)
+
+`git-shutup-this-is-mine` (usable as `git shutup-this-is-mine`) is a friendlier
+front-end over `git-better-skip-worktree` for the "files I edit but never commit/push,
+yet still want to see upstream changes to" workflow. Its `add`/`undo`/`diff`/
+`pull` delegate to `git-better-skip-worktree`; its `list` is stateless and unions all
+"leave-this-file-alone" mechanisms it finds (skip-worktree, `.git/info/exclude`
+local-excludes, and assume-unchanged labeled `other`); and its `upstream
+[<path>]` fetches then runs `git diff HEAD:<path> @{u}:<path>` to show what
+changed on the remote while ignoring your local working-tree edit — the piece
+plain skip-worktree can't give you.
+
+Note these tools operate on the *current* repo (`git rev-parse
 --show-toplevel`), whereas `gar` inspects arbitrary repos *by path* via
 `git -C`, so `gar` keeps its own `gar_repo_skip_worktree_modified_files` (same
-`hash-object` vs `HEAD:` technique) rather than shelling out to `gbw`.
+`hash-object` vs `HEAD:` technique) rather than shelling out to them.
