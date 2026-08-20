@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -o errexit # set -e
+set -o pipefail
+
+# Read an AWS config setting for a profile, printing nothing (not failing) when
+# the setting is absent. `aws configure get` exits non-zero for a missing key,
+# which would trip `errexit` — so swallow the failure.
+config_get() {
+  aws configure get "$1" --profile "$2" 2>/dev/null || true
+}
+
+# Collect profiles once so we can iterate twice (alias grouping, then status).
+mapfile -t profiles < <(aws configure list-profiles)
+
+# Build an identity -> profiles map. Two profiles are aliases when they resolve
+# to the same identity: SSO account+role, or (non-SSO) access key / role ARN.
+# A profile with no resolvable identity key is left ungrouped.
+declare -A alias_group
+for profile in "${profiles[@]}"; do
+  account="$(config_get sso_account_id "$profile")"
+  role="$(config_get sso_role_name "$profile")"
+  key="$account|$role"
+  if [[ "$key" == "|" ]]; then
+    # No SSO identity; fall back to static credential / assumed-role identity.
+    akid="$(config_get aws_access_key_id "$profile")"
+    role_arn="$(config_get role_arn "$profile")"
+    key="$akid|$role_arn"
+    [[ "$key" == "|" ]] && continue # nothing to group on
+  fi
+  alias_group["$key"]+="$profile"$'\n'
+done
+
+# Emit an alias header for each identity shared by two or more profiles.
+for key in "${!alias_group[@]}"; do
+  members="${alias_group[$key]}"
+  # Count members (lines) for this identity.
+  count="$(printf '%s' "$members" | grep -c .)"
+  if (( count >= 2 )); then
+    echo "Note: these profiles are aliases (same account/role):"
+    printf '%s' "$members" | while IFS= read -r name; do
+      [[ -n "$name" ]] && echo "  - $name"
+    done
+    echo
+  fi
+done
+
+for profile in "${profiles[@]}"; do
+  echo -n "$profile: "
+  if aws sts get-caller-identity --profile "$profile" >/dev/null 2>&1; then
+    echo "ACTIVE"
+  else
+    echo "EXPIRED / UNAUTHENTICATED"
+  fi
+done
