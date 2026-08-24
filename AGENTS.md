@@ -125,7 +125,21 @@ front-end over `git-better-skip-worktree` for the "files I edit but never commit
 yet still want to see upstream changes to" workflow. Its `add`/`undo`/`diff`/
 `pull` delegate to `git-better-skip-worktree`; its `list` is stateless and unions all
 "leave-this-file-alone" mechanisms it finds (skip-worktree, `.git/info/exclude`
-local-excludes, and assume-unchanged labeled `other`); and its `upstream
+local-excludes, and assume-unchanged labeled `other`); its `convert <path>...
+<dest>` moves file(s) between those three mechanisms (`<dest>` is
+`skip-worktree` / `assume-unchanged` / `local-gitignore`, aliases `sw`/`au`/`lx`),
+auto-detecting each file's current source mechanism. `convert` refuses a file
+whose working tree differs from HEAD (all directions, so no local edit is
+silently exposed or dropped) and refuses converting a local-gitignore'd file
+(it's untracked) into a tracked-index mechanism. Converting *into*
+local-gitignore untracks the file (`git rm --cached`, working copy kept) and
+appends a root-anchored `/path` line to `.git/info/exclude` (removal on the way
+out matches only exact `path`/`/path` lines, never globs) — but this is refused
+for a file that exists in HEAD: git never ignores a tracked file, and
+untracking a committed one stages a deletion a push would propagate, so
+committed files must stay skip-worktree. (In practice this makes `→
+local-gitignore` apply only to files not in HEAD, e.g. added-but-never-committed
+entries.) Its `upstream
 [<path>]` fetches then runs `git diff HEAD:<path> @{u}:<path>` to show what
 changed on the remote while ignoring your local working-tree edit — the piece
 plain skip-worktree can't give you.

@@ -56,7 +56,7 @@ In the current directory, run `git pull -r` in every immediate subdirectory that
 
 ### git-shutup-this-is-mine
 
-Manage files you edit freely but never want committed or pushed — while still being able to see what changed to them upstream. Invokable as `git shutup-this-is-mine`. `add` marks a file as yours (via skip-worktree, so git ignores your edits); `list` shows every "mine" file and its mechanism (skip-worktree / local-exclude / other); `diff` shows your local edit; `upstream` fetches and shows what changed on the remote for the file, ignoring your local edit; `pull` updates the branch without the usual abort when the remote changed a "mine" file; `undo` stops treating a file as yours. A friendly front-end over `git-better-skip-worktree`.
+Manage files you edit freely but never want committed or pushed — while still being able to see what changed to them upstream. Invokable as `git shutup-this-is-mine`. `add` marks a file as yours (via skip-worktree, so git ignores your edits); `list` shows every "mine" file and its mechanism (skip-worktree / local-exclude / other); `diff` shows your local edit; `convert <path>... <dest>` moves file(s) between mechanisms (`skip-worktree` / `assume-unchanged` / `local-gitignore`), auto-detecting the source — converting into local-gitignore untracks the file (`git rm --cached`, contents kept) and adds it to `.git/info/exclude`; `upstream` fetches and shows what changed on the remote for the file, ignoring your local edit; `pull` updates the branch without the usual abort when the remote changed a "mine" file; `undo` stops treating a file as yours. A friendly front-end over `git-better-skip-worktree`.
 
 ### just-the-meat
 

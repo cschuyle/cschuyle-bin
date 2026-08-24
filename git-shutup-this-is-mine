@@ -36,6 +36,21 @@ Invoke as `git shutup-this-is-mine <subcommand>`.
   diff <path>          Show YOUR local edit to a "mine" file vs the committed
                        version (sees through the skip bit). skip-worktree only.
 
+  convert <path>... <dest>
+                       Move file(s) from their current mechanism to <dest>, one
+                       of: skip-worktree | assume-unchanged | local-gitignore
+                       (aliases: sw, au, lx). The source mechanism is auto-
+                       detected. Refuses a file that differs from its committed
+                       version, and refuses converting a local-gitignore'd file
+                       (it's untracked) into a tracked-index mechanism.
+                       Converting INTO local-gitignore untracks the file
+                       (git rm --cached, contents kept) and adds it to
+                       .git/info/exclude — but only for files NOT in HEAD; a
+                       committed file is refused (git can't ignore a tracked
+                       file, and untracking it would stage a deletion that a
+                       push would propagate). Keep committed files as
+                       skip-worktree instead.
+
   upstream [<path>]    Fetch, then show what changed ON THE REMOTE for a "mine"
                        file, ignoring your local edit. With no path, does every
                        skip-worktree'd file. This is the thing plain
@@ -96,6 +111,53 @@ head_status() {
   wt=$(git hash-object -- "$f" 2>/dev/null) || { echo '----'; return; }
   head=$(git rev-parse "HEAD:$f" 2>/dev/null) || { echo '----'; return; }
   [[ "$wt" != "$head" ]] && echo 'DIFF' || echo 'SAME'
+}
+
+# --- helpers for `convert` --------------------------------------------------
+
+# Path to this repo's local-exclude file (.git/info/exclude); single source of
+# truth for the add/remove/detect helpers below.
+exclude_file() { echo "$(git rev-parse --git-dir)/info/exclude"; }
+
+# Which "mine" mechanism is <path> currently in? Echoes exactly one of:
+# skip-worktree / assume-unchanged / local-gitignore / none. Detection mirrors
+# the `list_*` detectors: uppercase 'S' = skip-worktree, lowercase flag letter
+# = assume-unchanged, an EXACT (non-glob) .git/info/exclude line = local-exclude.
+detect_mechanism() {
+  local f="$1" flag excl
+  flag=$(git ls-files -v -- "$f" 2>/dev/null | cut -c1) || flag=''
+  if [[ "$flag" == 'S' ]]; then
+    echo 'skip-worktree'; return
+  elif [[ "$flag" == [a-z] ]]; then
+    echo 'assume-unchanged'; return
+  fi
+  excl=$(exclude_file)
+  if [[ -f "$excl" ]] && grep -qxF -e "$f" -e "/$f" "$excl"; then
+    echo 'local-gitignore'; return
+  fi
+  echo 'none'
+}
+
+# Append a repo-root-anchored pattern (/<path>) to .git/info/exclude, unless an
+# exact line for this path is already present. Idempotent; creates the file.
+add_local_exclude() {
+  local f="$1" excl
+  excl=$(exclude_file)
+  if [[ -f "$excl" ]] && grep -qxF -e "$f" -e "/$f" "$excl"; then
+    return 0
+  fi
+  echo "/$f" >> "$excl"
+}
+
+# Remove lines that EXACTLY equal <path> or /<path> from .git/info/exclude,
+# leaving comments, blanks, and glob/pattern lines untouched.
+remove_local_exclude() {
+  local f="$1" excl tmp
+  excl=$(exclude_file)
+  [[ -f "$excl" ]] || return 0
+  tmp=$(mktemp "${excl}.XXXXXX")
+  grep -vxF -e "$f" -e "/$f" "$excl" > "$tmp" || true
+  mv "$tmp" "$excl"
 }
 
 cmd="${1:-}"
@@ -170,6 +232,104 @@ case "${cmd,,}" in
     fi
     require_repo
     skipwt diff "$1"
+    ;;
+
+  convert)
+    shift
+    if [[ "$#" -lt 2 ]]; then
+      echo "usage: git shutup-this-is-mine convert <path>... <dest>" >&2
+      echo "  <dest>: skip-worktree | assume-unchanged | local-gitignore" >&2
+      exit 2
+    fi
+    require_repo
+
+    # Last argument is the destination mechanism; the rest are paths.
+    dest_raw="${*: -1}"
+    set -- "${@:1:$#-1}"
+    case "${dest_raw,,}" in
+      skip-worktree|sw|skip)                          dest='skip-worktree' ;;
+      assume-unchanged|au|assume)                     dest='assume-unchanged' ;;
+      local-gitignore|local-exclude|lx|exclude|gitignore) dest='local-gitignore' ;;
+      *)
+        echo "Unknown destination: $dest_raw" >&2
+        echo "  <dest>: skip-worktree | assume-unchanged | local-gitignore" >&2
+        exit 2
+        ;;
+    esac
+
+    failed=0
+    for f in "$@"; do
+      src=$(detect_mechanism "$f")
+
+      if [[ "$src" == 'none' ]]; then
+        echo "ERROR: $f — not currently 'mine' (skip-worktree / assume-unchanged /" >&2
+        echo "       local-gitignore); nothing to convert." >&2
+        failed=1
+        continue
+      fi
+
+      if [[ "$src" == "$dest" ]]; then
+        echo "$f: already $dest — nothing to do."
+        continue
+      fi
+
+      # LX files are untracked; they can't take a tracked-index flag directly.
+      if [[ "$src" == 'local-gitignore' && "$dest" != 'local-gitignore' ]]; then
+        echo "ERROR: $f — is local-gitignore'd (untracked); can't set $dest on it." >&2
+        echo "       'git add' and commit it first if you want it tracked again." >&2
+        failed=1
+        continue
+      fi
+
+      # local-gitignore only suppresses UNtracked files, so it can't hold a file
+      # that's in HEAD without 'git rm --cached' — which leaves a staged deletion
+      # that a commit+push would remove for everyone. Refuse committed files.
+      if [[ "$dest" == 'local-gitignore' ]] && git rev-parse -q --verify "HEAD:$f" >/dev/null 2>&1; then
+        echo "ERROR: $f — is committed (exists in HEAD); can't local-gitignore it." >&2
+        echo "       git never ignores tracked files, and untracking it would stage" >&2
+        echo "       a deletion that a commit+push would remove for everyone." >&2
+        echo "       Keep it as skip-worktree instead (that hides your edits safely)." >&2
+        failed=1
+        continue
+      fi
+
+      # Refuse if the working copy differs from HEAD (avoids exposing/dropping a
+      # local edit during the conversion). Applied to all directions for
+      # consistency; for →local-gitignore the committed-file guard above fires
+      # first, so this covers the SW↔AU tracked swaps.
+      if [[ "$(head_status "$f")" == 'DIFF' ]]; then
+        echo "ERROR: $f — differs from the committed version; refusing to convert." >&2
+        echo "       reconcile first (see: git shutup-this-is-mine diff $f)." >&2
+        failed=1
+        continue
+      fi
+
+      # Clear the source flag/entry.
+      case "$src" in
+        skip-worktree)    skipwt undo "$f" >/dev/null ;;
+        assume-unchanged) git update-index --no-assume-unchanged -- "$f" ;;
+        local-gitignore)  remove_local_exclude "$f" ;;
+      esac
+
+      # Apply the destination.
+      case "$dest" in
+        skip-worktree)    skipwt skip "$f" >/dev/null ;;
+        assume-unchanged) git update-index --assume-unchanged -- "$f" ;;
+        local-gitignore)
+          git rm --cached --quiet -- "$f"
+          add_local_exclude "$f"
+          ;;
+      esac
+
+      echo "converted $f: $src → $dest"
+    done
+
+    if [[ "$dest" == 'local-gitignore' && "$failed" -eq 0 ]]; then
+      echo
+      echo "Now untracked + ignored. 'diff' and 'upstream' no longer apply to these."
+    fi
+
+    [[ "$failed" -eq 0 ]] || exit 1
     ;;
 
   upstream)
