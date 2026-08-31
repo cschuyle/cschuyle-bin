@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+set -o errexit
+set -o pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: spread-dir [--dry-run] SOURCE_DIR TARGET_DIR:WEIGHT TARGET_DIR:WEIGHT [TARGET_DIR:WEIGHT ...]
+
+Move each top-level entry (file or dir, non-recursive) of SOURCE_DIR into one
+of the given TARGET_DIRs. Entries are NOT bucketed by size or count evenly;
+each entry's name is hashed with SHA-256, and the hash value's position in
+its numeric range determines which target it lands in, proportional to the
+target's WEIGHT relative to the sum of all weights. Same name -> same target,
+every time.
+
+At least two TARGET_DIR:WEIGHT pairs are required. WEIGHT must be a positive
+integer. Every TARGET_DIR must already exist; SOURCE_DIR must exist and be a
+directory.
+
+  --dry-run   Print the planned name -> target mapping and summary counts
+              without moving anything.
+
+Example:
+  spread-dir A B:30 C:70
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+dry_run=0
+args=()
+for arg in "$@"; do
+  if [[ "$arg" == "--dry-run" ]]; then
+    dry_run=1
+  else
+    args+=("$arg")
+  fi
+done
+
+if (( ${#args[@]} < 3 )); then
+  usage >&2
+  exit 1
+fi
+
+source_dir="${args[0]}"
+target_specs=("${args[@]:1}")
+
+if [[ ! -d "$source_dir" ]]; then
+  echo "spread-dir: source dir does not exist: $source_dir" >&2
+  exit 1
+fi
+
+target_dirs=()
+weights=()
+for spec in "${target_specs[@]}"; do
+  target="${spec%:*}"
+  weight="${spec##*:}"
+  if [[ "$target" == "$spec" || -z "$weight" ]]; then
+    echo "spread-dir: invalid TARGET_DIR:WEIGHT: $spec" >&2
+    exit 1
+  fi
+  if [[ ! "$weight" =~ ^[0-9]+$ ]] || (( weight == 0 )); then
+    echo "spread-dir: weight must be a positive integer: $spec" >&2
+    exit 1
+  fi
+  if [[ ! -d "$target" ]]; then
+    echo "spread-dir: target dir does not exist: $target" >&2
+    exit 1
+  fi
+  target_dirs+=("$target")
+  weights+=("$weight")
+done
+
+total_weight=0
+for weight in "${weights[@]}"; do
+  (( total_weight += weight ))
+done
+
+# Map SHA-256(name) into a 32-bit range, then partition that range into a
+# cutoff per target proportional to its weight. Multiply-then-divide keeps
+# the arithmetic well under bash's 64-bit signed range and makes the final
+# cutoff land exactly on RANGE.
+range=$((16#100000000))
+cutoffs=()
+cumulative=0
+for weight in "${weights[@]}"; do
+  (( cumulative += weight ))
+  cutoffs+=($(( cumulative * range / total_weight )))
+done
+
+if command -v sha256sum >/dev/null 2>&1; then
+  hash_name() { printf '%s' "$1" | sha256sum | cut -c1-8; }
+else
+  hash_name() { printf '%s' "$1" | shasum -a 256 | cut -c1-8; }
+fi
+
+target_for_value() {
+  local value="$1" i
+  for (( i = 0; i < ${#cutoffs[@]}; i++ )); do
+    if (( value < cutoffs[i] )); then
+      echo "$i"
+      return
+    fi
+  done
+  echo $(( ${#cutoffs[@]} - 1 ))
+}
+
+shopt -s nullglob dotglob
+entries=("$source_dir"/*)
+shopt -u nullglob dotglob
+
+names=()
+for entry in "${entries[@]}"; do
+  names+=("$(basename -- "$entry")")
+done
+if (( ${#names[@]} > 0 )); then
+  mapfile -t names < <(printf '%s\n' "${names[@]}" | sort)
+fi
+
+declare -A assigned_index
+for name in "${names[@]}"; do
+  digest="$(hash_name "$name")"
+  value=$(( 16#$digest ))
+  assigned_index["$name"]="$(target_for_value "$value")"
+done
+
+declare -a counts
+for (( i = 0; i < ${#target_dirs[@]}; i++ )); do
+  counts[i]=0
+done
+
+if (( dry_run )); then
+  for name in "${names[@]}"; do
+    idx="${assigned_index[$name]}"
+    echo "$name -> ${target_dirs[$idx]}"
+    (( ++counts[idx] ))
+  done
+  echo "---"
+  for (( i = 0; i < ${#target_dirs[@]}; i++ )); do
+    echo "${target_dirs[$i]}: ${counts[$i]} entries"
+  done
+  exit 0
+fi
+
+skipped=0
+for name in "${names[@]}"; do
+  idx="${assigned_index[$name]}"
+  target="${target_dirs[$idx]}"
+  if [[ -e "$target/$name" ]]; then
+    echo "spread-dir: skipping (already exists at target): $name -> $target" >&2
+    (( ++skipped ))
+    continue
+  fi
+  mv -- "$source_dir/$name" "$target/$name"
+  (( ++counts[idx] ))
+done
+
+for (( i = 0; i < ${#target_dirs[@]}; i++ )); do
+  echo "${target_dirs[$i]}: ${counts[$i]} moved"
+done
+
+(( skipped == 0 ))
