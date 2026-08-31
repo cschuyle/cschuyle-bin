@@ -17,12 +17,16 @@ At least two TARGET_DIR:WEIGHT pairs are required. WEIGHT must be a positive
 integer. Every TARGET_DIR must already exist; SOURCE_DIR must exist and be a
 directory.
 
-  --dry-run   Print the mv (or cp -Rl, with --link) commands that would run,
-              plus summary counts and sizes, without moving/linking anything.
-  -l, --link  Hard-link each entry into its target instead of moving it;
-              SOURCE_DIR is left untouched. A directory entry is recreated
-              at the target with its regular files hard-linked in (via
-              `cp -Rl`); an ordinary file is hard-linked directly (`cp -l`).
+  --dry-run   Print the mv (or cp -Rpl, with --link) commands that would
+              run, plus summary counts and sizes, without moving/linking
+              anything.
+  -l, --link  Hard-link each entry into its target instead of moving it
+              (via `cp -Rpl`); SOURCE_DIR is left untouched. A directory
+              entry is recreated at the target (directories can't be hard
+              -linked) with its regular files hard-linked in; -p preserves
+              that recreated directory's (and each subdirectory's) mode
+              and timestamps -- a plain file entry is hard-linked directly
+              and already shares the source's timestamps regardless of -p.
               Source and target must be on the same filesystem.
 
 Example:
@@ -191,7 +195,7 @@ if (( dry_run )); then
       continue
     fi
     if (( link_mode )); then
-      printf 'cp -Rl -- %q %q\n' "$source_dir/$name" "$target/$name"
+      printf 'cp -Rpl -- %q %q\n' "$source_dir/$name" "$target/$name"
     else
       printf 'mv -- %q %q\n' "$source_dir/$name" "$target/$name"
     fi
@@ -219,7 +223,7 @@ for name in "${names[@]}"; do
   fi
   kb="$(entry_size_kb "$source_dir/$name")"
   if (( link_mode )); then
-    cp -Rl -- "$source_dir/$name" "$target/$name"
+    cp -Rpl -- "$source_dir/$name" "$target/$name"
   else
     mv -- "$source_dir/$name" "$target/$name"
   fi
