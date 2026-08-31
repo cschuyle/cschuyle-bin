@@ -18,7 +18,7 @@ integer. Every TARGET_DIR must already exist; SOURCE_DIR must exist and be a
 directory.
 
   --dry-run   Print the planned name -> target mapping and summary counts
-              without moving anything.
+              and sizes, without moving anything.
 
 Example:
   spread-dir A B:30 C:70
@@ -108,6 +108,22 @@ target_for_value() {
   echo $(( ${#cutoffs[@]} - 1 ))
 }
 
+# du -sk works uniformly for both files and dirs (recursive), and -k is
+# supported by both GNU and BSD du, unlike GNU-only -b.
+entry_size_kb() {
+  local kb
+  kb="$(du -sk -- "$1" 2>/dev/null | cut -f1)" || kb=0
+  echo "${kb:-0}"
+}
+
+human_kb() {
+  awk -v kb="$1" 'BEGIN {
+    if (kb < 1024) printf "%d KiB", kb;
+    else if (kb < 1024*1024) printf "%.1f MiB", kb/1024;
+    else printf "%.1f GiB", kb/1024/1024;
+  }'
+}
+
 shopt -s nullglob dotglob
 entries=("$source_dir"/*)
 shopt -u nullglob dotglob
@@ -127,9 +143,10 @@ for name in "${names[@]}"; do
   assigned_index["$name"]="$(target_for_value "$value")"
 done
 
-declare -a counts
+declare -a counts size_kb
 for (( i = 0; i < ${#target_dirs[@]}; i++ )); do
   counts[i]=0
+  size_kb[i]=0
 done
 
 if (( dry_run )); then
@@ -137,10 +154,11 @@ if (( dry_run )); then
     idx="${assigned_index[$name]}"
     echo "$name -> ${target_dirs[$idx]}"
     (( ++counts[idx] ))
+    size_kb[idx]=$(( size_kb[idx] + $(entry_size_kb "$source_dir/$name") ))
   done
   echo "---"
   for (( i = 0; i < ${#target_dirs[@]}; i++ )); do
-    echo "${target_dirs[$i]}: ${counts[$i]} entries"
+    echo "${target_dirs[$i]}: ${counts[$i]} entries, $(human_kb "${size_kb[$i]}")"
   done
   exit 0
 fi
@@ -154,12 +172,14 @@ for name in "${names[@]}"; do
     (( ++skipped ))
     continue
   fi
+  kb="$(entry_size_kb "$source_dir/$name")"
   mv -- "$source_dir/$name" "$target/$name"
   (( ++counts[idx] ))
+  size_kb[idx]=$(( size_kb[idx] + kb ))
 done
 
 for (( i = 0; i < ${#target_dirs[@]}; i++ )); do
-  echo "${target_dirs[$i]}: ${counts[$i]} moved"
+  echo "${target_dirs[$i]}: ${counts[$i]} moved, $(human_kb "${size_kb[$i]}")"
 done
 
 (( skipped == 0 ))
