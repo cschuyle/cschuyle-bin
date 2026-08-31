@@ -181,9 +181,15 @@ for (( i = 0; i < ${#target_dirs[@]}; i++ )); do
 done
 
 if (( dry_run )); then
+  skipped=0
   for name in "${names[@]}"; do
     idx="${assigned_index[$name]}"
     target="${target_dirs[$idx]}"
+    if [[ -e "$target/$name" ]]; then
+      echo "spread-dir: would skip (already exists at target): $name -> $target" >&2
+      (( ++skipped ))
+      continue
+    fi
     if (( link_mode )); then
       printf 'cp -Rl -- %q %q\n' "$source_dir/$name" "$target/$name"
     else
@@ -196,6 +202,9 @@ if (( dry_run )); then
   for (( i = 0; i < ${#target_dirs[@]}; i++ )); do
     echo "${target_dirs[$i]}: ${counts[$i]} entries, $(human_kb "${size_kb[$i]}")"
   done
+  if (( skipped > 0 )); then
+    exit 1
+  fi
   exit 0
 fi
 
