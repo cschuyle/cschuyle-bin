@@ -4,7 +4,7 @@ set -o pipefail
 
 usage() {
   cat <<'EOF'
-Usage: spread-dir [--dry-run] SOURCE_DIR TARGET_DIR:WEIGHT TARGET_DIR:WEIGHT [TARGET_DIR:WEIGHT ...]
+Usage: spread-dir [--dry-run] [-l|--link] SOURCE_DIR TARGET_DIR:WEIGHT TARGET_DIR:WEIGHT [TARGET_DIR:WEIGHT ...]
 
 Move each top-level entry (file or dir, non-recursive) of SOURCE_DIR into one
 of the given TARGET_DIRs. Entries are NOT bucketed by size or count evenly;
@@ -17,8 +17,13 @@ At least two TARGET_DIR:WEIGHT pairs are required. WEIGHT must be a positive
 integer. Every TARGET_DIR must already exist; SOURCE_DIR must exist and be a
 directory.
 
-  --dry-run   Print the planned name -> target mapping and summary counts
-              and sizes, without moving anything.
+  --dry-run   Print the mv (or cp -Rl, with --link) commands that would run,
+              plus summary counts and sizes, without moving/linking anything.
+  -l, --link  Hard-link each entry into its target instead of moving it;
+              SOURCE_DIR is left untouched. A directory entry is recreated
+              at the target with its regular files hard-linked in (via
+              `cp -Rl`); an ordinary file is hard-linked directly (`cp -l`).
+              Source and target must be on the same filesystem.
 
 Example:
   spread-dir A B:30 C:70
@@ -31,10 +36,13 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 dry_run=0
+link_mode=0
 args=()
 for arg in "$@"; do
   if [[ "$arg" == "--dry-run" ]]; then
     dry_run=1
+  elif [[ "$arg" == "-l" || "$arg" == "--link" ]]; then
+    link_mode=1
   else
     args+=("$arg")
   fi
@@ -175,7 +183,12 @@ done
 if (( dry_run )); then
   for name in "${names[@]}"; do
     idx="${assigned_index[$name]}"
-    echo "$name -> ${target_dirs[$idx]}"
+    target="${target_dirs[$idx]}"
+    if (( link_mode )); then
+      printf 'cp -Rl -- %q %q\n' "$source_dir/$name" "$target/$name"
+    else
+      printf 'mv -- %q %q\n' "$source_dir/$name" "$target/$name"
+    fi
     (( ++counts[idx] ))
     size_kb[idx]=$(( size_kb[idx] + $(entry_size_kb "$source_dir/$name") ))
   done
@@ -196,13 +209,19 @@ for name in "${names[@]}"; do
     continue
   fi
   kb="$(entry_size_kb "$source_dir/$name")"
-  mv -- "$source_dir/$name" "$target/$name"
+  if (( link_mode )); then
+    cp -Rl -- "$source_dir/$name" "$target/$name"
+  else
+    mv -- "$source_dir/$name" "$target/$name"
+  fi
   (( ++counts[idx] ))
   size_kb[idx]=$(( size_kb[idx] + kb ))
 done
 
+action_verb="moved"
+(( link_mode )) && action_verb="linked"
 for (( i = 0; i < ${#target_dirs[@]}; i++ )); do
-  echo "${target_dirs[$i]}: ${counts[$i]} moved, $(human_kb "${size_kb[$i]}")"
+  echo "${target_dirs[$i]}: ${counts[$i]} $action_verb, $(human_kb "${size_kb[$i]}")"
 done
 
 (( skipped == 0 ))
