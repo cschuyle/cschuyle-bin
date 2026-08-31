@@ -137,10 +137,17 @@ class DusDB:
         meta = self.scan_meta(path)
         if meta is not None:
             return meta[2]
-        like = path + "/%"
+        # Sargable prefix range instead of `path LIKE ?`: SQLite's default
+        # LIKE is case-insensitive, so it can't use the path index for a
+        # prefix scan and falls back to a full table scan of entries per
+        # call. '/' (0x2F) sorts just below '0' (0x30), so [path+"/",
+        # path+"0") covers exactly the rows whose path starts with
+        # "<path>/", and — being a plain range comparison — uses the index.
+        lo = path + "/"
+        hi = path + "0"
         row = self.conn.execute(
-            "SELECT COUNT(*) FROM entries WHERE path = ? OR path LIKE ?",
-            (path, like),
+            "SELECT COUNT(*) FROM entries WHERE path = ? OR (path >= ? AND path < ?)",
+            (path, lo, hi),
         ).fetchone()
         return int(row[0]) if row else 0
 

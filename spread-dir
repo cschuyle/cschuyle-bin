@@ -156,7 +156,7 @@ if (( use_dus )) && (( ${#names[@]} > 0 )); then
   done
   while IFS=$'\t' read -r sz _dc orig; do
     dus_size_kb["$orig"]="$sz"
-  done < <(dus "${entry_paths[@]}" 2>/dev/null)
+  done < <(dus "${entry_paths[@]}")
 fi
 
 declare -A assigned_index
