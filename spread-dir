@@ -110,7 +110,20 @@ target_for_value() {
 
 # du -sk works uniformly for both files and dirs (recursive), and -k is
 # supported by both GNU and BSD du, unlike GNU-only -b.
+# When dus(1) is available, entry sizes are measured (and cached) via a
+# single batched `dus` call instead; entry_size_kb() then just reads the
+# dus_size_kb map, falling back to a direct du -sk on a cache miss.
+declare -A dus_size_kb
+use_dus=0
+if command -v dus >/dev/null 2>&1; then
+  use_dus=1
+fi
+
 entry_size_kb() {
+  if (( use_dus )) && [[ -n "${dus_size_kb[$1]+x}" ]]; then
+    echo "${dus_size_kb[$1]}"
+    return
+  fi
   local kb
   kb="$(du -sk -- "$1" 2>/dev/null | cut -f1)" || kb=0
   echo "${kb:-0}"
@@ -134,6 +147,16 @@ for entry in "${entries[@]}"; do
 done
 if (( ${#names[@]} > 0 )); then
   mapfile -t names < <(printf '%s\n' "${names[@]}" | sort)
+fi
+
+if (( use_dus )) && (( ${#names[@]} > 0 )); then
+  entry_paths=()
+  for name in "${names[@]}"; do
+    entry_paths+=("$source_dir/$name")
+  done
+  while IFS=$'\t' read -r sz _dc orig; do
+    dus_size_kb["$orig"]="$sz"
+  done < <(dus "${entry_paths[@]}" 2>/dev/null)
 fi
 
 declare -A assigned_index
