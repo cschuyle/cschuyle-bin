@@ -1,0 +1,69 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+my $in = shift @ARGV or die "Usage: $0 <input file>\n";
+
+open my $fh, '<:encoding(UTF-8)', $in or die "Can't open $in: $!";
+binmode STDOUT, ':encoding(UTF-8)';
+my @lines = <$fh>;
+close $fh;
+chomp @lines;
+s/\x{a0}/ /g for @lines;
+
+sub fields { map { s/^\s+|\s+$//gr } split /\t+/, $_[0] }
+
+sub to_24hr {
+    my ($t) = @_;
+    return $t unless $t =~ /^(\d{1,2}):(\d{2})\s*([AP]M)$/i;
+    my ($h, $m, $ap) = ($1, $2, uc $3);
+    $h = 0  if $h == 12 && $ap eq 'AM';
+    $h += 12 if $h != 12 && $ap eq 'PM';
+    return sprintf('%02d:%02d', $h, $m);
+}
+
+sub short_city {
+    my ($c) = @_;
+    $c =~ s/,\s*[A-Z]{2},\s*US\s*(\()/ $1/;
+    $c =~ s/\s+\(/ (/;
+    return $c;
+}
+
+my $conf;
+my @flights;
+
+for my $i (0 .. $#lines) {
+    if ($lines[$i] =~ /^Confirmation Number:$/) {
+        ($conf) = fields($lines[$i + 1]);
+    }
+    if ($lines[$i] =~ /^Flight \d+ of \d+ (UA\d+)/) {
+        my $code = $1;
+        my ($date)          = fields($lines[$i + 1]);
+        my ($dep_t, $arr_t) = fields($lines[$i + 2]);
+        my ($dep_c, $arr_c) = fields($lines[$i + 3]);
+        push @flights, {
+            code  => $code,
+            date  => $date,
+            dep_t => to_24hr($dep_t),
+            arr_t => to_24hr($arr_t),
+            dep_c => short_city($dep_c),
+            arr_c => short_city($arr_c),
+        };
+    }
+}
+
+my @blocks;
+push @blocks, "United Confirmation Number: $conf";
+
+my $current_date = '';
+my $seen_dates = 0;
+for my $f (@flights) {
+    if ($f->{date} ne $current_date) {
+        $current_date = $f->{date};
+        $seen_dates++;
+        push @blocks, $seen_dates == 1 ? $current_date : "RETURN\n$current_date";
+    }
+    push @blocks, "Flight $f->{code}\n$f->{dep_t} $f->{dep_c} --> $f->{arr_t} $f->{arr_c}";
+}
+
+print join("\n\n", @blocks), "\n";
