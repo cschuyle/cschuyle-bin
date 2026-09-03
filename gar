@@ -3035,7 +3035,7 @@ check_mac_settings() {
 
         if gar_setting_matches "$actual" "$expected" "$compare"; then
             if [[ "$key" == com.apple.keyboard.fnState ]] && gar_pending_restart_active "$key"; then
-                report_ok "Setting $label ($actual; RESTART needed — not yet visible in System Settings or in actual key behavior)"
+                report_warn "Setting $label ($actual; RESTART needed — not yet visible in System Settings or in actual key behavior)"
             else
                 report_ok "Setting $label ($actual)"
             fi
