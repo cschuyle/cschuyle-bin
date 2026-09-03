@@ -211,6 +211,7 @@ class MemoryCache:
 class Config:
     human: bool = False
     verbose: bool = False
+    total: bool = False
     no_cache: bool = False
     refresh: bool = False
     excludes: List[str] = field(default_factory=list)
@@ -637,6 +638,7 @@ def parse_args(argv: Sequence[str]) -> Tuple[Config, List[str]]:
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--refresh", action="store_true")
     parser.add_argument("-c", "--clearcache", "--clear", action="store_true")
+    parser.add_argument("-t", "--total", action="store_true")
     parser.add_argument("--exclude", action="append", default=[])
     parser.add_argument("--db", metavar="PATH", default=None)
     parser.add_argument("paths", nargs="*")
@@ -649,15 +651,21 @@ def parse_args(argv: Sequence[str]) -> Tuple[Config, List[str]]:
         if os.environ.get("DUS_CACHE_DIR"):
             cfg.cache_dir = Path(os.environ["DUS_CACHE_DIR"])
         dbf = cfg.db_file
-        if dbf.exists():
-            dbf.unlink()
+        # SQLite WAL mode leaves -wal/-shm sidecar files alongside the main db;
+        # deleting only the main file orphans them, and a later run opened in
+        # WAL mode against the mismatched leftovers hits "disk I/O error".
+        sidecars = [dbf, Path(f"{dbf}-wal"), Path(f"{dbf}-shm")]
+        removed = [p for p in sidecars if p.exists()]
+        if removed:
+            for p in removed:
+                p.unlink()
             print(f"{PROG}: cleared cache: {dbf}", file=sys.stderr)
         else:
             print(f"{PROG}: no cache to clear: {dbf}", file=sys.stderr)
         return Config(), []
     if ns.help:
         print(
-            f"Usage: {PROG} [-h] [-v] [--no-cache] [--refresh] [-c] "
+            f"Usage: {PROG} [-h] [-v] [-t] [--no-cache] [--refresh] [-c] "
             f"[--exclude <pattern>]... [--db PATH] <path> [path ...]",
             file=sys.stderr,
         )
@@ -666,6 +674,7 @@ def parse_args(argv: Sequence[str]) -> Tuple[Config, List[str]]:
             "  -v                  Verbose: du commands, cache decisions, timing on stderr",
             file=sys.stderr,
         )
+        print("  -t, --total         Print a grand total line after the per-path sizes", file=sys.stderr)
         print("  --no-cache          Skip reading and writing the cache for this run", file=sys.stderr)
         print("  --refresh           Ignore cache and rescan (still updates cache)", file=sys.stderr)
         print("  -c/--clearcache      Delete cached database and exit", file=sys.stderr)
@@ -678,6 +687,7 @@ def parse_args(argv: Sequence[str]) -> Tuple[Config, List[str]]:
     cfg = Config(
         human=ns.human_readable,
         verbose=ns.verbose,
+        total=ns.total,
         no_cache=ns.no_cache,
         refresh=ns.refresh,
         excludes=list(ns.exclude or []),
@@ -868,6 +878,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"{hr_size(sz)}\t{dc}\t{orig}")
         else:
             print(f"{sz}\t{dc}\t{orig}")
+
+    if cfg.total:
+        total_sz = sum(out_sz[norm_paths[p]] for p in paths)
+        if cfg.human:
+            print(f"{hr_size(total_sz)}\ttotal")
+        else:
+            print(f"{total_sz}\ttotal")
 
     cfg.vstage(f"done: {len(paths)} output")
     if db:
