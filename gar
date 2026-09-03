@@ -2376,6 +2376,34 @@ gar_defaults_write() {
     fi
 }
 
+# Tracks defaults keys whose fix is written immediately but doesn't take
+# visible/live effect until a restart (currently just fnState). One key per
+# line; self-heals by dropping the whole file once a restart is detected.
+gar_pending_restart_file() {
+    printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/gar/pending-restart"
+}
+
+gar_mark_pending_restart() {
+    local key="$1" file
+    file=$(gar_pending_restart_file)
+    mkdir -p "$(dirname "$file")" 2>/dev/null || return 1
+    grep -qxF "$key" "$file" 2>/dev/null && return 0
+    printf '%s\n' "$key" >>"$file"
+}
+
+gar_pending_restart_active() {
+    local key="$1" file boot_epoch file_epoch
+    file=$(gar_pending_restart_file)
+    [[ -f "$file" ]] || return 1
+    boot_epoch=$(sysctl -n kern.boottime 2>/dev/null | sed -E 's/^\{ sec = ([0-9]+).*/\1/')
+    file_epoch=$(stat -f %m "$file" 2>/dev/null)
+    if [[ -z "$boot_epoch" || -z "$file_epoch" || "$file_epoch" -lt "$boot_epoch" ]]; then
+        rm -f "$file"
+        return 1
+    fi
+    grep -qxF "$key" "$file" 2>/dev/null
+}
+
 mac_write_json_setting() {
     local file="$1" key="$2" value="$3"
     python3 - "$file" "$key" "$value" <<'PY'
@@ -2814,6 +2842,7 @@ offer_fix_mac_setting() {
             gar_prompt_yn "Fix $label: set $key to $expected?" || return 0
             if gar_defaults_write "$location" "$key" "$expected" >/dev/null 2>&1; then
                 if [[ "$key" == com.apple.keyboard.fnState ]]; then
+                    gar_mark_pending_restart "$key"
                     printf 'Set %s to %s (requires a full RESTART — not just logout — to take effect in System Settings and actual key behavior).\n' "$key" "$expected"
                 else
                     printf 'Set %s to %s (may take effect after logout).\n' "$key" "$expected"
@@ -3005,7 +3034,11 @@ check_mac_settings() {
         esac
 
         if gar_setting_matches "$actual" "$expected" "$compare"; then
-            report_ok "Setting $label ($actual)"
+            if [[ "$key" == com.apple.keyboard.fnState ]] && gar_pending_restart_active "$key"; then
+                report_ok "Setting $label ($actual; RESTART needed — not yet visible in System Settings or in actual key behavior)"
+            else
+                report_ok "Setting $label ($actual)"
+            fi
         else
             report_warn "Setting $label (is $actual; want $expected)"
             offer_fix_mac_setting "$kind" "$location" "$key" "$expected" "$label"
