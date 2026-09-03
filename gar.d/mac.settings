@@ -34,6 +34,7 @@ VS Code auto-save|json-editor|code|files.autoSave|onFocusChange
 Keyboard repeat speed|defaults|global|KeyRepeat|2|at_most
 Keyboard repeat delay|defaults|global|InitialKeyRepeat|15|at_most
 Show all filename extensions|defaults|global|AppleShowAllExtensions|1
+Use F1, F2, etc. as standard function keys|defaults|global|com.apple.keyboard.fnState|1
 Always show volume in menu bar|sound-menu-bar-always||||
 Machine name|machine-name-not-default||||
 Move focus to next window (Command-<)|next-window-switch-key||||
