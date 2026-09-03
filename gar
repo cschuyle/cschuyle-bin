@@ -2813,7 +2813,11 @@ offer_fix_mac_setting() {
         defaults)
             gar_prompt_yn "Fix $label: set $key to $expected?" || return 0
             if gar_defaults_write "$location" "$key" "$expected" >/dev/null 2>&1; then
-                printf 'Set %s to %s (may take effect after logout).\n' "$key" "$expected"
+                if [[ "$key" == com.apple.keyboard.fnState ]]; then
+                    printf 'Set %s to %s (requires a full RESTART — not just logout — to take effect in System Settings and actual key behavior).\n' "$key" "$expected"
+                else
+                    printf 'Set %s to %s (may take effect after logout).\n' "$key" "$expected"
+                fi
             else
                 report_warn "Setting $label (could not write $key)"
             fi
