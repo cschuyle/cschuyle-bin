@@ -29,6 +29,12 @@
 # ~/Library/Application Support/iTerm2/DynamicProfiles/gar.json under the
 # missing name(s) — Dynamic Profiles reload live, no iTerm restart needed —
 # and is skipped if there's no Default profile to clone from.
+# com.apple.keyboard.fnState: the fix writes the plist value immediately (so
+# the check goes green right away), but System Settings' checkbox and the
+# actual F-key behavior do NOT update until a full restart — a logout is not
+# enough. This is a real macOS limitation (the write doesn't post the
+# com.apple.keyboard.fnstatedidchange notification the Settings UI and
+# keyboard driver listen for), not a gar bug — restart to see/feel it.
 Cursor auto-save|json-editor|cursor|files.autoSave|onFocusChange
 VS Code auto-save|json-editor|code|files.autoSave|onFocusChange
 Keyboard repeat speed|defaults|global|KeyRepeat|2|at_most
