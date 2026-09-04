@@ -21,6 +21,28 @@ gar_active_roles=()
 export GIT_SSH_COMMAND
 gar_git_net_opts=(-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15)
 
+# Run a command with a hard wall-clock timeout, killing it (and returning its
+# would-be exit status as failure) if it's still running after $1 seconds.
+# ConnectTimeout/BatchMode/lowSpeedLimit (above) only guard the network
+# transfer itself; this also catches a command stuck on something outside
+# git's control, like a graphical Keychain-access prompt for a credential
+# helper that never sends a byte. Only ever call this on operations that are
+# safe to kill mid-flight (e.g. a plain `git fetch`, never `git pull`/`rebase`,
+# which can be interrupted mid-rewrite and leave a repo half-rebased).
+gar_run_with_timeout() {
+    local secs="$1"
+    shift
+    "$@" &
+    local pid=$!
+    ( sleep "$secs"; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+    local watcher=$!
+    wait "$pid" 2>/dev/null
+    local status=$?
+    kill "$watcher" 2>/dev/null
+    wait "$watcher" 2>/dev/null
+    return "$status"
+}
+
 # Machine-local manifest overlays (same XDG base as ~/.config/gar/roles).
 gar_local_dir() {
     printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/gar/d"
@@ -1434,7 +1456,7 @@ gar_repo_catchup_fetch() {
     [[ -n "$mainline" ]] || return 1
     remote="${mainline%%/*}"
     [[ -n "$remote" ]] || return 1
-    git "${gar_git_net_opts[@]}" -C "$repo" fetch --quiet "$remote" 2>/dev/null || return 1
+    gar_run_with_timeout 15 git "${gar_git_net_opts[@]}" -C "$repo" fetch --quiet "$remote" 2>/dev/null || return 1
     git -C "$repo" rev-parse --verify --quiet "$mainline" >/dev/null 2>&1
 }
 
@@ -1536,7 +1558,7 @@ gar_repo_try_fetch() {
     [[ -d "$repo/.git" ]] || return 1
     git -C "$repo" rev-parse --verify "$branch" >/dev/null 2>&1 || return 1
     git -C "$repo" remote get-url origin >/dev/null 2>&1 || return 1
-    git "${gar_git_net_opts[@]}" -C "$repo" fetch --quiet origin "$branch" 2>/dev/null || return 1
+    gar_run_with_timeout 15 git "${gar_git_net_opts[@]}" -C "$repo" fetch --quiet origin "$branch" 2>/dev/null || return 1
     git -C "$repo" rev-parse --verify "origin/$branch" >/dev/null 2>&1
 }
 
