@@ -28,6 +28,17 @@ remains the supported "no local config" state. This is distinct from `exit 1`
 missing/unreadable `gar.d/` next to the script exits 2 immediately). The
 subcommands `info` / `apps` / `roles` do not run this preflight.
 
+**Timing log.** Every run writes a timing log to
+`~/.gar/timings/timings-<timestamp>.txt` (tab-separated: timestamp, `START`/
+`END`, operation label, duration on `END` lines) so a slow or hung run can be
+diagnosed after the fact instead of reproduced live. It covers each top-level
+section (`Homebrew`, `Applications`, `Machine environment repos`, etc.) plus,
+within that last section, each repo's parallel prefetch and any pull/rebase or
+retry-fetch a repo triggers — fine enough that a hang shows up as the last
+`START` line with no matching `END`, naming exactly the stuck repo/operation.
+Writing the log is best-effort (a failed `mkdir`/file-create silently disables
+it) and never affects `gar`'s own exit status.
+
 **Which repos.** Repos come from a `machine-env-repos` manifest (each line
 `name|path[|branch]`, branch defaulting to `main`), plus any `~/Yew/*-setup`
 repos discovered automatically. A separate name-based skip manifest can exclude

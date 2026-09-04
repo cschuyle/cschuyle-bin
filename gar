@@ -21,6 +21,45 @@ gar_active_roles=()
 export GIT_SSH_COMMAND
 gar_git_net_opts=(-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15)
 
+# --- Timing instrumentation -------------------------------------------------
+# Every run writes a timing log to ~/.gar/timings/timings-<timestamp>.txt so a
+# slow or hung run can be diagnosed after the fact without reproducing it live.
+# START is written before an operation runs and END (with duration) after, so
+# a hang shows up as a START with no matching END — the last line in the file
+# names the stuck operation. Best-effort: a failure to create the dir/file
+# silently disables logging rather than affecting gar's own exit status.
+gar_timings_file=""
+
+gar_timings_init() {
+    local dir="$HOME/.gar/timings"
+    mkdir -p "$dir" 2>/dev/null || return 0
+    gar_timings_file="$dir/timings-$(date +%Y%m%d-%H%M%S).txt"
+    : >"$gar_timings_file" 2>/dev/null || gar_timings_file=""
+}
+
+gar_timings_mark() {
+    [[ -n "$gar_timings_file" ]] || return 0
+    printf '%s\t%s\t%s\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$1" "$2" "${3:--}" \
+        >>"$gar_timings_file" 2>/dev/null
+}
+
+# gar_timed <label> <cmd...>: run cmd, recording START/END(+duration) lines
+# for <label>. Preserves cmd's exit status. Safe to nest and to call from
+# parallel background jobs (each mark is one small, effectively-atomic append).
+gar_timed() {
+    local label="$1"
+    shift
+    local start end dur status
+    start=$(date +%s)
+    gar_timings_mark START "$label"
+    "$@"
+    status=$?
+    end=$(date +%s)
+    dur=$((end - start))
+    gar_timings_mark END "$label" "${dur}s"
+    return "$status"
+}
+
 # Run a command with a hard wall-clock timeout, killing it (and returning its
 # would-be exit status as failure) if it's still running after $1 seconds.
 # ConnectTimeout/BatchMode/lowSpeedLimit (above) only guard the network
@@ -117,6 +156,7 @@ gar_preflight_config() {
 gar_init_workdir() {
     gar_tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/gar.XXXXXX")
     trap '[[ -n "$gar_tmpdir" ]] && rm -rf "$gar_tmpdir"' EXIT
+    gar_timings_init
 }
 
 gar_path_slug() {
@@ -1749,7 +1789,8 @@ gar_machine_env_prefetch_all() {
         branch="${branch:-main}"
         slug=$(gar_path_slug "$path")
         result_file="$gar_tmpdir/repos/$slug"
-        gar_machine_env_prefetch_repo "$name" "$path" "$branch" "$result_file" "$catchup_manifest" &
+        gar_timed "repo prefetch: $name" \
+            gar_machine_env_prefetch_repo "$name" "$path" "$branch" "$result_file" "$catchup_manifest" &
     done < <(gar_machine_env_list_repos "$repos_manifest" "$skip_manifest")
     wait
 }
@@ -1942,7 +1983,7 @@ offer_machine_env_repo_pull() {
         fetched=$(gar_result_get "$result_file" fetched)
         behind=$(gar_result_get "$result_file" behind)
         if [[ "$fetched" != 1 ]]; then
-            if ! gar_repo_catchup_fetch "$path" "$mainline"; then
+            if ! gar_timed "repo fetch (retry): $name" gar_repo_catchup_fetch "$path" "$mainline"; then
                 return 0
             fi
             behind=0
@@ -1957,7 +1998,7 @@ offer_machine_env_repo_pull() {
         fi
 
         if gar_prompt_yn "$prompt"; then
-            if gar_repo_rebase_onto_mainline "$path" "$mainline"; then
+            if gar_timed "repo rebase: $name" gar_repo_rebase_onto_mainline "$path" "$mainline"; then
                 printf 'Updated %s (%s)\n' "$name" "$path"
             else
                 report_warn "Machine env repo $name ($path — rebase failed)"
@@ -1973,7 +2014,7 @@ offer_machine_env_repo_pull() {
     fetched=$(gar_result_get "$result_file" fetched)
     behind=$(gar_result_get "$result_file" behind)
     if [[ "$fetched" != 1 ]]; then
-        if ! gar_repo_try_fetch "$path" "$config_branch"; then
+        if ! gar_timed "repo fetch (retry): $name" gar_repo_try_fetch "$path" "$config_branch"; then
             return 0
         fi
         behind=0
@@ -1999,7 +2040,7 @@ offer_machine_env_repo_pull() {
     prompt+=")?"
 
     if gar_prompt_yn "$prompt"; then
-        if gar_repo_pull "$path" "$config_branch"; then
+        if gar_timed "repo pull: $name" gar_repo_pull "$path" "$config_branch"; then
             printf 'Updated %s (%s)\n' "$name" "$path"
         else
             report_warn "Machine env repo $name ($path — pull failed)"
@@ -3569,40 +3610,40 @@ run_mac_checks() {
     hints_file="$GAR_DIR/mac.install-hints"
 
     gar_section_begin "Homebrew"
-    check_mac_homebrew
+    gar_timed "Homebrew" check_mac_homebrew
 
     gar_section_begin "Secrets"
-    check_mac_secrets "$secrets_manifest"
+    gar_timed "Secrets" check_mac_secrets "$secrets_manifest"
 
     gar_section_begin "Environment"
-    check_mac_env "$env_manifest"
+    gar_timed "Environment" check_mac_env "$env_manifest"
 
     gar_section_begin "Java"
-    check_mac_java
+    gar_timed "Java" check_mac_java
 
     gar_section_begin "Commands"
-    check_commands "$(gar_combined_capability_manifest mac commands)" "$hints_file"
+    gar_timed "Commands" check_commands "$(gar_combined_capability_manifest mac commands)" "$hints_file"
 
     gar_section_begin "Perl modules"
-    check_mac_perl_modules
+    gar_timed "Perl modules" check_mac_perl_modules
 
     gar_section_begin "Applications"
-    check_mac_apps "$apps_manifest"
+    gar_timed "Applications" check_mac_apps "$apps_manifest"
 
     gar_section_begin "Login items"
-    check_mac_login_items "$login_manifest"
+    gar_timed "Login items" check_mac_login_items "$login_manifest"
 
     gar_section_begin "Browser extensions"
-    check_mac_browser_extensions
+    gar_timed "Browser extensions" check_mac_browser_extensions
 
     gar_section_begin "Machine environment repos"
-    check_machine_env_repos "$repos_manifest" "$skip_manifest" "$catchup_manifest"
+    gar_timed "Machine environment repos" check_machine_env_repos "$repos_manifest" "$skip_manifest" "$catchup_manifest"
 
     gar_section_begin "Git config"
-    check_git_config "$git_config_manifest" "$hints_file"
+    gar_timed "Git config" check_git_config "$git_config_manifest" "$hints_file"
 
     gar_section_begin "Settings"
-    check_mac_settings
+    gar_timed "Settings" check_mac_settings
 }
 
 check_wsl_mount() {
@@ -3625,20 +3666,20 @@ run_wsl_checks() {
 
     gar_section_begin "Environment"
     if [[ -n "$env_manifest" ]]; then
-        check_env "$env_manifest"
+        gar_timed "Environment" check_env "$env_manifest"
     fi
 
     gar_section_begin "Mount"
-    check_wsl_mount
+    gar_timed "Mount" check_wsl_mount
 
     gar_section_begin "Commands"
-    check_commands "$commands_manifest" "$hints_file"
+    gar_timed "Commands" check_commands "$commands_manifest" "$hints_file"
 
     gar_section_begin "Machine environment repos"
-    check_machine_env_repos "$repos_manifest" "$skip_manifest" "$catchup_manifest"
+    gar_timed "Machine environment repos" check_machine_env_repos "$repos_manifest" "$skip_manifest" "$catchup_manifest"
 
     gar_section_begin "Git config"
-    check_git_config "$git_config_manifest" "$hints_file"
+    gar_timed "Git config" check_git_config "$git_config_manifest" "$hints_file"
 }
 
 run_synology_checks() {
@@ -3651,13 +3692,13 @@ run_synology_checks() {
     hints_file="$GAR_DIR/synology.install-hints"
 
     gar_section_begin "Commands"
-    check_commands "$commands_manifest" "$hints_file"
+    gar_timed "Commands" check_commands "$commands_manifest" "$hints_file"
 
     gar_section_begin "Machine environment repos"
-    check_machine_env_repos "$repos_manifest" "$skip_manifest" "$catchup_manifest"
+    gar_timed "Machine environment repos" check_machine_env_repos "$repos_manifest" "$skip_manifest" "$catchup_manifest"
 
     gar_section_begin "Git config"
-    check_git_config "$git_config_manifest" "$hints_file"
+    gar_timed "Git config" check_git_config "$git_config_manifest" "$hints_file"
 }
 
 main() {
