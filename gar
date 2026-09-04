@@ -13,6 +13,14 @@ gar_section_header_printed=0
 gar_tmpdir=""
 gar_active_roles=()
 
+# Bound network git operations (fetch/pull) so a stalled connection or an
+# unanswered host-key/passphrase prompt fails within seconds instead of
+# hanging gar indefinitely. Scoped to this process only (never touches the
+# user's global git/ssh config); respects a caller-supplied GIT_SSH_COMMAND.
+: "${GIT_SSH_COMMAND:=ssh -o ConnectTimeout=10 -o BatchMode=yes}"
+export GIT_SSH_COMMAND
+gar_git_net_opts=(-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15)
+
 # Machine-local manifest overlays (same XDG base as ~/.config/gar/roles).
 gar_local_dir() {
     printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/gar/d"
@@ -1374,7 +1382,7 @@ gar_repo_remote_default_branch() {
 
 gar_repo_pull() {
     local repo="$1" branch="${2:-main}"
-    git -C "$repo" pull -r origin "$branch"
+    git "${gar_git_net_opts[@]}" -C "$repo" pull -r origin "$branch"
 }
 
 # --- Catch-up repos --------------------------------------------------------
@@ -1426,7 +1434,7 @@ gar_repo_catchup_fetch() {
     [[ -n "$mainline" ]] || return 1
     remote="${mainline%%/*}"
     [[ -n "$remote" ]] || return 1
-    git -C "$repo" fetch --quiet "$remote" 2>/dev/null || return 1
+    git "${gar_git_net_opts[@]}" -C "$repo" fetch --quiet "$remote" 2>/dev/null || return 1
     git -C "$repo" rev-parse --verify --quiet "$mainline" >/dev/null 2>&1
 }
 
@@ -1528,7 +1536,7 @@ gar_repo_try_fetch() {
     [[ -d "$repo/.git" ]] || return 1
     git -C "$repo" rev-parse --verify "$branch" >/dev/null 2>&1 || return 1
     git -C "$repo" remote get-url origin >/dev/null 2>&1 || return 1
-    git -C "$repo" fetch --quiet origin "$branch" 2>/dev/null || return 1
+    git "${gar_git_net_opts[@]}" -C "$repo" fetch --quiet origin "$branch" 2>/dev/null || return 1
     git -C "$repo" rev-parse --verify "origin/$branch" >/dev/null 2>&1
 }
 
@@ -3292,7 +3300,23 @@ check_mac_apps() {
 }
 
 mac_login_items_raw() {
-    osascript -e 'tell application "System Events" to get the name of every login item' 2>/dev/null
+    # osascript blocks indefinitely if macOS is showing an Automation
+    # permission prompt (e.g. "Terminal wants to control System Events")
+    # that never gets answered, so bound the wait rather than hang gar.
+    local out_file pid watcher status
+    out_file="$gar_tmpdir/login-items-raw"
+    osascript -e 'tell application "System Events" to get the name of every login item' \
+        >"$out_file" 2>/dev/null &
+    pid=$!
+    ( sleep 5; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+    watcher=$!
+    wait "$pid" 2>/dev/null
+    status=$?
+    kill "$watcher" 2>/dev/null
+    wait "$watcher" 2>/dev/null
+    cat "$out_file" 2>/dev/null
+    rm -f "$out_file"
+    return "$status"
 }
 
 mac_login_item_listed() {
