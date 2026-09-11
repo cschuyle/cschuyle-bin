@@ -22,6 +22,15 @@ sub to_24hr {
     return sprintf('%02d:%02d', $h, $m);
 }
 
+# Airport-code lines pasted from the "manage reservation" page get mangled
+# (each letter duplicated, e.g. "D,E,NDEN"); the real code is the trailing
+# 3-letter run.
+sub airport_code {
+    my ($c) = @_;
+    return $1 if $c =~ /([A-Z]{3})$/;
+    return $c;
+}
+
 sub short_city {
     my ($c) = @_;
     $c =~ s/,\s*[A-Z]{2},\s*US\s*(\()/ $1/;
@@ -29,26 +38,78 @@ sub short_city {
     return $c;
 }
 
+sub short_city_with_code {
+    my ($city, $code) = @_;
+    (my $name = $city) =~ s/,\s*[A-Z]{2},\s*US$//;
+    return "$name ($code)";
+}
+
 my $conf;
 my @flights;
+
+# Two known paste formats:
+#  - "confirmation email" style: "Confirmation Number:" on its own line,
+#    value on the next; flights as "Flight N of M UA1234" headers.
+#  - "manage reservation" page style: "Confirmation number: XYZ123" inline;
+#    flights as Depart/Arrive blocks with a "Flight\tUA 1234" line.
+my $manage_res_style = grep { $_ eq 'Depart' } @lines;
 
 for my $i (0 .. $#lines) {
     if ($lines[$i] =~ /^Confirmation Number:$/) {
         ($conf) = fields($lines[$i + 1]);
+    } elsif ($lines[$i] =~ /^Confirmation number:\s*(\S+)/i) {
+        $conf = $1;
     }
-    if ($lines[$i] =~ /^Flight \d+ of \d+ (UA\d+)/) {
-        my $code = $1;
-        my ($date)          = fields($lines[$i + 1]);
-        my ($dep_t, $arr_t) = fields($lines[$i + 2]);
-        my ($dep_c, $arr_c) = fields($lines[$i + 3]);
+}
+
+if ($manage_res_style) {
+    my @nb = grep { $_ ne '' } @lines;
+
+    for (my $i = 0; $i <= $#nb; $i++) {
+        next unless $nb[$i] eq 'Depart';
+
+        my $dep_date = $nb[$i + 1];
+        my $dep_t    = $nb[$i + 2];
+        my $dep_city = short_city_with_code($nb[$i + 4], airport_code($nb[$i + 3]));
+
+        my $j = $i + 5;
+        $j++ if $nb[$j] eq 'arrow';
+        next unless $nb[$j] eq 'Arrive';
+        $j++;
+
+        my $arr_t    = $nb[$j + 1];
+        my $arr_city = short_city_with_code($nb[$j + 3], airport_code($nb[$j + 2]));
+        $j += 4;
+
+        $j++ if $nb[$j] eq 'Flight Info';
+        next unless $nb[$j] =~ /^Flight\t(UA\s*\d+)/;
+        (my $code = $1) =~ s/\s+//g;
+
         push @flights, {
             code  => $code,
-            date  => $date,
+            date  => $dep_date,
             dep_t => to_24hr($dep_t),
             arr_t => to_24hr($arr_t),
-            dep_c => short_city($dep_c),
-            arr_c => short_city($arr_c),
+            dep_c => $dep_city,
+            arr_c => $arr_city,
         };
+    }
+} else {
+    for my $i (0 .. $#lines) {
+        if ($lines[$i] =~ /^Flight \d+ of \d+ (UA\d+)/) {
+            my $code = $1;
+            my ($date)          = fields($lines[$i + 1]);
+            my ($dep_t, $arr_t) = fields($lines[$i + 2]);
+            my ($dep_c, $arr_c) = fields($lines[$i + 3]);
+            push @flights, {
+                code  => $code,
+                date  => $date,
+                dep_t => to_24hr($dep_t),
+                arr_t => to_24hr($arr_t),
+                dep_c => short_city($dep_c),
+                arr_c => short_city($arr_c),
+            };
+        }
     }
 }
 
