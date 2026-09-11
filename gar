@@ -3226,6 +3226,25 @@ check_mac_homebrew() {
     fi
 }
 
+# Audit the brew-forbidden manifest: formulae a role/platform declares must NOT
+# be installed (e.g. plain ffmpeg, which keeps the dev-tools role's ffmpeg-full
+# unlinked/keg-only). An installed forbidden formula is a MISS, since it defeats
+# the intent of whatever conflicting tool the role does want.
+check_mac_brew_forbidden() {
+    local brew_bin manifest name
+    brew_bin=$(gar_brew_bin)
+    [[ -n "$brew_bin" ]] || return
+    manifest=$(gar_combined_capability_manifest mac brew-forbidden)
+    [[ -f "$manifest" && -s "$manifest" ]] || return
+    while IFS= read -r name; do
+        if gar_brew_installed "$brew_bin" formula "$name"; then
+            report_miss "Homebrew: $name is installed but conflicts with a role tool (uninstall: brew uninstall $name)"
+        else
+            report_ok "Homebrew: $name not installed (no conflict)"
+        fi
+    done < <(read_manifest "$manifest")
+}
+
 check_mac_secrets() {
     local secrets_manifest="${1:-}" key keys=() i=0 result status
     [[ -n "$secrets_manifest" ]] || secrets_manifest=$(gar_combined_capability_manifest mac secrets)
@@ -3611,6 +3630,7 @@ run_mac_checks() {
 
     gar_section_begin "Homebrew"
     gar_timed "Homebrew" check_mac_homebrew
+    gar_timed "Homebrew" check_mac_brew_forbidden
 
     gar_section_begin "Secrets"
     gar_timed "Secrets" check_mac_secrets "$secrets_manifest"

@@ -89,6 +89,24 @@ resolved per platform (`<platform>.machine-env-catchup`, else
 wsl, synology); mac now also honors its `machine-env-skip` manifest, which it
 previously ignored.
 
+**Homebrew audit (mac).** `check_mac_homebrew` combines the platform base
+`Brewfile` with each active role's `role.<role>.Brewfile` overlay and runs
+`brew bundle check` against the union — a formula/cask/tap in the desired state
+but not installed is a MISS. A companion check, `check_mac_brew_forbidden`,
+audits the inverse: a `brew-forbidden` manifest (`<platform|shared>.brew-forbidden`
+plus each active role's `role.<role>.brew-forbidden`, one formula name per line,
+`#` comments allowed) lists formulae that must **not** be installed. A forbidden
+formula that *is* installed is a MISS with an `uninstall: brew uninstall <name>`
+hint. This is how the dev-tools role forbids plain `ffmpeg` (it would keep the
+role's keg-only `ffmpeg-full` unlinked). Only the mac runner wires
+`brew-forbidden`; both checks run under the `Homebrew` timing section.
+
+A keg-only formula the role *wants* linked onto PATH (e.g. `ffmpeg-full`, so
+`ffmpeg` resolves to it) must be declared `brew "name", link: true` in the
+Brewfile — `brew bundle check` treats a bare `brew "name"` for a keg-only
+formula as unsatisfied unless it is *unlinked*, which is the opposite of what's
+wanted here.
+
 **`gar info <name>`.** `cmd_info` dispatches, in order: `brew`/`homebrew`
 (literal) → full Homebrew audit section (forces `gar_show_all`, runs
 `check_mac_homebrew`); a machine-env repo → its git status; an app; a

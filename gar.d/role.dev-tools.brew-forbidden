@@ -1,0 +1,3 @@
+# Formulae that conflict with this role's tools and must NOT be installed.
+# Format: one formula name per line (# comments and blank lines ignored).
+ffmpeg   # conflicts with ffmpeg-full: plain ffmpeg keeps ffmpeg-full unlinked/keg-only

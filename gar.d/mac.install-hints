@@ -39,6 +39,8 @@ maven|brew install maven
 lintree|curl -fsSL https://get.lintree.sh | sh
 poppler|brew install poppler
 pdftotext|brew install poppler
+ffmpeg-full|brew install ffmpeg-full
+ffmpeg|brew install ffmpeg-full
 user.name|git config --global user.name "Your Name"
 user.email|git config --global user.email "you@example.com"
 1Password Nightly|Install in Chrome or Opera from https://chromewebstore.google.com/detail/1password-nightly-%E2%80%93-passw/gejiddohjgogedgjnonbofjigllpkmbf
