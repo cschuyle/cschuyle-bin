@@ -17,6 +17,9 @@ sub to_24hr {
     my ($t) = @_;
     return $t unless $t =~ /^(\d{1,2}):(\d{2})\s*([AP]M)$/i;
     my ($h, $m, $ap) = ($1, $2, uc $3);
+    # The trip-details paste format sometimes gives an already-24-hour time
+    # with a bogus AM/PM suffix tacked on (e.g. "16:11 PM"); leave it as-is.
+    return sprintf('%02d:%02d', $h, $m) if $h > 12;
     $h = 0  if $h == 12 && $ap eq 'AM';
     $h += 12 if $h != 12 && $ap eq 'PM';
     return sprintf('%02d:%02d', $h, $m);
@@ -47,12 +50,17 @@ sub short_city_with_code {
 my $conf;
 my @flights;
 
-# Two known paste formats:
+# Three known paste formats:
 #  - "confirmation email" style: "Confirmation Number:" on its own line,
 #    value on the next; flights as "Flight N of M UA1234" headers.
 #  - "manage reservation" page style: "Confirmation number: XYZ123" inline;
 #    flights as Depart/Arrive blocks with a "Flight\tUA 1234" line.
-my $manage_res_style = grep { $_ eq 'Depart' } @lines;
+#  - "trip details" style: "Confirmation number: XYZ123" inline; flights as
+#    "Flight: UA 1234" followed by one-line "Depart: XXX - City on <date>
+#    at <time>" / "Arrive: ..." lines (works for non-UA codeshare flights
+#    like "EN 257 Air Dolomiti" too).
+my $manage_res_style   = grep { $_ eq 'Depart' } @lines;
+my $trip_details_style = grep { /^Flight:\s/ } @lines;
 
 for my $i (0 .. $#lines) {
     if ($lines[$i] =~ /^Confirmation Number:$/) {
@@ -92,6 +100,26 @@ if ($manage_res_style) {
             arr_t => to_24hr($arr_t),
             dep_c => $dep_city,
             arr_c => $arr_city,
+        };
+    }
+} elsif ($trip_details_style) {
+    for my $i (0 .. $#lines) {
+        next unless $lines[$i] =~ /^Flight:\s*([A-Z]{2}\s*\d+)/;
+        (my $code = $1) =~ s/\s+//g;
+
+        my ($dep_code, $dep_city, $dep_date, $dep_t) =
+            $lines[$i + 1] =~ /^Depart:\s*([A-Z]{3})\s*-\s*(.+?)\s+on\s+(.+?)\s+at\s+(.+)$/;
+        my ($arr_code, $arr_city, undef, $arr_t) =
+            $lines[$i + 2] =~ /^Arrive:\s*([A-Z]{3})\s*-\s*(.+?)\s+on\s+(.+?)\s+at\s+(.+)$/;
+        next unless defined $dep_code && defined $arr_code;
+
+        push @flights, {
+            code  => $code,
+            date  => $dep_date,
+            dep_t => to_24hr($dep_t),
+            arr_t => to_24hr($arr_t),
+            dep_c => short_city_with_code($dep_city, $dep_code),
+            arr_c => short_city_with_code($arr_city, $arr_code),
         };
     }
 } else {
