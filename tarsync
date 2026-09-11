@@ -124,16 +124,16 @@ fi
 if [[ -n "$DEST_HOST" ]]; then
   
   rsync --dry-run --archive --verbose${UPDATE_PARAM} --out-format='%n' "${SOURCES[@]}" "$DEST_HOST:$DEST_DIR/" | \
-    # Filter out summary lines and directories
-    grep -v '^Transfer starting\|sen\|^total\|^$' | \
+    # Filter out summary lines, directories, and openrsync's "Skip newer" notices
+    grep -v '^Transfer starting\|sen\|^total\|^$\|^Skip newer' | \
     grep -v '\._' | \
     grep -v '/$' > "$TEMP_FILE"
   
 else
   
   rsync --dry-run --archive --verbose${UPDATE_PARAM} --out-format='%n' "${SOURCES[@]}" "$DEST_DIR/" | \
-    # Filter out summary lines and directories
-    grep -v '^Transfer starting\|sen\|^total\|^$' | \
+    # Filter out summary lines, directories, and openrsync's "Skip newer" notices
+    grep -v '^Transfer starting\|sen\|^total\|^$\|^Skip newer' | \
     grep -v '\._' | \
     grep -v '/$' > "$TEMP_FILE"
   
