@@ -12,6 +12,10 @@ Show disk availability for each configured data directory. The space-separated
 directory list resolves via config-get (key data_dirs): env DDF_DATA_DIRS, then
 ddf.{yaml,json}/config.{yaml,json} in this dir or ~/.config. Without config-get
 on PATH, DDF_DATA_DIRS is used directly.
+
+With no data dirs configured, ddf reports the machine's physical local
+volume(s) instead of erroring: on macOS, / and any /Volumes/* disks; on
+Linux/WSL/Synology, local filesystems excluding tmpfs/overlay/etc.
 EOF
   exit 0
 fi
@@ -27,12 +31,16 @@ cfg() {
   fi
 }
 
-DATA_DIRS="$(cfg data_dirs "${DDF_DATA_DIRS:-}")"
+detect_platform() {
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then printf '%s\n' wsl
+    elif [[ "$(uname -s)" == "Darwin" ]]; then printf '%s\n' mac
+    elif [[ "$(uname -a)" == *[Ss]ynology* ]]; then printf '%s\n' synology
+    elif [[ "$(uname -s)" == "Linux" ]]; then printf '%s\n' linux
+    else printf '%s\n' unknown
+    fi
+}
 
-if [[ -z "$DATA_DIRS" ]] ; then
-    echo "ERROR: no data dirs configured (set DDF_DATA_DIRS or ddf's data-dirs via config-get)."
-    exit 1
-fi
+DATA_DIRS="$(cfg data_dirs "${DDF_DATA_DIRS:-}")"
 
 # Colors for terminals
 #if [ -t 1 ] && command -v tput >/dev/null 2>&1; then 
@@ -55,7 +63,7 @@ if [ -t 1 ]; then
     txtred='\e[0;31m' # Red
     txtgrn='\e[0;32m' # Green
     txtylw='\e[0;33m' # Yellow
-    txtblu='\e[0;34m' # Blue
+    txtblu='\e[1;34m' # Blue (bright, legible on black backgrounds)
     txtpur='\e[0;35m' # Purple
     txtcyn='\e[0;36m' # Cyan
     txtwht='\e[0;37m' # White
@@ -71,30 +79,63 @@ if [ -t 1 ]; then
 
 fi
 
-# echo DATA_DIRS [$DATA_DIRS]
-dirs=($DATA_DIRS)
-# echo dirs ${dirs[@]}
-
-for dir in ${dirs[@]}; do
-    # echo DIR $dir
-    set +e
-    a=( $(df -H|grep "$dir"\$) )
-    set -e
-    # echo A [$a]
-    if [[ -z "$a" ]]; then
-        echo WARNING: No match for $dir 1>&2
-        continue
+# report_dir LABEL PATH -> print one availability line, or a WARNING to stderr.
+# Passing PATH as a df argument yields exactly one data row for the filesystem
+# containing it, so no grep is needed. Columns $2/$4/$5 (Size/Avail/Capacity)
+# sit in identical positions on macOS `df -H` and GNU `df -H`.
+report_dir() {
+    local label="$1" path="$2" row total avail percent
+    row="$(df -H "$path" 2>/dev/null | awk 'NR==2')" || true
+    if [[ -z "$row" ]]; then
+        echo "WARNING: No match for $label" 1>&2
+        return
     fi
-    total=${a[1]}
-    used=${a[2]}
-    avail=${a[3]}
-    percent_used=${a[4]}
+    total="$(awk '{print $2}' <<<"$row")"
+    avail="$(awk '{print $4}' <<<"$row")"
+    percent="$(awk '{print $5}' <<<"$row")"
+    avail="$txtgrn$avail$txtreset"
+    echo -e "[$txtblu$label$txtreset] Disk Avail $avail of $total, $percent used"
+}
 
-    if [[ "$avail" =~ ^\d\d?\d?M$ ]]; then
-        color="$txtgrn"
+# mac_volume_label MOUNT -> "Name (MOUNT)" if diskutil resolves a volume name,
+# else just MOUNT (also the graceful path when diskutil is absent).
+mac_volume_label() {
+    local mount="$1" name
+    name="$(diskutil info "$mount" 2>/dev/null | awk -F': *' '/Volume Name/{print $2; exit}')"
+    if [[ -n "$name" ]]; then
+        printf '%s (%s)\n' "$name" "$mount"
     else
-        color="$txtgrn"
+        printf '%s\n' "$mount"
     fi
-    avail="$color$avail$txtreset"
-    echo -e "[$txtblu$dir$txtreset] Disk Avail $avail of $total, $percent_used used"
-done
+}
+
+# report_physical_volumes -> fallback when no data dirs are configured: report
+# the machine's physical local hard-drive volume(s), skipping synthetic/network
+# /pseudo filesystems.
+report_physical_volumes() {
+    local mnt
+    echo "note: no data dirs configured; reporting physical local volume(s)." 1>&2
+    if [[ "$(detect_platform)" == "mac" ]]; then
+        # macOS exposes one physical disk as many APFS volumes; keep just the
+        # root volume and any external/user disks under /Volumes.
+        while IFS= read -r mnt; do
+            report_dir "$(mac_volume_label "$mnt")" "$mnt"
+        done < <(df -H -l | awk 'NR>1 && ($NF=="/" || $NF ~ "^/Volumes/") {print $NF}')
+    else
+        # Always report / (guarantees output even on busybox df without -x),
+        # then any other local filesystem that isn't tmpfs/overlay/etc.
+        report_dir "/" "/"
+        while IFS= read -r mnt; do
+            report_dir "$mnt" "$mnt"
+        done < <(df -H -l -x tmpfs -x devtmpfs -x overlay -x squashfs -x efivarfs 2>/dev/null \
+                 | awk 'NR>1 && $NF!="/" && $NF ~ "^/" {print $NF}')
+    fi
+}
+
+if [[ -n "$DATA_DIRS" ]]; then
+    for dir in $DATA_DIRS; do
+        report_dir "$dir" "$dir"
+    done
+else
+    report_physical_volumes
+fi

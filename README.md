@@ -30,6 +30,8 @@ Read lines from stdin; print each line with the first whitespace-separated field
 
 Show disk availability for each configured data directory. The space-separated directory list resolves via `config-get` (key `data_dirs`): env `DDF_DATA_DIRS`, then `ddf.{yaml,json}` / `config.{yaml,json}` in the script dir or `~/.config`. Without `config-get` on `PATH`, `DDF_DATA_DIRS` is used directly.
 
+With no data dirs configured, `ddf` reports the machine's physical local volume(s) instead of erroring: on macOS, `/` and any `/Volumes/*` disks; on Linux/WSL/Synology, local filesystems excluding tmpfs/overlay/etc.
+
 ### dus
 
 Disk usage for paths: postorder tree with siblings sorted by size. Caches scan results in SQLite (`~/.dus/dus.db`).
