@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: stressian [TEXT ...]
+
+Add Russian stress marks to Cyrillic text using the ruaccent model.
+Stress is rendered as a combining acute accent (U+0301) on the stressed
+vowel, e.g. "умею" -> "уме́ю".
+
+Reads TEXT from arguments, or from stdin if no arguments are given.
+Requires 'uv' (brew install uv); dependencies are installed/cached by
+uv automatically on first run.
+
+Examples:
+  stressian "Я умею говорить, но знаю не так уж много слов!"
+  echo "Один из ста охотников за черепами." | stressian
+EOF
+  exit 0
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "stressian: requires 'uv', not found on PATH." >&2
+  echo "Install it with:  brew install uv" >&2
+  exit 1
+fi
+
+exec uv run --script "$(dirname "${BASH_SOURCE[0]}")/stressian.py" "$@"
