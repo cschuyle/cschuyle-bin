@@ -65,7 +65,7 @@ my $trip_details_style = grep { /^Flight:\s/ } @lines;
 for my $i (0 .. $#lines) {
     if ($lines[$i] =~ /^Confirmation Number:$/) {
         ($conf) = fields($lines[$i + 1]);
-    } elsif ($lines[$i] =~ /^Confirmation number:\s*(\S+)/i) {
+    } elsif ($lines[$i] =~ /^\s*Confirmation number:\s*(\S+)/i) {
         $conf = $1;
     }
 }
