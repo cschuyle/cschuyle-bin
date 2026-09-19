@@ -206,9 +206,9 @@ if (( dry_run )); then
   for (( i = 0; i < ${#target_dirs[@]}; i++ )); do
     echo "${target_dirs[$i]}: ${counts[$i]} entries, $(human_kb "${size_kb[$i]}")"
   done
-  if (( skipped > 0 )); then
-    exit 1
-  fi
+  # A skip just means that entry is already at its assigned target - i.e.
+  # nothing needs doing for it. That's a normal, successful outcome (the
+  # common case on every run after the first), not a failure.
   exit 0
 fi
 
@@ -237,4 +237,7 @@ for (( i = 0; i < ${#target_dirs[@]}; i++ )); do
   echo "${target_dirs[$i]}: ${counts[$i]} $action_verb, $(human_kb "${size_kb[$i]}")"
 done
 
-(( skipped == 0 ))
+# A skip just means that entry is already at its assigned target - i.e.
+# nothing needs doing for it. That's a normal, successful outcome (the
+# common case on every run after the first), not a failure.
+exit 0
