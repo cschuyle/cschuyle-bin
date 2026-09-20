@@ -2967,6 +2967,32 @@ offer_fix_mac_setting() {
     esac
 }
 
+# Path to qBittorrent's INI config (its actual settings store on this
+# machine — not ~/Library/Preferences, which for qBittorrent only holds a
+# couple of NSNavPanel keys; and not ~/Library/Application Support, which
+# only holds runtime state like logs/BT_backup).
+mac_qbittorrent_ini_path() {
+    printf '%s\n' "$HOME/.config/qBittorrent/qBittorrent.ini"
+}
+
+# Reads Session\Interface from the [BitTorrent] section (plain key=value
+# lines, no INI section-awareness needed since the key name is unique).
+# Returns 1 if the file or key is missing.
+mac_qbittorrent_interface() {
+    local ini key line value
+    ini=$(mac_qbittorrent_ini_path)
+    [[ -f "$ini" ]] || return 1
+    while IFS= read -r line; do
+        key="${line%%=*}"
+        if [[ "$key" == 'Session\Interface' ]]; then
+            value="${line#*=}"
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done <"$ini"
+    return 1
+}
+
 check_mac_settings() {
     local label kind location key expected compare actual settings_path app_path read_status=0
     local hk_char hk_key hk_mod hk_enabled hk_read
@@ -3010,6 +3036,19 @@ check_mac_settings() {
                     fi
                 else
                     report_ok "Setting $label${actual:+ ($actual)}"
+                fi
+                continue
+                ;;
+            qbittorrent-vpn-interface)
+                gar_app_first_existing_path /Applications/qbittorrent.app >/dev/null || continue
+                if ! actual=$(mac_qbittorrent_interface); then
+                    report_warn "Setting $label (not set; open qBittorrent → Settings → Advanced → Network Interface and pick a VPN interface, utun*)"
+                    continue
+                fi
+                if [[ "$actual" =~ ^utun[0-9]+$ ]]; then
+                    report_ok "Setting $label ($actual)"
+                else
+                    report_warn "Setting $label (is ${actual:-all interfaces}; want a VPN interface, utun*)"
                 fi
                 continue
                 ;;

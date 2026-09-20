@@ -2,7 +2,7 @@
 # Format: label|kind|location|key|expected[|compare]
 # kind: json-editor (cursor or code), defaults, sound-menu-bar-always,
 #       machine-name-not-default, next-window-switch-key, chrome-json,
-#       iterm-profiles
+#       iterm-profiles, qbittorrent-vpn-interface
 # location: editor id, "global" for NSGlobalDomain, Chrome profile dir
 #           name (e.g. Default), profile display name (e.g. natera.com),
 #           "*" / "@last" for Chrome's last-used profile, or "@all" for every
@@ -29,6 +29,16 @@
 # ~/Library/Application Support/iTerm2/DynamicProfiles/gar.json under the
 # missing name(s) — Dynamic Profiles reload live, no iTerm restart needed —
 # and is skipped if there's no Default profile to clone from.
+# qbittorrent-vpn-interface checks that qBittorrent's Settings → Advanced →
+# Network Interface is pinned to a VPN tunnel (utun*), not left on the
+# default (all interfaces) — a killswitch measure so torrent traffic can't
+# leak onto the raw connection if the VPN drops. Reads Session\Interface from
+# ~/.config/qBittorrent/qBittorrent.ini (qBittorrent's real config store on
+# this machine — not ~/Library/Preferences or ~/Library/Application Support,
+# which hold only NSNavPanel state and runtime data respectively). Skipped if
+# qBittorrent isn't installed. Advisory only, no automatic fix: the expected
+# value is a pattern (utun*), not a fixed one, and qBittorrent rewrites this
+# file on quit, so editing it while the app is running wouldn't stick.
 # com.apple.keyboard.fnState: the fix writes the plist value immediately (so
 # the check goes green right away), but System Settings' checkbox and the
 # actual F-key behavior do NOT update until a full restart — a logout is not
@@ -46,3 +56,4 @@ Machine name|machine-name-not-default||||
 Move focus to next window (Command-<)|next-window-switch-key||||
 Chrome On startup: continue where you left off|chrome-json|*|session.restore_on_startup|1
 iTerm profiles (Default, Caution, Midcaution)|iterm-profiles||||
+qBittorrent Network Interface bound to VPN|qbittorrent-vpn-interface||||
