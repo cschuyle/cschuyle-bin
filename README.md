@@ -100,6 +100,10 @@ Show disk usage for files or directories, sorted by size. `-h` uses human-readab
 
 Split input into two files: a small fraction (~1/N of lines) and the rest. Default N is 2.
 
+### stressian
+
+Add Russian stress marks to Cyrillic text using the ruaccent model. Reads TEXT from arguments, or from stdin. The first run downloads the ruaccent model (~473 MB) into `~/.stressian` (override with `STRESSIAN_WORKDIR`); later runs use that cache offline.
+
 ### tarsync
 
 Synchronize files with `tar` over a pipe; supports local or remote destinations, dry-run, compression, and optional overwrite-newer.

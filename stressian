@@ -13,6 +13,9 @@ Reads TEXT from arguments, or from stdin if no arguments are given.
 Requires 'uv' (brew install uv); dependencies are installed/cached by
 uv automatically on first run.
 
+The first run downloads the ruaccent model (~473 MB) into ~/.stressian
+(override with STRESSIAN_WORKDIR); later runs use that cache offline.
+
 Examples:
   stressian "Я умею говорить, но знаю не так уж много слов!"
   echo "Один из ста охотников за черепами." | stressian
