@@ -3190,36 +3190,110 @@ offer_brew_install_missing() {
             fi
         elif [[ "$item" =~ ^Formula[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
             name="${BASH_REMATCH[1]}"
-            prompt="Install $name (brew)?"
-            if [[ "$name" == gng || "$name" == */gng ]]; then
-                help=$'brew trust --formula gdubw/gng/gng\nbrew install '"$name"
-            else
-                help="brew install $name"
-            fi
-            gar_prompt_yn "$prompt" "$help" || continue
-            if [[ "$name" == gng || "$name" == */gng ]]; then
-                if ! "$brew_bin" trust --formula gdubw/gng/gng; then
-                    report_warn "Homebrew: could not trust gdubw/gng/gng"
-                    continue
-                fi
-            fi
-            if "$brew_bin" install "$name"; then
-                printf 'Installed %s.\n' "$name"
-            else
-                report_warn "Homebrew: could not install $name"
-            fi
+            case "$(gar_brew_item_action "$brew_bin" formula "$name" "$item")" in
+                link)
+                    # Keg-only formulae (the only kind bundle reports as
+                    # needing a link) refuse a plain `brew link`.
+                    gar_prompt_yn "Link $name (brew)?" "brew link --force $name" || continue
+                    if "$brew_bin" link --force "$name"; then
+                        printf 'Linked %s.\n' "$name"
+                    else
+                        report_warn "Homebrew: could not link $name"
+                    fi
+                    ;;
+                upgrade)
+                    gar_prompt_yn "Upgrade $name (brew)?" "brew upgrade $name" || continue
+                    if "$brew_bin" upgrade "$name"; then
+                        printf 'Upgraded %s.\n' "$name"
+                    else
+                        report_warn "Homebrew: could not upgrade $name"
+                    fi
+                    ;;
+                *)
+                    prompt="Install $name (brew)?"
+                    if [[ "$name" == gng || "$name" == */gng ]]; then
+                        help=$'brew trust --formula gdubw/gng/gng\nbrew install '"$name"
+                    else
+                        help="brew install $name"
+                    fi
+                    gar_prompt_yn "$prompt" "$help" || continue
+                    if [[ "$name" == gng || "$name" == */gng ]]; then
+                        if ! "$brew_bin" trust --formula gdubw/gng/gng; then
+                            report_warn "Homebrew: could not trust gdubw/gng/gng"
+                            continue
+                        fi
+                    fi
+                    if "$brew_bin" install "$name"; then
+                        printf 'Installed %s.\n' "$name"
+                    else
+                        report_warn "Homebrew: could not install $name"
+                    fi
+                    ;;
+            esac
         elif [[ "$item" =~ ^Cask[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
             name="${BASH_REMATCH[1]}"
-            prompt="Install $name (brew cask)?"
-            help="brew install --cask $name"
-            gar_prompt_yn "$prompt" "$help" || continue
-            if "$brew_bin" install --cask "$name"; then
-                printf 'Installed %s.\n' "$name"
+            if [[ "$(gar_brew_item_action "$brew_bin" cask "$name" "$item")" == upgrade ]]; then
+                gar_prompt_yn "Upgrade $name (brew cask)?" "brew upgrade --cask $name" || continue
+                if "$brew_bin" upgrade --cask "$name"; then
+                    printf 'Upgraded %s.\n' "$name"
+                else
+                    report_warn "Homebrew: could not upgrade cask $name"
+                fi
             else
-                report_warn "Homebrew: could not install cask $name"
+                gar_prompt_yn "Install $name (brew cask)?" "brew install --cask $name" || continue
+                if "$brew_bin" install --cask "$name"; then
+                    printf 'Installed %s.\n' "$name"
+                else
+                    report_warn "Homebrew: could not install cask $name"
+                fi
             fi
         fi
     done
+}
+
+# Classify a `brew bundle check` item into the action that satisfies it:
+# link ("needs to be linked"), upgrade ("installed or updated" but already
+# installed, i.e. outdated), or install.
+gar_brew_item_action() {
+    local brew_bin="$1" kind="$2" name="$3" item="$4"
+    if [[ "$item" == *"needs to be linked"* ]]; then
+        printf 'link\n'
+    elif gar_brew_installed "$brew_bin" "$kind" "$name"; then
+        printf 'upgrade\n'
+    else
+        printf 'install\n'
+    fi
+}
+
+# Homebrew locates Xcode via /usr/bin/mdfind when it isn't at the standard
+# path; with Spotlight disabled on / that query never returns, so any
+# brew install/upgrade hangs (after downloading) until interrupted.
+gar_brew_blocked_by_spotlight() {
+    [[ -d /Applications/Xcode.app ]] && return 1
+    command -v mdutil >/dev/null 2>&1 || return 1
+    mdutil -s / 2>/dev/null | grep -qi 'disabled'
+}
+
+# Print the brew command that satisfies a `brew bundle check` item.
+gar_brew_item_command() {
+    local brew_bin="$1" item="$2" name
+    if [[ "$item" =~ ^Tap[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
+        printf 'brew tap %s\n' "${BASH_REMATCH[1]}"
+    elif [[ "$item" =~ ^Formula[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
+        name="${BASH_REMATCH[1]}"
+        case "$(gar_brew_item_action "$brew_bin" formula "$name" "$item")" in
+            link) printf 'brew link --force %s\n' "$name" ;;
+            upgrade) printf 'brew upgrade %s\n' "$name" ;;
+            *) printf 'brew install %s\n' "$name" ;;
+        esac
+    elif [[ "$item" =~ ^Cask[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
+        name="${BASH_REMATCH[1]}"
+        if [[ "$(gar_brew_item_action "$brew_bin" cask "$name" "$item")" == upgrade ]]; then
+            printf 'brew upgrade --cask %s\n' "$name"
+        else
+            printf 'brew install --cask %s\n' "$name"
+        fi
+    fi
 }
 
 check_mac_homebrew() {
@@ -3239,10 +3313,15 @@ check_mac_homebrew() {
         return
     fi
 
-    local missing=()
+    # `brew bundle check` can repeat a line (e.g. "needs to be linked" once per
+    # Brewfile entry that pulls the formula in), so drop exact duplicates.
+    local missing=() seen=$'\n'
     while IFS= read -r line; do
         [[ "$line" == →* ]] || continue
-        missing+=("${line#→ }")
+        line="${line#→ }"
+        [[ "$seen" == *$'\n'"$line"$'\n'* ]] && continue
+        seen+="$line"$'\n'
+        missing+=("$line")
     done < <("$brew_bin" bundle check --file="$brewfile" --verbose 2>&1 || true)
 
     if ((${#missing[@]} == 0)); then
@@ -3275,7 +3354,15 @@ check_mac_homebrew() {
     done
 
     if ((${#still_missing[@]} > 0)); then
-        offer_brew_install_missing "$brew_bin" "${still_missing[@]}"
+        if gar_brew_blocked_by_spotlight; then
+            # Offering would just hang; list the fixes to run once it's back on.
+            report_warn "Homebrew: not offering fixes — Spotlight is disabled on /, so brew install/upgrade hangs in its Xcode lookup (mdfind). Fix: sudo mdutil -i on /, then run:"
+            for item in "${still_missing[@]}"; do
+                printf '  %s\n' "$(gar_brew_item_command "$brew_bin" "$item")"
+            done
+        else
+            offer_brew_install_missing "$brew_bin" "${still_missing[@]}"
+        fi
     fi
 }
 

@@ -101,6 +101,15 @@ hint. This is how the dev-tools role forbids plain `ffmpeg` (it would keep the
 role's keg-only `ffmpeg-full` unlinked). Only the mac runner wires
 `brew-forbidden`; both checks run under the `Homebrew` timing section.
 
+Interactively, `gar` offers to fix each missing item with the action that
+satisfies it (`gar_brew_item_action`): `brew link --force` for "needs to be
+linked", `brew upgrade` for an installed-but-outdated item, else `brew install`
+(duplicate `bundle check` lines are collapsed first). If Spotlight is disabled
+on `/` and Xcode isn't at `/Applications/Xcode.app` (`gar_brew_blocked_by_spotlight`),
+it skips the offers and instead WARNs and prints the brew commands to run:
+Homebrew then looks for Xcode via `/usr/bin/mdfind`, which never returns with
+Spotlight off, so any install/upgrade hangs (after downloading) until Ctrl-C.
+
 A keg-only formula the role *wants* linked onto PATH (e.g. `ffmpeg-full`, so
 `ffmpeg` resolves to it) must be declared `brew "name", link: true` in the
 Brewfile — `brew bundle check` treats a bare `brew "name"` for a keg-only
