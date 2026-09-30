@@ -3178,6 +3178,16 @@ offer_brew_install_missing() {
             else
                 report_warn "Homebrew: could not tap $name"
             fi
+        elif [[ "$item" =~ ^Formula[[:space:]]+([^[:space:]]+)[[:space:]]+needs[[:space:]]+to[[:space:]]+be[[:space:]]+linked ]]; then
+            name="${BASH_REMATCH[1]}"
+            prompt="Link $name (brew)?"
+            help="brew link --overwrite --force $name"
+            gar_prompt_yn "$prompt" "$help" || continue
+            if "$brew_bin" link --overwrite --force "$name"; then
+                printf 'Linked %s.\n' "$name"
+            else
+                report_warn "Homebrew: could not link $name"
+            fi
         elif [[ "$item" =~ ^Formula[[:space:]]+([^[:space:]]+)[[:space:]]+needs ]]; then
             name="${BASH_REMATCH[1]}"
             prompt="Install $name (brew)?"
@@ -3243,7 +3253,11 @@ check_mac_homebrew() {
     local item hint brew_name elsewhere cmd cmd_path
     local still_missing=()
     for item in "${missing[@]}"; do
-        if brew_name=$(gar_brew_item_name "$item") \
+        # A "needs to be linked" formula is already brew-installed; another copy
+        # on PATH is the conflict that blocks linking, not a reason to skip. So
+        # bypass the "exists elsewhere" check and go straight to report + offer.
+        if [[ ! "$item" =~ [[:space:]]needs[[:space:]]+to[[:space:]]+be[[:space:]]+linked ]] \
+            && brew_name=$(gar_brew_item_name "$item") \
             && elsewhere=$(gar_brew_item_elsewhere "$brew_name" "$brew_bin"); then
             cmd="${elsewhere%%|*}"
             cmd_path="${elsewhere#*|}"
