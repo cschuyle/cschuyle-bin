@@ -245,7 +245,10 @@ with ThreadPoolExecutor(max_workers=JOBS) as executor:
 
     except KeyboardInterrupt:
         log_stderr("INFO", "Aborted by user. Exiting...")
-        sys.exit(1)
+        sys.stderr.flush()
+        # Die by SIGINT (not exit status) so a calling shell script aborts too.
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGINT)
 
 # ------------------ Build hierarchical tree ------------------
 def build_tree(dir_path):

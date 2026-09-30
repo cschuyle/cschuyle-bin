@@ -923,5 +923,8 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        print(f"\n{PROG}: interrupted", file=sys.stderr)
-        sys.exit(130)
+        print(f"\n{PROG}: interrupted", file=sys.stderr, flush=True)
+        import signal
+        # Die by SIGINT (not exit status) so a calling shell script aborts too.
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGINT)

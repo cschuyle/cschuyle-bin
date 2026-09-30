@@ -1255,4 +1255,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.stderr.write("Process was interrupted and terminated before completion.\n")
+        sys.stderr.flush()
+        import signal
+        # Die by SIGINT (not exit status) so a calling shell script aborts too.
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGINT)

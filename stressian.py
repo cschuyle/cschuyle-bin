@@ -6,7 +6,20 @@
 import os
 import pathlib
 import re
+import signal
 import sys
+
+
+def _on_sigint(signum, frame):
+    sys.stderr.write("Process was interrupted and terminated before completion.\n")
+    sys.stderr.flush()
+    # Die by SIGINT (not exit status) so a calling shell script aborts too.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+# Top-level script (no main()), so handle Ctrl-C via a handler rather than try/except.
+signal.signal(signal.SIGINT, _on_sigint)
 
 # Validate TLS against the OS trust store (macOS Security framework) instead of
 # certifi. ruaccent's first-run model download goes over httpx, which otherwise
