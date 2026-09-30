@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+#
+# bash-cc — cyclomatic complexity for bash/sh scripts (McCabe's method).
+#
+# Bash has no mature cyclomatic-complexity tool (radon is Python-only; lizard
+# mis-parses shell). This computes CC the way McCabe defined it: for each unit,
+#   CC = 1 + number of decision points
+# where a decision point is anything that adds an independent branch:
+#   if, elif, for, while, until, case-arms (each `pattern)` except default `*)`),
+#   and the && / || short-circuit operators. `else` adds nothing (no new branch).
+#
+# It reports per-function CC, a TOP-LEVEL unit (code outside any function), the
+# file total, and a McCabe risk rank (A 1-10 / B 11-20 / C 21-50 / F >50).
+#
+# Comments and the contents of quoted strings / heredocs are stripped before
+# counting, so decision-point keywords inside them are not miscounted.
+#
+# Usage:
+#   bash-cc FILE [FILE...]      per-function + total CC for each file
+#   bash-cc -s FILE             summary only (file total + rank, no per-function)
+#   bash-cc -h
+#
+# Limitations (honest): this is a lexical counter, not a parser. It handles the
+# common bash idioms well; exotic constructs (arithmetic ternaries inside $((...)),
+# deeply nested here-strings) may be approximated. Good enough for comparing two
+# scripts' complexity; not a substitute for a real AST tool where one exists.
+set -euo pipefail
+
+usage() { sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//; /^set -euo/d'; }
+
+summary_only=0
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  -s|--summary) summary_only=1; shift ;;
+esac
+[ "$#" -ge 1 ] || { echo "bash-cc: need at least one FILE (see -h)" >&2; exit 2; }
+
+# Strip comments and the insides of strings/heredocs so keywords there don't count.
+# Approach: drop full-line and trailing `#` comments (crudely but effectively for
+# scripts), blank out single- and double-quoted string bodies, and drop heredoc
+# body lines (between `<<TAG`/`<<-TAG` and a line that is just TAG).
+strip_noise() {
+  awk '
+    BEGIN { in_heredoc = 0 }
+    {
+      line = $0
+      # inside a heredoc: emit blank until the terminator, then resume
+      if (in_heredoc) {
+        t = line; sub(/^[ \t]+/, "", t)
+        if (t == heredoc_tag) { in_heredoc = 0 }
+        print ""; next
+      }
+      # detect a heredoc start:  <<TAG or <<-TAG or <<"TAG"/<<\x27TAG\x27 (ignore <<< here-strings)
+      if (match(line, /<<-?[ \t]*["\x27]?[A-Za-z_][A-Za-z0-9_]*/)) {
+        if (line !~ /<<</) {
+          tag = substr(line, RSTART, RLENGTH)
+          gsub(/^<<-?[ \t]*["\x27]?/, "", tag)
+          heredoc_tag = tag
+          in_heredoc = 1
+          # keep the starting line (it may hold decision tokens before the <<)
+        }
+      }
+      # blank out quoted-string bodies (keep the quotes, drop contents)
+      gsub(/"[^"]*"/, "\"\"", line)
+      gsub(/\x27[^\x27]*\x27/, "\x27\x27", line)
+      # strip a comment starting at # that is preceded by start-of-line or whitespace
+      sub(/(^|[ \t])#.*$/, "", line)
+      print line
+    }
+  ' "$1"
+}
+
+# Count decision points in a block of (noise-stripped) text on stdin.
+count_dp() {
+  awk '
+    {
+      line = $0
+      # keyword decision points — count occurrences as whole words
+      n += gsub(/(^|[ \t;(&|])if([ \t]|$)/,   " ")
+      n += gsub(/(^|[ \t;(&|])elif([ \t]|$)/, " ")
+      n += gsub(/(^|[ \t;(&|])for([ \t]|$)/,  " ")
+      n += gsub(/(^|[ \t;(&|])while([ \t]|$)/," ")
+      n += gsub(/(^|[ \t;(&|])until([ \t]|$)/," ")
+      # && and || short-circuit operators
+      n += gsub(/&&/, " ")
+      n += gsub(/\|\|/, " ")
+      # case arms: a line whose (trimmed) form ends in ) and is not the default *)
+      t = line; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+      if (t ~ /\)$/ && t !~ /^\*\)$/ && t !~ /(^|[ \t;(&|])(if|elif|for|while|until)([ \t]|$)/) {
+        # heuristic: a bare pattern arm like  foo|bar)  or  y|Y|yes)
+        if (t ~ /^[][A-Za-z0-9_"\x27*?.|\\ -]+\)$/) n += 1
+      }
+    }
+    END { print n+0 }
+  '
+}
+
+rank() { # $1 = cc
+  if   [ "$1" -le 10 ]; then echo A
+  elif [ "$1" -le 20 ]; then echo B
+  elif [ "$1" -le 50 ]; then echo C
+  else echo F; fi
+}
+
+analyze_file() {
+  local file="$1"
+  local stripped; stripped="$(strip_noise "$file")"
+
+  # Split into function bodies vs top-level using brace depth. A function starts
+  # at a line matching `name() {` (or `function name {`); its body runs until the
+  # matching close brace at depth 0.
+  local funcs_out="" total=0 fcount=0
+  # Use awk to emit, per line, a tag: FUNC <name> <line> or TOP <line>.
+  local tagged; tagged="$(printf '%s\n' "$stripped" | awk '
+    BEGIN { depth = 0; infn = 0; name = "" }
+    {
+      line = $0
+      if (!infn && match(line, /^[ \t]*(function[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*\(\)[ \t]*\{/)) {
+        # extract name
+        nm = line; sub(/^[ \t]*(function[ \t]+)?/, "", nm); sub(/[ \t]*\(\).*/, "", nm)
+        infn = 1; name = nm; depth = 0
+      }
+      if (infn) {
+        print "FUNC\t" name "\t" line
+        # track brace depth using this line
+        o = gsub(/\{/, "{"); c = gsub(/\}/, "}")
+        depth += o - c
+        if (depth <= 0) { infn = 0; name = "" }
+      } else {
+        print "TOP\t" line
+      }
+    }
+  ')"
+
+  # per-function CC
+  local names; names="$(printf '%s\n' "$tagged" | awk -F'\t' '$1=="FUNC"{print $2}' | awk '!seen[$0]++')"
+  local n
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    local body dp cc
+    body="$(printf '%s\n' "$tagged" | awk -F'\t' -v want="$n" '$1=="FUNC" && $2==want {print $3}')"
+    dp="$(printf '%s\n' "$body" | count_dp)"
+    cc=$((dp + 1))
+    total=$((total + cc))
+    fcount=$((fcount + 1))
+    funcs_out="${funcs_out}$(printf '  %-28s CC %3d  %s\n' "$n" "$cc" "$(rank "$cc")")"$'\n'
+  done <<< "$names"
+
+  # top-level unit
+  local top_body top_dp top_cc
+  top_body="$(printf '%s\n' "$tagged" | awk -F'\t' '$1=="TOP"{print $2}')"
+  top_dp="$(printf '%s\n' "$top_body" | count_dp)"
+  top_cc=$((top_dp + 1))
+  total=$((total + top_cc))
+
+  printf '%s\n' "$file"
+  if [ "$summary_only" -eq 0 ]; then
+    printf '%s' "$funcs_out"
+    printf '  %-28s CC %3d  %s\n' "(top-level)" "$top_cc" "$(rank "$top_cc")"
+  fi
+  printf '  --> functions: %d   file total CC: %d   rank: %s\n' "$fcount" "$total" "$(rank "$total")"
+}
+
+for f in "$@"; do
+  [ -f "$f" ] || { echo "bash-cc: not a file: $f" >&2; continue; }
+  analyze_file "$f"
+done
