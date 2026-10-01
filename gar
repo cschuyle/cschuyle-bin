@@ -12,6 +12,15 @@ gar_section_name=""
 gar_section_header_printed=0
 gar_tmpdir=""
 gar_active_roles=()
+warnings=0
+# Interactive fixes applied this run, split by the severity of the finding they
+# fixed (a MISS is an issue; a WARN is a warning). Any fix triggers a re-run in
+# recheck mode (GAR_RECHECK=1: no prompts, no banner) to show what remains.
+gar_fixed_issues=0
+gar_fixed_warnings=0
+gar_recheck="${GAR_RECHECK:-0}"
+gar_section_lead=$'\n'
+(( gar_recheck )) && gar_section_lead=""
 
 # Bound network git operations (fetch/pull) so a stalled connection or an
 # unanswered host-key/passphrase prompt fails within seconds instead of
@@ -1318,7 +1327,8 @@ gar_section_begin() {
 
 gar_section_emit_header() {
     if (( gar_section_header_printed == 0 )); then
-        printf '\n%s\n' "$gar_section_name"
+        printf '%s%s\n' "$gar_section_lead" "$gar_section_name"
+        gar_section_lead=$'\n'
         gar_section_header_printed=1
     fi
 }
@@ -1339,6 +1349,25 @@ report_miss() {
 report_warn() {
     gar_section_emit_header
     printf 'WARN %s\n' "$1"
+    warnings=$((warnings + 1))
+}
+
+# gar_note_fixed issue|warning — record a successfully applied interactive fix.
+gar_note_fixed() {
+    if [[ "$1" == issue ]]; then
+        gar_fixed_issues=$((gar_fixed_issues + 1))
+    else
+        gar_fixed_warnings=$((gar_fixed_warnings + 1))
+    fi
+}
+
+# "N thing" / "N things"
+gar_plural() {
+    if (( $1 == 1 )); then
+        printf '%s %s' "$1" "$2"
+    else
+        printf '%s %ss' "$1" "$2"
+    fi
 }
 
 # Advisory, like report_warn: does NOT bump issues / affect exit status. Used
@@ -1359,6 +1388,8 @@ GAR_STATUS_WIDTH=13   # width of the longest prefix, "EXPECTED MODS"
 report_line() {
     gar_section_emit_header
     printf '%-*s  %s\n' "$GAR_STATUS_WIDTH" "$1" "$2"
+    [[ "$1" == WARN ]] && warnings=$((warnings + 1))
+    return 0
 }
 
 report_ok_preformatted() {
@@ -1508,6 +1539,7 @@ gar_repo_rebase_onto_mainline() {
 }
 
 gar_can_prompt() {
+    (( gar_recheck )) && return 1
     [[ -r /dev/tty ]] || [[ -t 0 ]]
 }
 
@@ -1516,7 +1548,9 @@ gar_can_prompt() {
 # ?-Print install command. Optional third arg: default reply Y or N (default Y).
 gar_prompt_yn() {
     local prompt="$1" help="${2:-}" default="${3:-Y}" reply input suffix
-    if [[ -r /dev/tty ]]; then
+    if (( gar_recheck )); then
+        return 1
+    elif [[ -r /dev/tty ]]; then
         input=/dev/tty
     elif [[ -t 0 ]]; then
         input=/dev/stdin
@@ -2000,6 +2034,7 @@ offer_machine_env_repo_pull() {
         if gar_prompt_yn "$prompt"; then
             if gar_timed "repo rebase: $name" gar_repo_rebase_onto_mainline "$path" "$mainline"; then
                 printf 'Updated %s (%s)\n' "$name" "$path"
+                gar_note_fixed warning
             else
                 report_warn "Machine env repo $name ($path — rebase failed)"
             fi
@@ -2042,6 +2077,7 @@ offer_machine_env_repo_pull() {
     if gar_prompt_yn "$prompt"; then
         if gar_timed "repo pull: $name" gar_repo_pull "$path" "$config_branch"; then
             printf 'Updated %s (%s)\n' "$name" "$path"
+            gar_note_fixed warning
         else
             report_warn "Machine env repo $name ($path — pull failed)"
         fi
@@ -2897,6 +2933,7 @@ offer_fix_iterm_profiles() {
         gar_prompt_yn "Fix $label: create iTerm profile \"$name\" (clone of $source)?" || continue
         if mac_iterm_create_profile "$source" "$name"; then
             printf 'Created iTerm profile "%s" (clone of %s; iTerm reloads Dynamic Profiles automatically).\n' "$name" "$source"
+            gar_note_fixed warning
         else
             report_warn "Setting $label (could not create profile \"$name\")"
         fi
@@ -2915,8 +2952,10 @@ offer_fix_mac_setting() {
                 if [[ "$key" == com.apple.keyboard.fnState ]]; then
                     gar_mark_pending_restart "$key"
                     printf 'Set %s to %s (requires a full RESTART — not just logout — to take effect in System Settings and actual key behavior).\n' "$key" "$expected"
+                    gar_note_fixed warning
                 else
                     printf 'Set %s to %s (may take effect after logout).\n' "$key" "$expected"
+                    gar_note_fixed warning
                 fi
             else
                 report_warn "Setting $label (could not write $key)"
@@ -2928,6 +2967,7 @@ offer_fix_mac_setting() {
             gar_prompt_yn "Fix $label: set $key to $expected in $settings_path?" || return 0
             if mac_write_json_setting "$settings_path" "$key" "$expected"; then
                 printf 'Set %s to %s in %s.\n' "$key" "$expected" "$settings_path"
+                gar_note_fixed warning
             else
                 report_warn "Setting $label (could not update $settings_path)"
             fi
@@ -2941,6 +2981,7 @@ offer_fix_mac_setting() {
             fi
             if mac_chrome_write_pref "$location" "$key" "$expected"; then
                 printf 'Set Chrome %s to %s (restart Chrome if it was running).\n' "$key" "$expected"
+                gar_note_fixed warning
             else
                 report_warn "Setting $label (could not update Chrome preferences)"
             fi
@@ -2952,6 +2993,7 @@ offer_fix_mac_setting() {
             gar_prompt_yn "Fix $label: always show volume in the menu bar?" || return 0
             if mac_fix_sound_menu_bar; then
                 printf 'Enabled always-on volume in the menu bar.\n'
+                gar_note_fixed warning
             else
                 report_warn "Setting $label (could not update Control Center)"
             fi
@@ -2960,6 +3002,7 @@ offer_fix_mac_setting() {
             gar_prompt_yn "Fix $label: map \"Move focus to next window\" to Command-<?" || return 0
             if mac_fix_next_window_angle; then
                 printf 'Mapped Move focus to next window to Command-< (log out/in if it does not take effect right away).\n'
+                gar_note_fixed warning
             else
                 report_warn "Setting $label (could not update symbolic hotkey)"
             fi
@@ -3175,6 +3218,7 @@ offer_brew_install_missing() {
             gar_prompt_yn "$prompt" "$help" || continue
             if "$brew_bin" tap "$name"; then
                 printf 'Tapped %s.\n' "$name"
+                gar_note_fixed issue
             else
                 report_warn "Homebrew: could not tap $name"
             fi
@@ -3185,6 +3229,7 @@ offer_brew_install_missing() {
             gar_prompt_yn "$prompt" "$help" || continue
             if "$brew_bin" link --overwrite --force "$name"; then
                 printf 'Linked %s.\n' "$name"
+                gar_note_fixed issue
             else
                 report_warn "Homebrew: could not link $name"
             fi
@@ -3197,6 +3242,7 @@ offer_brew_install_missing() {
                     gar_prompt_yn "Link $name (brew)?" "brew link --force $name" || continue
                     if "$brew_bin" link --force "$name"; then
                         printf 'Linked %s.\n' "$name"
+                        gar_note_fixed issue
                     else
                         report_warn "Homebrew: could not link $name"
                     fi
@@ -3205,6 +3251,7 @@ offer_brew_install_missing() {
                     gar_prompt_yn "Upgrade $name (brew)?" "brew upgrade $name" || continue
                     if "$brew_bin" upgrade "$name"; then
                         printf 'Upgraded %s.\n' "$name"
+                        gar_note_fixed issue
                     else
                         report_warn "Homebrew: could not upgrade $name"
                     fi
@@ -3225,6 +3272,7 @@ offer_brew_install_missing() {
                     fi
                     if "$brew_bin" install "$name"; then
                         printf 'Installed %s.\n' "$name"
+                        gar_note_fixed issue
                     else
                         report_warn "Homebrew: could not install $name"
                     fi
@@ -3236,6 +3284,7 @@ offer_brew_install_missing() {
                 gar_prompt_yn "Upgrade $name (brew cask)?" "brew upgrade --cask $name" || continue
                 if "$brew_bin" upgrade --cask "$name"; then
                     printf 'Upgraded %s.\n' "$name"
+                    gar_note_fixed issue
                 else
                     report_warn "Homebrew: could not upgrade cask $name"
                 fi
@@ -3243,6 +3292,7 @@ offer_brew_install_missing() {
                 gar_prompt_yn "Install $name (brew cask)?" "brew install --cask $name" || continue
                 if "$brew_bin" install --cask "$name"; then
                     printf 'Installed %s.\n' "$name"
+                    gar_note_fixed issue
                 else
                     report_warn "Homebrew: could not install cask $name"
                 fi
@@ -3862,7 +3912,8 @@ run_synology_checks() {
 }
 
 main() {
-    local platform
+    local platform fixed rc
+    local orig_args=("$@")
     issues=0
 
     if [[ "${1:-}" == "info" ]]; then
@@ -3904,8 +3955,10 @@ main() {
     platform=$(detect_platform)
     gar_preflight_config || exit 2
     detect_roles
-    printf 'gar: platform %s; roles %s\n' "$platform" "$(gar_format_roles)"
-    gar_warn_unknown_roles
+    if (( ! gar_recheck )); then
+        printf 'gar: platform %s; roles %s\n' "$platform" "$(gar_format_roles)"
+        gar_warn_unknown_roles
+    fi
 
     gar_init_workdir
 
@@ -3929,11 +3982,28 @@ main() {
     esac
 
     printf '\n'
+
+    # Fixes were applied: the findings above are stale, so re-run (no prompts)
+    # and let that run's report and exit status stand as the result.
+    if (( gar_fixed_issues + gar_fixed_warnings > 0 )); then
+        if (( gar_fixed_issues > 0 )); then
+            fixed=$(gar_plural "$gar_fixed_issues" issue)
+        else
+            fixed=$(gar_plural "$gar_fixed_warnings" warning)
+        fi
+        printf 'Gar: Fixed %s.\n\nAfter fixes:\n' "$fixed"
+        GAR_RECHECK=1 "${BASH_SOURCE[0]}" ${orig_args[@]+"${orig_args[@]}"}
+        rc=$?
+        exit "$rc"
+    fi
+
+    local warn_suffix=""
+    (( warnings > 0 )) && warn_suffix=". $(gar_plural "$warnings" warning)."
     if (( issues > 0 )); then
-        printf '%s issue(s)\n' "$issues"
+        printf '%s issue(s)%s\n' "$issues" "$warn_suffix"
         exit 1
     fi
-    printf 'All checks passed\n'
+    printf 'All checks passed%s\n' "$warn_suffix"
 }
 
 main "$@"

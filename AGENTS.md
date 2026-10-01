@@ -18,6 +18,15 @@ The same policy is mirrored for Cursor in [`.cursor/rules/git-and-commits.mdc`](
 `WARN` and `EXPECTED MODS` are advisory only). One of its checks audits a set of
 git repos ("machine environment repos") — the part most likely to need changes.
 
+**Post-fix recheck.** Each interactive fix that succeeds is counted
+(`gar_note_fixed issue|warning`: brew fixes clear a MISS, so they count as
+issues; repo pulls/rebases and settings fixes clear a WARN). If any fix was
+applied, the end-of-run summary is replaced by `Gar: Fixed N issues.` (or
+`N warnings` when no issue was fixed), `After fixes:`, and a re-run of `gar`
+with `GAR_RECHECK=1` — no prompts, no platform banner — whose report, summary
+and exit status stand as the result. The summary line appends the WARN count:
+`All checks passed. 1 warning.` / `4 issue(s). 1 warning.`
+
 **Startup config preflight.** Before the main audit run, `gar` validates its
 config paths — the repo's `gar.d/`, and the local `~/.config/gar` dir, its `d/`
 overlay dir, and its `roles` file — and hard-fails to stderr with `exit 2` if
