@@ -1,0 +1,724 @@
+#!/usr/bin/env python3
+"""claude-sessions — list and keyword-search Claude Code session transcripts.
+
+Claude Code stores each session as a JSONL transcript under
+``~/.claude/projects/<encoded-project-dir>/<session-uuid>.jsonl``. The label the
+``/resume`` picker shows is persisted into the transcript as ``ai-title`` records (the
+LAST one wins, since the title is refined as the session goes); reading it back is fully
+repeatable with no model call.
+
+The project directory name is the absolute project path with every run of non-alphanumeric
+characters replaced by ``-`` — e.g. ``/Users/me/workspace/lims`` becomes
+``-Users-me-workspace-lims``. By default this resolves the project for the current working
+directory; pass ``--project <path>`` for another, or ``--all`` for every project.
+
+Usage
+-----
+``claude-sessions``
+    List sessions, newest activity first:
+    ``<ai-title>   <started>  <msgs>  <session-id>``. Sessions with no ``ai-title`` yet
+    fall back to their first user prompt, marked with a ``~`` prefix.
+
+``claude-sessions <term> [<term> ...]``
+    Keyword search. The positional terms are joined with spaces into one query and ranked
+    by BM25. Two fields are scored separately and combined: the *conversation* (user
+    prompts + assistant text replies) is weighted heavily; the *tooling* text (tool-call
+    inputs + tool results — file dumps, command output) is weighted low, so it adds recall
+    without letting an incidentally pasted file outrank the actual discussion. A snippet
+    around the best match is shown. The index is incrementally refreshed first (and a note
+    says so), so new sessions are always searchable.
+
+``claude-sessions --index``
+    Force a full rebuild of the search index and exit. Standalone — combining ``--index``
+    with search terms is an error.
+
+Index
+-----
+Cached at ``~/.claude/projects/.claude-sessions-index.json``, keyed by each transcript's
+mtime. A plain search re-tokenizes only the sessions whose files changed and drops entries
+for deleted files, so warm searches are near-instant. A schema-version stamp forces a full
+rebuild when this tool's index format changes.
+
+Pure python3 + stdlib; no external dependencies.
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import math
+import os
+import re
+import sys
+from collections import Counter
+from datetime import datetime
+
+PROJECTS_ROOT = os.path.expanduser("~/.claude/projects")
+INDEX_PATH = os.path.join(PROJECTS_ROOT, ".claude-sessions-index.json")
+INDEX_VERSION = 1  # bump when the stored schema changes, to force a full rebuild
+
+# BM25 field weights: conversation dominates, tooling adds recall at low weight.
+FIELD_WEIGHTS = {"conv": 3.0, "tool": 1.0}
+BM25_K1 = 1.5
+BM25_B = 0.75
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+)*")
+# Small, deliberately conservative stopword set. Keeps technical tokens (LIMS, api, …).
+_STOPWORDS = frozenset(
+    "a an and are as at be but by for from has have how i if in into is it its of on or "
+    "that the their then there these they this to was were what when which who will with "
+    "you your".split()
+)
+
+
+# --------------------------------------------------------------------------- #
+# Color (ANSI, auto-disabled when stdout is not a TTY, piped, or NO_COLOR is set)
+# --------------------------------------------------------------------------- #
+class _Color:
+    """ANSI SGR wrappers; every method is a no-op passthrough when color is off."""
+
+    CODES = {
+        "title": "1;36",     # bold cyan — session name
+        "ts": None,          # terminal default — timestamp
+        "id": "94",          # bright blue — session id (the thing you copy to --resume)
+        "msgs": None,        # terminal default — message count
+        "tool": "35",        # magenta — [tooling] tag
+        "faint": "2",        # dim — the ~ fallback marker, snippet body
+        "hit": "1;33",       # bold yellow — matched query terms in a snippet
+        "s_hi": "1;32",      # bold green — strongest score
+        "s_mid": "32",       # green — mid score
+        "s_lo": "33",        # yellow — weak score
+    }
+
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+
+    def __call__(self, role: str, text: str) -> str:
+        if not self.enabled:
+            return text
+        code = self.CODES.get(role)
+        return f"\033[{code}m{text}\033[0m" if code else text
+
+    def score(self, value: float, top: float) -> str:
+        """Grade a score by its fraction of the top score in the current result set."""
+        text = f"{value:6.2f}"
+        if not self.enabled:
+            return text
+        frac = value / top if top else 0.0
+        role = "s_hi" if frac >= 0.66 else "s_mid" if frac >= 0.33 else "s_lo"
+        return self(role, text)
+
+
+def _want_color(args) -> bool:
+    if getattr(args, "no_color", False):
+        return False
+    if os.environ.get("NO_COLOR"):
+        return False
+    return sys.stdout.isatty()
+
+
+# --------------------------------------------------------------------------- #
+# Project / path resolution
+# --------------------------------------------------------------------------- #
+def encode_project_dir(path: str) -> str:
+    """Return the ``~/.claude/projects`` subdir name for an absolute project path."""
+    return re.sub(r"[^a-zA-Z0-9]+", "-", os.path.abspath(path))
+
+
+def find_project_dir(path: str) -> str | None:
+    """Resolve the projects subdir for ``path``, walking up to a matching ancestor."""
+    cur = os.path.abspath(path)
+    while True:
+        candidate = os.path.join(PROJECTS_ROOT, encode_project_dir(cur))
+        if os.path.isdir(candidate):
+            return candidate
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
+
+def resolve_scope(args) -> tuple[list[str], str]:
+    """Return (list of transcript file paths, human-readable scope label)."""
+    if args.all:
+        return glob.glob(os.path.join(PROJECTS_ROOT, "*", "*.jsonl")), "all projects"
+    proj = find_project_dir(args.project)
+    if proj is None:
+        print(
+            f"claude-sessions: no Claude Code project found for "
+            f"{os.path.abspath(args.project)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return glob.glob(os.path.join(proj, "*.jsonl")), proj
+
+
+# --------------------------------------------------------------------------- #
+# Transcript extraction
+# --------------------------------------------------------------------------- #
+def _text_from_content(content) -> str:
+    """Flatten a message ``content`` (str or list of blocks) to its plain text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text" and b.get("text"):
+                out.append(b["text"])
+        return "\n".join(out)
+    return ""
+
+
+def _tooling_text_from_content(content) -> str:
+    """Extract tool-call inputs and tool-result output from a message ``content``."""
+    if not isinstance(content, list):
+        return ""
+    out = []
+    for b in content:
+        if not isinstance(b, dict):
+            continue
+        btype = b.get("type")
+        if btype == "tool_use":
+            name = b.get("name", "")
+            if name:
+                out.append(name)
+            out.append(json.dumps(b.get("input", ""), default=str))
+        elif btype == "tool_result":
+            out.append(_stringify_tool_result(b.get("content")))
+    return "\n".join(out)
+
+
+def _stringify_tool_result(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                out.append(b.get("text", ""))
+        return "\n".join(out)
+    return ""
+
+
+def extract_session(path: str) -> dict | None:
+    """Parse one transcript into metadata + the ``conv``/``tool`` text fields.
+
+    Returns None if the file is unreadable or has no records.
+    """
+    title = None
+    first_ts = last_ts = None
+    user_msgs = 0
+    conv_parts: list[str] = []
+    tool_parts: list[str] = []
+    first_prompt: str | None = None
+
+    try:
+        with open(path, errors="ignore") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                t = d.get("timestamp")
+                if t:
+                    if first_ts is None:
+                        first_ts = t
+                    last_ts = t
+
+                rtype = d.get("type")
+                if rtype == "ai-title" and d.get("aiTitle"):
+                    title = d["aiTitle"]
+                    continue
+                if rtype not in ("user", "assistant"):
+                    continue
+
+                content = d.get("message", {}).get("content")
+                text = _text_from_content(content)
+                tooling = _tooling_text_from_content(content)
+
+                if rtype == "user":
+                    # A user "message" that is only a tool_result is tooling, not convo.
+                    if text and not text.lstrip().startswith("<"):
+                        user_msgs += 1
+                        conv_parts.append(text)
+                        if first_prompt is None and "tool_result" not in str(content):
+                            first_prompt = " ".join(text.split())
+                    if tooling:
+                        tool_parts.append(tooling)
+                else:  # assistant
+                    if text:
+                        conv_parts.append(text)
+                    if tooling:
+                        tool_parts.append(tooling)
+    except OSError:
+        return None
+
+    if first_ts is None and not conv_parts and not tool_parts:
+        return None
+
+    label = title or first_prompt or "(untitled)"
+    return {
+        "id": os.path.splitext(os.path.basename(path))[0],
+        "path": path,
+        "title": label,
+        "fallback": title is None,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "msgs": user_msgs,
+        "mtime": os.path.getmtime(path),
+        "conv": "\n".join(conv_parts),
+        "tool": "\n".join(tool_parts),
+    }
+
+
+def tokenize(text: str) -> list[str]:
+    return [
+        tok
+        for tok in _TOKEN_RE.findall(text.lower())
+        if len(tok) > 1 and tok not in _STOPWORDS
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Index (cached, mtime-keyed, incremental)
+# --------------------------------------------------------------------------- #
+def _load_index() -> dict:
+    try:
+        with open(INDEX_PATH) as fh:
+            idx = json.load(fh)
+        if idx.get("version") == INDEX_VERSION:
+            return idx
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {"version": INDEX_VERSION, "sessions": {}}
+
+
+def _save_index(idx: dict) -> None:
+    tmp = INDEX_PATH + ".tmp"
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(idx, fh)
+        os.replace(tmp, INDEX_PATH)
+    except OSError as e:
+        print(f"claude-sessions: could not write index: {e}", file=sys.stderr)
+
+
+def _entry_for(session: dict) -> dict:
+    """Build a stored index entry: term-frequency maps + lengths, no raw text."""
+    conv_toks = tokenize(session["conv"])
+    tool_toks = tokenize(session["tool"])
+    return {
+        "path": session["path"],
+        "mtime": session["mtime"],
+        "title": session["title"],
+        "fallback": session["fallback"],
+        "first_ts": session["first_ts"],
+        "msgs": session["msgs"],
+        "tf_conv": dict(Counter(conv_toks)),
+        "tf_tool": dict(Counter(tool_toks)),
+        "len_conv": len(conv_toks),
+        "len_tool": len(tool_toks),
+    }
+
+
+class _ProgressMeter:
+    """A dot-per-item stderr ticker shown only when there is real work to do.
+
+    Silent when stderr is not a TTY (e.g. piped), so it never pollutes captured output.
+    """
+
+    def __init__(self, total: int, label: str):
+        self.total = total
+        self.done = 0
+        self.enabled = total > 0 and sys.stderr.isatty()
+        if self.enabled:
+            sys.stderr.write(f"{label} {total} session(s): ")
+            sys.stderr.flush()
+
+    def tick(self) -> None:
+        self.done += 1
+        if self.enabled:
+            sys.stderr.write(".")
+            sys.stderr.flush()
+
+    def done_(self) -> None:
+        if self.enabled:
+            sys.stderr.write(" done\n")
+            sys.stderr.flush()
+
+
+def refresh_index(files: list[str], force: bool = False) -> tuple[dict, int]:
+    """Update the cached index for ``files``; return (index, count_reindexed).
+
+    Only sessions whose file mtime changed (or all, if ``force``) are re-tokenized.
+    Entries whose files no longer exist anywhere are pruned lazily on save. A progress
+    meter is shown on a TTY when any sessions actually need (re)tokenizing.
+    """
+    idx = {"version": INDEX_VERSION, "sessions": {}} if force else _load_index()
+    sessions = idx["sessions"]
+
+    # First pass: decide which files need (re)tokenizing, so the meter has a denominator.
+    todo: list[tuple[str, str, float]] = []  # (session_id, path, mtime)
+    for path in files:
+        sid = os.path.splitext(os.path.basename(path))[0]
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        cached = sessions.get(sid)
+        if cached and not force and cached.get("mtime") == mtime:
+            continue
+        todo.append((sid, path, mtime))
+
+    meter = _ProgressMeter(len(todo), "Indexing")
+    reindexed = 0
+    for sid, path, _mtime in todo:
+        session = extract_session(path)
+        meter.tick()
+        if session is None:
+            continue
+        sessions[sid] = _entry_for(session)
+        reindexed += 1
+    meter.done_()
+
+    # Prune entries for files that vanished (only those we were asked about this run
+    # could be pruned safely; leave out-of-scope entries from other projects alone).
+    if not force:
+        for sid in list(sessions):
+            entry = sessions[sid]
+            if not os.path.exists(entry.get("path", "")):
+                del sessions[sid]
+
+    if reindexed or force:
+        _save_index(idx)
+    return idx, reindexed
+
+
+# --------------------------------------------------------------------------- #
+# BM25 scoring
+# --------------------------------------------------------------------------- #
+def _bm25_field(
+    query_terms: list[str],
+    entries: list[dict],
+    tf_key: str,
+    len_key: str,
+) -> dict[str, float]:
+    """Return {session_id: bm25_score} for one field across the candidate entries."""
+    n = len(entries)
+    if n == 0:
+        return {}
+    avgdl = sum(e[len_key] for e in entries) / n or 1.0
+    # Document frequency per query term in this field.
+    df = Counter()
+    for e in entries:
+        tf = e[tf_key]
+        for term in set(query_terms):
+            if term in tf:
+                df[term] += 1
+
+    scores: dict[str, float] = {}
+    for e in entries:
+        tf = e[tf_key]
+        dl = e[len_key]
+        score = 0.0
+        for term in query_terms:
+            f = tf.get(term, 0)
+            if f == 0:
+                continue
+            # BM25 idf with +1 to stay non-negative.
+            idf = math.log(1 + (n - df[term] + 0.5) / (df[term] + 0.5))
+            denom = f + BM25_K1 * (1 - BM25_B + BM25_B * dl / avgdl)
+            score += idf * (f * (BM25_K1 + 1)) / denom
+        if score:
+            scores[e_id(e)] = score
+    return scores
+
+
+def e_id(entry: dict) -> str:
+    # Entries are keyed by id in the index dict; we attach it when scoring.
+    return entry["_id"]
+
+
+def search_sessions(query: str, idx: dict, scope_ids: set[str]) -> list[dict]:
+    """Score indexed sessions in ``scope_ids`` against ``query``; return ranked hits."""
+    query_terms = tokenize(query)
+    if not query_terms:
+        return []
+    entries = []
+    for sid, entry in idx["sessions"].items():
+        if sid in scope_ids:
+            e = dict(entry)
+            e["_id"] = sid
+            entries.append(e)
+    if not entries:
+        return []
+
+    conv_scores = _bm25_field(query_terms, entries, "tf_conv", "len_conv")
+    tool_scores = _bm25_field(query_terms, entries, "tf_tool", "len_tool")
+
+    results = []
+    for e in entries:
+        sid = e["_id"]
+        combined = (
+            FIELD_WEIGHTS["conv"] * conv_scores.get(sid, 0.0)
+            + FIELD_WEIGHTS["tool"] * tool_scores.get(sid, 0.0)
+        )
+        if combined <= 0:
+            continue
+        # Which query terms actually matched, and where (for the field tag + snippet).
+        hit_conv = any(t in e["tf_conv"] for t in query_terms)
+        results.append(
+            {
+                "id": sid,
+                "title": e["title"],
+                "fallback": e["fallback"],
+                "first_ts": e["first_ts"],
+                "msgs": e["msgs"],
+                "path": e["path"],
+                "score": combined,
+                "where": "conv" if hit_conv else "tool",
+            }
+        )
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return results
+
+
+# --------------------------------------------------------------------------- #
+# Snippet extraction (lazy; only for the rows we print)
+# --------------------------------------------------------------------------- #
+def make_snippet(path: str, query_terms: list[str], prefer: str, width: int = 140) -> str:
+    """Pull a short context window around the first query-term hit in a transcript.
+
+    Reads the live transcript (not the index, which stores no raw text). ``prefer`` is
+    'conv' or 'tool' — which field to search first for the hit.
+    """
+    session = extract_session(path)
+    if session is None:
+        return ""
+    fields = ("conv", "tool") if prefer == "conv" else ("tool", "conv")
+    terms = [re.escape(t) for t in query_terms]
+    pat = re.compile(r"(?i)\b(?:" + "|".join(terms) + r")")
+    for field in fields:
+        text = session[field]
+        m = pat.search(text)
+        if not m:
+            continue
+        start = max(0, m.start() - width // 3)
+        end = min(len(text), m.start() + width)
+        snippet = text[start:end]
+        snippet = " ".join(snippet.split())
+        prefix = "…" if start > 0 else ""
+        suffix = "…" if end < len(text) else ""
+        return f"{prefix}{snippet}{suffix}"
+    return ""
+
+
+# --------------------------------------------------------------------------- #
+# Formatting
+# --------------------------------------------------------------------------- #
+def _fmt_ts(iso: str | None, local: bool) -> str:
+    if not iso:
+        return "?"
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return iso[:16]
+    if local:
+        dt = dt.astimezone()
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def _truncate(s: str, width: int) -> str:
+    return s if len(s) <= width else s[: width - 1] + "…"
+
+
+def _highlight_snippet(snippet: str, query_terms: list[str], color: _Color) -> str:
+    """Bold-highlight the matched query terms; leave the rest in the terminal default."""
+    if not color.enabled:
+        return snippet
+    terms = sorted((re.escape(t) for t in query_terms), key=len, reverse=True)
+    pat = re.compile(r"(?i)\b(?:" + "|".join(terms) + r")\b")
+    # Only the hits get a color; the surrounding body stays the terminal's default.
+    return pat.sub(lambda m: color("hit", m.group(0)), snippet)
+
+
+# --------------------------------------------------------------------------- #
+# Modes (selected by argument shape, not subcommands)
+# --------------------------------------------------------------------------- #
+def run_index(args) -> int:
+    """``--index``: force a full rebuild of the index and report."""
+    files, scope = resolve_scope(args)
+    _, reindexed = refresh_index(files, force=True)
+    print(
+        f"Indexed {scope}: {reindexed} session(s) tokenized, {len(files)} in scope.",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def run_list(args) -> int:
+    """Bare invocation: list sessions by ai-title, newest first."""
+    files, scope = resolve_scope(args)
+    sessions = [s for f in files if (s := extract_session(f))]
+    sessions.sort(key=lambda s: s["mtime"], reverse=True)
+    if args.limit > 0:
+        sessions = sessions[: args.limit]
+
+    if args.json:
+        for s in sessions:
+            s.pop("conv", None)
+            s.pop("tool", None)
+        print(json.dumps(sessions, indent=2))
+        return 0
+
+    if not sessions:
+        print(f"No sessions found ({scope}).")
+        return 0
+
+    color = _Color(_want_color(args))
+    title_w = min(max((len(s["title"]) for s in sessions), default=5), 50)
+    for s in sessions:
+        marker = color("faint", "~") if s["fallback"] else " "
+        # Pad the plain title to width first, THEN color — so ANSI codes never throw
+        # off column alignment.
+        title_cell = color("title", f"{_truncate(s['title'], title_w):<{title_w}}")
+        meta = color(
+            "ts", f"{_fmt_ts(s['first_ts'], not args.utc)}  {s['msgs']:>3} msg"
+        )
+        print(f"{marker}{title_cell}  {meta}  {color('id', s['id'])}")
+    print(
+        f"\n{len(sessions)} session(s) in {scope}.  "
+        f"Resume with: claude --resume <id>   (~ = no ai-title; first prompt shown)",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def run_search(args) -> int:
+    """Positional terms given: BM25 search (auto-refreshing the index first)."""
+    query = " ".join(args.terms)
+    files, scope = resolve_scope(args)
+    idx, reindexed = refresh_index(files, force=False)
+    if reindexed:
+        print(
+            f"Refreshed index ({reindexed} session(s) updated) before searching.",
+            file=sys.stderr,
+        )
+    scope_ids = {os.path.splitext(os.path.basename(f))[0] for f in files}
+    results = search_sessions(query, idx, scope_ids)
+    if args.limit > 0:
+        results = results[: args.limit]
+
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return 0
+
+    if not results:
+        print(f"No matches for {query!r} ({scope}).")
+        return 0
+
+    color = _Color(_want_color(args))
+    query_terms = tokenize(query)
+    top = results[0]["score"] if results else 0.0
+    title_w = min(max((len(r["title"]) for r in results), default=5), 44)
+    for r in results:
+        marker = color("faint", "~") if r["fallback"] else " "
+        title_cell = color("title", f"{_truncate(r['title'], title_w):<{title_w}}")
+        score_cell = color.score(r["score"], top)
+        ts_cell = color("ts", _fmt_ts(r["first_ts"], not args.utc))
+        id_cell = color("id", r["id"])
+        tag = color("tool", " [tooling]") if r["where"] != "conv" else ""
+        print(f"{marker}{title_cell}  {score_cell}  {ts_cell}  {id_cell}{tag}")
+        if not args.no_snippet:
+            snip = make_snippet(r["path"], query_terms, r["where"])
+            if snip:
+                print(f"    {_highlight_snippet(snip, query_terms, color)}")
+    print(
+        f"\n{len(results)} match(es) for {query!r} in {scope}.  "
+        f"Resume with: claude --resume <id>",
+        file=sys.stderr,
+    )
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# CLI — one flat parser; the mode is chosen by whether terms / --index are present
+# --------------------------------------------------------------------------- #
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="claude-sessions",
+        description=(
+            "List and keyword-search Claude Code session transcripts. "
+            "No args lists; positional terms search (joined with spaces); "
+            "--index rebuilds the index."
+        ),
+        epilog=(
+            "examples:\n"
+            "  claude-sessions                 list sessions in the current project\n"
+            "  claude-sessions tnp report      search for 'tnp report'\n"
+            "  claude-sessions --index         force a full index rebuild\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "terms",
+        nargs="*",
+        metavar="TERM",
+        help="Search terms, joined with spaces into one query. Omit to list sessions.",
+    )
+    p.add_argument(
+        "--index",
+        action="store_true",
+        help="Force a full index rebuild and exit (cannot be combined with TERMs).",
+    )
+    p.add_argument(
+        "--project",
+        metavar="<path>",
+        default=os.getcwd(),
+        help="Project directory to operate on (default: current directory).",
+    )
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="Operate across all projects, not just the current one.",
+    )
+    p.add_argument(
+        "-n", "--limit", type=int, default=None, metavar="N",
+        help="Max rows (search default 15, list default all; 0 = all).",
+    )
+    p.add_argument(
+        "--no-snippet", action="store_true",
+        help="Omit the context snippet under each search hit.",
+    )
+    p.add_argument("--utc", action="store_true",
+                   help="Show timestamps in UTC (default: local).")
+    p.add_argument("--no-color", action="store_true",
+                   help="Disable ANSI color (also honors NO_COLOR; auto-off when piped).")
+    p.add_argument("--json", action="store_true", help="Emit JSON.")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.index and args.terms:
+        parser.error("--index cannot be combined with search terms.")
+
+    if args.index:
+        return run_index(args)
+    if args.terms:
+        if args.limit is None:
+            args.limit = 15
+        return run_search(args)
+    if args.limit is None:
+        args.limit = 0
+    return run_list(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
