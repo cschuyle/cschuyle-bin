@@ -20,21 +20,25 @@ PROG = Path(sys.argv[0]).name or "dus"
 BATCH = 8000
 
 
+def _scaled(b: int, unit: str) -> str:
+    # One decimal place, but drop a trailing ".0" (864.0K -> 864K, 1.5M stays).
+    whole = b // 1024
+    tenth = (b % 1024) * 10 // 1024
+    return f"{whole}{unit}" if tenth == 0 else f"{whole}.{tenth}{unit}"
+
+
 def hr_size(kb: int) -> str:
     kb = kb or 0
     b = kb * 1024
     if b < 1024:
         return f"{b}B"
     if b < 1048576:
-        return f"{b // 1024}.{(b % 1024) * 10 // 1024}K"
+        return _scaled(b, "K")
     if b < 1073741824:
-        b //= 1024
-        return f"{b // 1024}.{(b % 1024) * 10 // 1024}M"
+        return _scaled(b // 1024, "M")
     if b < 1099511627776:
-        b //= 1048576
-        return f"{b // 1024}.{(b % 1024) * 10 // 1024}G"
-    b //= 1073741824
-    return f"{b // 1024}.{(b % 1024) * 10 // 1024}T"
+        return _scaled(b // 1048576, "G")
+    return _scaled(b // 1073741824, "T")
 
 
 def normalize_path(p: str) -> str:
@@ -235,7 +239,8 @@ class Config:
         self.vlog(msg)
 
     def status(self, msg: str) -> None:
-        print(f"{PROG}: {msg} +{self.elapsed()}s", file=sys.stderr)
+        if self.verbose:
+            print(f"{PROG}: {msg} +{self.elapsed()}s", file=sys.stderr)
 
 
 def rebase_path(canonical_root: str, rawp: str, du_root_path: str) -> str:
@@ -254,6 +259,8 @@ def scan_progress(
     root_name: str,
     cur_path: str = "",
 ) -> None:
+    if not cfg.verbose:
+        return
     elapsed = cfg.elapsed()
     cur = progress_label(cur_path) if cur_path else ""
     if est > 0:
@@ -341,18 +348,19 @@ def run_du_scan(
         if n == 1 or n % progress_every == 0:
             scan_progress(cfg, n, est, label, rebased)
     scan_progress(cfg, n, est, label, root)
-    if sys.stderr.isatty():
-        print(file=sys.stderr)
-    if est > 0:
-        print(
-            f"{PROG}: {label} scanned {n} directories (est. was {est}) +{cfg.elapsed()}s",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            f"{PROG}: {label} scanned {n} directories +{cfg.elapsed()}s",
-            file=sys.stderr,
-        )
+    if cfg.verbose:
+        if sys.stderr.isatty():
+            print(file=sys.stderr)
+        if est > 0:
+            print(
+                f"{PROG}: {label} scanned {n} directories (est. was {est}) +{cfg.elapsed()}s",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"{PROG}: {label} scanned {n} directories +{cfg.elapsed()}s",
+                file=sys.stderr,
+            )
     cfg.vlog(f"scanned {n} directories")
     return rootsize_kb, n, rows
 
@@ -710,10 +718,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     norm_inputs = list(paths)
 
     if cfg.no_cache or cfg.refresh:
-        print(f"{PROG}: HOLD ON, SCANNING DIRECTORIES", file=sys.stderr)
+        if cfg.verbose:
+            print(f"{PROG}: HOLD ON, SCANNING DIRECTORIES", file=sys.stderr)
         status_printed = True
     else:
-        print(f"{PROG}: READING CACHE...", file=sys.stderr)
+        if cfg.verbose:
+            print(f"{PROG}: READING CACHE...", file=sys.stderr)
         status_printed = False
 
     cfg.vstage("start")
@@ -803,7 +813,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 elif len(to_scan) == len(roots):
                     to_scan = [common_parent]
 
-    if not status_printed:
+    if cfg.verbose and not status_printed:
         if not to_scan:
             print(f"{PROG}: ALL DATA IS CACHED", file=sys.stderr)
         else:

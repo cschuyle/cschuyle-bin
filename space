@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# space — a frontend to `dus`: human-readable, smallest-first disk usage.
+#
+#   space              size the current dir's entries        (dus -h *)
+#   space -a           same, plus dotfile entries
+#   space -v           pass -v through to dus (verbose cache/scan chatter)
+#   space DIR ...      for each DIR arg, size its entries (DIR/*)
+#   space -a DIR ...   dir expansion also includes dotfile children (DIR/.*)
+#   space FILE ...     files pass through unchanged
+#
+# -a and -v are leading flags (combinable, e.g. -av). Dir args are expanded to
+# their children here; file (non-dir) args pass through. With -a, dir expansion
+# also pulls in dotfile children, minus the . and .. entries that a .* glob
+# includes. Everything is handed to `dus -h` (plus -v when given).
+
+set -euo pipefail
+shopt -s nullglob  # zero-match globs vanish instead of staying literal
+
+usage() {
+    cat <<'EOF'
+Usage: space [-a] [-v] [path ...]
+
+A frontend to `dus`: human-readable, smallest-first disk usage. Sizes are
+always human-readable; output is sorted smallest-first. For a dir arg, space
+sizes its entries rather than the dir as a whole (`dus DIR` would size the
+whole dir); file args pass through to dus unchanged.
+
+  space              size the current dir's entries
+  space DIR ...      for each DIR, size its entries (DIR's children)
+  space FILE ...     files pass through unchanged
+  space -a ...       dir expansion also includes dotfile children
+
+  -a   include dotfile entries when expanding a dir (and the current dir)
+  -v   pass through to dus: verbose cache/scan chatter on stderr
+  -h, --help   show this help
+
+-a and -v are leading flags and may be combined (e.g. -av). Dir args are
+expanded to their children; file (non-dir) args pass through unchanged.
+EOF
+}
+
+include_dotfiles=false
+dus_flags=(-h)
+while [[ "${1-}" == -?* ]]; do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        -[av] | -[av][av])
+            [[ "$1" == *a* ]] && include_dotfiles=true
+            [[ "$1" == *v* ]] && dus_flags+=(-v)
+            ;;
+        --) shift; break ;;  # end of flags; rest are paths
+        *) echo "space: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
+targets=()
+if [[ $# -eq 0 ]]; then
+    # No path args: the current dir's entries (optionally incl. dotfiles).
+    targets+=(*)
+    $include_dotfiles && targets+=(.*)
+else
+    for arg in "$@"; do
+        if [[ -d "$arg" ]]; then
+            targets+=("$arg"/*)
+            $include_dotfiles && targets+=("$arg"/.*)
+        else
+            targets+=("$arg")  # file (or non-dir) passes through
+        fi
+    done
+fi
+
+# Drop the . and .. that a .* glob matches.
+filtered=()
+for entry in "${targets[@]}"; do
+    base="${entry##*/}"
+    [[ "$base" == "." || "$base" == ".." ]] && continue
+    filtered+=("$entry")
+done
+
+[[ ${#filtered[@]} -eq 0 ]] && exit 0
+# `--` guards paths that begin with `-` (e.g. a dir literally named `-a`, or a
+# glob that expands to one) from being parsed as dus flags.
+exec dus "${dus_flags[@]}" -- "${filtered[@]}"
