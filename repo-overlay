@@ -1,0 +1,1220 @@
+#!/usr/bin/env python3
+"""repo-overlay — a "permanent stash" for a repo's dev-only file overrides.
+
+The overrides (log4j2 noise suppression, aspectj-weaving off, Tiltfile recovery
+notes, application.yml logging config, ...) live as ONE (or more) commits on a
+local-only branch (``local-dev-overlay`` by default). That branch is never pushed and
+never merged into a feature branch, so the overrides never reach an MR — but the commit
+means they can't be lost the way a forgotten ``git stash pop`` can.
+
+The overlay's base (the commit the overrides sit on top of) is marked by an empty
+SENTINEL commit at the bottom of the overlay region, carrying a unique message
+trailer (``repo-overlay-sentinel:``). The base is then the sentinel's first parent and
+the overlay is every commit after the sentinel — both derived from the branch itself.
+Because the sentinel is found by its trailer, never by SHA, this survives a rebase that
+rewrites every SHA (rebase the overlay branch with ``git rebase --empty=keep`` so the
+empty sentinel is not dropped). A legacy pinned ref (``refs/repo-overlay/base``) is kept
+only as a cache / fallback; a branch with no sentinel is adopted via ``init-sentinel``.
+
+Which repos this manages — and each one's overlay branch name and description — comes
+from a central registry (``$XDG_CONFIG_HOME/repo-overlay/repos.toml``, i.e.
+``~/.config/repo-overlay/repos.toml``), keyed by the repo's absolute path. It operates on
+the repo containing the current directory and errors out (with a move/rename hint) if
+that repo isn't in the registry.
+
+Commands: apply, status [-v], update, remove [-f], hide, unhide, clean, implode, state,
+list-files, install-hooks, init-sentinel. See ``repo-overlay --help``.
+"""
+from __future__ import annotations
+
+import argparse
+import difflib
+import os
+import subprocess
+import sys
+import tempfile
+import tomllib
+import typing
+from datetime import datetime
+
+# Registry file lives under the XDG config dir (machine-local; not shipped with the script),
+# matching the ${XDG_CONFIG_HOME:-$HOME/.config}/<tool>/ idiom used by the other cschuyle-bin tools.
+REGISTRY_PATH = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config"),
+    "repo-overlay", "repos.toml",
+)
+
+# Per-repo config, set by resolve_repo() once the repo is matched in the registry. BRANCH and
+# OVERLAY_MSG are module globals (read all over the file and by the module-load help text); their
+# values here are the defaults shown in `--help` before a repo is resolved, and resolve_repo()
+# overwrites them from the matched registry entry.
+CFG: "RepoConfig | None" = None
+BRANCH = "local-dev-overlay"
+OVERLAY_MSG = "local dev overlay"
+
+# These refs/tags live INSIDE each repo, so they never collide across repos — no need to
+# encode the repo in the name. BASE_REF has a legacy lims-era spelling we still migrate.
+BASE_REF = "refs/repo-overlay/base"  # cache of the overlay's base commit (sentinel is source of truth)
+LEGACY_BASE_REFS = ["refs/lims-overlay/base"]  # older spellings, adopted if present
+BACKUP_TAG = "repo-overlay/backup-pre-sentinel"  # created by init-sentinel before it rewrites the branch
+GUARD_MARKER = "# >>> repo-overlay guard >>>"
+GUARD_END = "# <<< repo-overlay guard <<<"
+# Pre-rename marker spellings, recognized (and upgraded/stripped) so old lims hooks are handled.
+LEGACY_GUARD_MARKER = "# >>> lims-overlay guard >>>"
+LEGACY_GUARD_END = "# <<< lims-overlay guard <<<"
+GUARD_HOOKS = ["pre-commit", "pre-push", "pre-rebase", "post-checkout"]
+# The sentinel is an empty commit at the bottom of the overlay region; its first parent is the
+# overlay's base. Found by this trailer (not by SHA), so it survives a rebase that rewrites SHAs.
+SENTINEL_TRAILER = "repo-overlay-sentinel:"
+SENTINEL_MSG = "repo-overlay sentinel (do not remove)\n\n" + SENTINEL_TRAILER + " v1"
+
+
+class RepoConfig(typing.NamedTuple):
+    """One registry entry: the matched repo's path and its overlay settings."""
+    path: str          # absolute, realpath'd repo toplevel (the registry key)
+    branch: str        # overlay branch name for this repo
+    description: str    # commit message used when `update` saves overlay edits
+
+
+def die(msg: str) -> typing.NoReturn:
+    print(f"error: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def cfg() -> RepoConfig:
+    """The resolved per-repo config; resolve_repo() must have run first."""
+    if CFG is None:
+        die("internal: repo config not resolved")
+    return CFG
+
+
+# --- git helpers -----------------------------------------------------------
+
+def git(*args: str, check: bool = False) -> subprocess.CompletedProcess:
+    """Run a git command, capturing output. check=True dies on nonzero."""
+    proc = subprocess.run(
+        ["git", *args], capture_output=True, text=True, check=False
+    )
+    if check and proc.returncode != 0:
+        die(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
+    return proc
+
+
+def git_out(*args: str) -> str:
+    """stdout of a git command, stripped; empty string on failure."""
+    proc = git(*args)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def git_bytes(*args: str) -> bytes:
+    """Raw stdout bytes of a git command (no text decoding), for byte-exact file writes.
+    Overlay files may have CRLF; text mode would corrupt them."""
+    proc = subprocess.run(["git", *args], capture_output=True, check=False)
+    if proc.returncode != 0:
+        die(f"git {' '.join(args)} failed: {proc.stderr.decode(errors='replace').strip()}")
+    return proc.stdout
+
+
+def rev_parse_verify(ref: str) -> str:
+    """Resolve ref to a sha, or '' if it doesn't exist."""
+    return git_out("rev-parse", "-q", "--verify", ref)
+
+
+def blob_at(rev: str, path: str) -> str:
+    """The blob sha of path at a rev (e.g. 'BRANCH:path'), or '' if absent."""
+    return rev_parse_verify(f"{rev}:{path}")
+
+
+def working_hash(path: str) -> str:
+    """git hash-object of the working-tree file, or '' if it doesn't exist."""
+    if not os.path.exists(path):
+        return ""
+    return git_out("hash-object", "--", path)
+
+
+# --- registry / repo / overlay context -------------------------------------
+
+def load_registry() -> dict[str, dict]:
+    """Parse the central registry (repo-overlay.d/repos.toml). Keys are repo absolute paths;
+    values are tables with 'branch' and 'description'. Dies with a clear message if the file is
+    missing or malformed."""
+    if not os.path.exists(REGISTRY_PATH):
+        die(
+            f"registry not found: {REGISTRY_PATH}\n"
+            f"       Create it with one [\"<repo-abs-path>\"] table per managed repo "
+            f"(keys: branch, description)."
+        )
+    try:
+        with open(REGISTRY_PATH, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        die(f"cannot read registry {REGISTRY_PATH}: {e}")
+    return data
+
+
+def _move_hint(repo: str, keys: list[str]) -> str:
+    """If `repo` looks like a configured repo that has MOVED or been lightly renamed, return a
+    one-line 'maybe you moved it' hint telling the user how to update the registry by hand. Empty
+    string when nothing is similar enough.
+
+    Compares on the LAST path component only — the shared `/Users/.../workspace/` prefix would
+    otherwise make every repo look ~80% similar and fire on unrelated repos. A different parent dir
+    with the same (or a near-identical) final component is the real move/rename signal."""
+    base = os.path.basename(repo)
+    bykey_base = {os.path.basename(k): k for k in keys if k != repo}
+    candidate = ""
+    if base in bykey_base:  # same final component, different path → almost certainly a move
+        candidate = bykey_base[base]
+    else:  # fuzzy on the final component only (e.g. 'myome-stub' vs 'myome-integration-stub')
+        close = difflib.get_close_matches(base, list(bykey_base), n=1, cutoff=0.8)
+        if close:
+            candidate = bykey_base[close[0]]
+    if not candidate:
+        return ""
+    return (
+        f"\n       '{candidate}' is configured and looks like the same repo — did you move or "
+        f"rename it to '{repo}'?\n"
+        f"       If so, update the key in {REGISTRY_PATH} (change \"{candidate}\" to \"{repo}\")."
+    )
+
+
+def resolve_repo() -> str:
+    """cd into the git repo containing the cwd, match it against the registry, and set the module
+    globals CFG / BRANCH / OVERLAY_MSG from the matched entry. Dies (with a move/rename hint when
+    the path looks like a relocated configured repo) if the repo isn't registered."""
+    global CFG, BRANCH, OVERLAY_MSG
+    repo = git_out("rev-parse", "--show-toplevel")
+    if not repo:
+        die(f"not inside a git repository (cwd: {os.getcwd()}).")
+    os.chdir(repo)
+    repo = os.path.realpath(repo)
+
+    registry = load_registry()
+    # Compare on realpath'd keys so a '~'-written or symlinked registry key still matches.
+    by_real = {os.path.realpath(os.path.expanduser(k)): (k, v) for k, v in registry.items()}
+    if repo in by_real:
+        _rawkey, entry = by_real[repo]
+        branch = entry.get("branch")
+        if not branch:
+            die(f"registry entry for '{repo}' is missing 'branch' ({REGISTRY_PATH}).")
+        CFG = RepoConfig(path=repo, branch=branch,
+                         description=entry.get("description", "local dev overlay"))
+        BRANCH = CFG.branch
+        OVERLAY_MSG = CFG.description
+        return repo
+
+    configured = sorted(by_real.keys())
+    listing = "\n".join(f"         {k}" for k in configured) if configured else "         (none)"
+    die(
+        f"this repo is not in the overlay registry: {repo}\n"
+        f"       Configured repos ({REGISTRY_PATH}):\n{listing}"
+        f"{_move_hint(repo, configured)}"
+    )
+
+
+def require_branch() -> None:
+    if git("show-ref", "--verify", "--quiet", f"refs/heads/{BRANCH}").returncode != 0:
+        die(f"overlay branch '{BRANCH}' does not exist — nothing to manage.")
+
+
+def is_ancestor(ancestor: str, descendant: str) -> bool:
+    """True if `ancestor` is an ancestor of `descendant` (both must resolve)."""
+    return git("merge-base", "--is-ancestor", ancestor, descendant).returncode == 0
+
+
+def find_sentinel() -> str:
+    """SHA of the overlay sentinel commit (empty commit carrying SENTINEL_TRAILER) on the
+    first-parent line of BRANCH, or '' if the branch predates the sentinel scheme.
+
+    Found by trailer, never by SHA, so it is stable across a rebase that rewrites every SHA."""
+    # Walk the first-parent line; records are %H<US>%B separated by <RS> so multi-line bodies
+    # stay intact. `git log` lists newest→oldest; keep the LAST (oldest) match so a stray second
+    # sentinel can't shrink the overlay by moving the base up.
+    out = git_out("log", "--first-parent", "--format=%H%x1f%B%x1e", BRANCH)
+    found = ""
+    for rec in out.split("\x1e"):
+        rec = rec.strip("\n")
+        if not rec:
+            continue
+        sha, _, body = rec.partition("\x1f")
+        if SENTINEL_TRAILER in body:
+            found = sha
+    return found
+
+
+def pinned_base() -> str:
+    """The pinned base-cache value: BASE_REF if set, else the first LEGACY_BASE_REFS that resolves
+    (migrated forward into BASE_REF so later reads find it under the current name). '' if none."""
+    base = rev_parse_verify(BASE_REF)
+    if base:
+        return base
+    for legacy in LEGACY_BASE_REFS:
+        base = rev_parse_verify(legacy)
+        if base:
+            git("update-ref", BASE_REF, base, check=True)  # adopt old spelling under the new name
+            return base
+    return ""
+
+
+def resolve_base() -> str:
+    """The commit the overlay sits on top of.
+
+    Preferred: the sentinel's first parent (self-describing, rebase-proof). Falls back to the
+    legacy pinned BASE_REF, but only if it is still an ancestor of BRANCH (a rebase can orphan
+    it). If neither yields a valid base, die and point at `init-sentinel` rather than guess —
+    guessing a base can silently fold feature commits into the overlay file set."""
+    sentinel = find_sentinel()
+    if sentinel:
+        base = rev_parse_verify(f"{sentinel}^")
+        if not base:
+            die(f"overlay sentinel {sentinel[:12]} has no parent — the overlay has no base commit.")
+        if rev_parse_verify(BASE_REF) != base:
+            git("update-ref", BASE_REF, base, check=True)  # refresh cache
+        return base
+
+    base = pinned_base()
+    if base and is_ancestor(base, BRANCH):
+        return base
+    if base:
+        die(
+            f"overlay base {base[:12]} is no longer an ancestor of '{BRANCH}' — a rebase orphaned it, "
+            f"and '{BRANCH}' has no sentinel commit.\n"
+            f"       Run `{prog()} init-sentinel` to add a rebase-proof sentinel and re-pin the base."
+        )
+    base = rev_parse_verify(f"{BRANCH}^")
+    if not base:
+        die(f"cannot determine overlay base: '{BRANCH}' has no parent, no sentinel, and {BASE_REF} is unset.")
+    die(
+        f"'{BRANCH}' has no sentinel commit and no pinned base.\n"
+        f"       Run `{prog()} init-sentinel` to mark the overlay's base (its first parent is {base[:12]})."
+    )
+
+
+def overlay_files(base: str) -> list[str]:
+    """Every file that differs between BASE and the branch tip (whole range, so it's
+    correct no matter how many commits the overlay is split into).
+
+    This includes files the overlay DELETES (they are a difference), so a managed path does not
+    imply the overlay branch has a blob for it — callers that read `BRANCH:path` must first check
+    deleted_set(). An overlay that deletes a file is a real pattern: e.g. replacing one dev script
+    with a renamed pair, where the old name is removed."""
+    out = git_out("diff-tree", "--no-commit-id", "--name-only", "-r", base, BRANCH)
+    files = [line for line in out.splitlines() if line]
+    if not files:
+        die(f"{BRANCH} changes no files vs its base — nothing to manage")
+    return files
+
+
+def deleted_set(files: list[str]) -> set[str]:
+    """Managed files the overlay DELETES: present at the overlay's base but absent at the branch
+    tip. For these, 'applying' the overlay means removing the file from the working tree (not
+    writing a blob), and 'removing' the overlay means restoring the base/HEAD version."""
+    return {f for f in files if not blob_at(BRANCH, f)}
+
+
+def hidden_set(files: list[str]) -> set[str]:
+    """Paths (from files) currently marked skip-worktree — one git call."""
+    out = git_out("ls-files", "-v", "--", *files)
+    hidden = set()
+    for line in out.splitlines():
+        if line[:2] == "S ":
+            hidden.add(line[2:])
+    return hidden
+
+
+def current_branch() -> str:
+    return git_out("rev-parse", "--abbrev-ref", "HEAD") or "(detached HEAD)"
+
+
+# --- .git/info/exclude block for overlay-added (HEAD-absent) files ----------
+#
+# An overlay file that doesn't exist at HEAD is applied untracked and has no index entry to
+# skip-worktree against. hide quiets it from `git status` by listing it in a fenced block in
+# .git/info/exclude (a local, uncommitted ignore) rather than staging it — staging would trip
+# the pre-commit overlay guard and block all commits. (The guard still catches it by path if
+# a later `git add` stages it anyway — exclude suppresses untracked listing, not an explicit add.)
+# The block is rewritten wholesale each time.
+
+EXCLUDE_BEGIN = "# >>> repo-overlay excludes >>>"
+EXCLUDE_END = "# <<< repo-overlay excludes <<<"
+# Pre-rename spellings, recognized on read/rewrite so an existing lims block is seen and then
+# collapsed under the current markers on the next write.
+LEGACY_EXCLUDE_BEGINS = {EXCLUDE_BEGIN, "# >>> lims-overlay excludes >>>"}
+LEGACY_EXCLUDE_ENDS = {EXCLUDE_END, "# <<< lims-overlay excludes <<<"}
+
+
+def _exclude_path() -> str:
+    return git_out("rev-parse", "--git-path", "info/exclude")
+
+
+def _read_exclude_lines() -> list[str]:
+    path = _exclude_path()
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        return fh.read().splitlines()
+
+
+def overlay_excluded_set() -> set[str]:
+    """Repo-relative paths currently listed in the repo-overlay block of .git/info/exclude
+    (legacy lims-overlay block recognized too).
+
+    Entries are written root-anchored (leading '/'); the slash is stripped here so the paths
+    compare equal to the repo-relative entries in the overlay `files` list."""
+    inside = False
+    found = set()
+    for line in _read_exclude_lines():
+        if line.strip() in LEGACY_EXCLUDE_BEGINS:
+            inside = True
+            continue
+        if line.strip() in LEGACY_EXCLUDE_ENDS:
+            inside = False
+            continue
+        if inside and line.strip():
+            found.add(line.strip().lstrip("/"))
+    return found
+
+
+def _write_exclude_block(paths: set[str]) -> None:
+    """Rewrite .git/info/exclude so the repo-overlay block lists exactly `paths` (block omitted
+    entirely when empty). A legacy-marker block is dropped and re-emitted under current markers.
+    Lines outside the block are preserved verbatim."""
+    path = _exclude_path()
+    if not path:
+        die("cannot locate .git/info/exclude")
+    kept, inside = [], False
+    for line in _read_exclude_lines():
+        if line.strip() in LEGACY_EXCLUDE_BEGINS:
+            inside = True
+            continue
+        if line.strip() in LEGACY_EXCLUDE_ENDS:
+            inside = False
+            continue
+        if not inside:
+            kept.append(line)
+    while kept and kept[-1] == "":
+        kept.pop()
+    out = list(kept)
+    if paths:
+        if out:
+            out.append("")
+        out.append(EXCLUDE_BEGIN)
+        out.extend(f"/{p}" for p in sorted(paths))
+        out.append(EXCLUDE_END)
+    text = "\n".join(out)
+    if text:
+        text += "\n"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def _set_overlay_excludes(added: list[str], exclude: bool) -> int:
+    """Add (exclude=True) or remove (exclude=False) the HEAD-absent overlay files in the exclude
+    block. Returns how many entries changed."""
+    current = overlay_excluded_set()
+    want = set(added)
+    new = (current | want) if exclude else (current - want)
+    if new == current:
+        return 0
+    _write_exclude_block(new)
+    return len(current ^ new)
+
+
+def hooks_dir() -> str:
+    return git_out("rev-parse", "--git-path", "hooks")
+
+
+# --- application-state classification --------------------------------------
+
+def on_overlay_branch() -> bool:
+    """True when HEAD is the overlay branch itself.
+
+    There, the working tree IS the branch tip, so every overlay file matches trivially. That is
+    not "applied" in any actionable sense — "applied" means the overlay files were copied on top
+    of a DIFFERENT (feature) branch — and treating it as applied makes the pre-rebase guard block
+    rebasing the overlay branch, which is a normal thing to do."""
+    return current_branch() == BRANCH
+
+
+def applied_stats(base: str, files: list[str], hidden: set[str]) -> tuple[int, int]:
+    """(applied, hidden_and_applied): count files whose working tree matches the overlay.
+    A file the overlay DELETES counts as applied when it's absent from the working tree.
+    Always (0, 0) while on the overlay branch itself — see on_overlay_branch()."""
+    if on_overlay_branch():
+        return 0, 0
+    deleted = deleted_set(files)
+    applied = hidden_n = 0
+    for f in files:
+        want = blob_at(BRANCH, f)
+        is_applied = (not os.path.exists(f)) if f in deleted else (working_hash(f) == want and want)
+        if is_applied:
+            applied += 1
+            if f in hidden:
+                hidden_n += 1
+    return applied, hidden_n
+
+
+# --- commands --------------------------------------------------------------
+
+def cmd_apply(base: str, files: list[str], **_) -> int:
+    deleted = deleted_set(files)
+    # no-op refusal if already fully applied. A deleted file is "applied" when it's absent on disk.
+    if all((not os.path.exists(f)) if f in deleted else working_hash(f) == blob_at(BRANCH, f)
+           for f in files):
+        print("That'd be a NO-OP. Cowardly refusing to run it again")
+        return 0
+    cur = current_branch()
+    drift = applied = removed = 0
+    for f in files:
+        base_blob = blob_at(base, f)
+        head_blob = blob_at("HEAD", f)
+        if base_blob and head_blob and base_blob != head_blob:
+            print(f"  ⚠ upstream changed since overlay captured: {f}")
+            print(f"      review:  git diff {base}:{f} HEAD:{f}")
+            drift += 1
+        if f in deleted:
+            # The overlay removes this file (e.g. a renamed-away dev script). Applying it means
+            # deleting it from the working tree, not writing a blob that doesn't exist.
+            if os.path.exists(f):
+                os.remove(f)
+                removed += 1
+            continue
+        # Fetch the blob BEFORE truncating the target: git_bytes die()s on a missing blob, and an
+        # open(f, "wb") first would leave the file empty on failure (the exact crash this fixes).
+        content = git_bytes("show", f"{BRANCH}:{f}")
+        with open(f, "wb") as fh:
+            fh.write(content)
+        applied += 1
+    msg = f"applied {applied} overlay file(s) onto branch {cur} (unstaged)."
+    if removed:
+        msg += f" {removed} overlay-deleted file(s) removed from the working tree."
+    if drift:
+        msg += f" {drift} had upstream drift (see warnings above)."
+    print(msg)
+    print("Run `git status` to see them; they are NOT staged and must never be committed on a feature branch.")
+    return 0
+
+
+def cmd_update(base: str, files: list[str], **_) -> int:
+    """Save the current working-tree versions of the overlay files onto the overlay
+    branch as a new commit. Unchanged files contribute nothing (silently skipped);
+    only genuinely-edited files change the committed tree. Requires the overlay to be
+    applied (else the working tree is just HEAD and there's nothing meaningful to save)."""
+    # Guard: overlay must be applied. If NO file matches the overlay, it isn't applied.
+    if not any(working_hash(f) == blob_at(BRANCH, f) for f in files):
+        die(f"overlay is not applied. Run '{prog()} apply' first, then edit and update.")
+
+    # Which files actually differ from the current branch tip? (These are what we capture.)
+    changed = [f for f in files if working_hash(f) != blob_at(BRANCH, f)]
+    if not changed:
+        print("That'd be a NO-OP. Cowardly refusing to run it again")
+        return 0
+
+    # Build the new overlay tree from BASE + the current working-tree versions of all
+    # overlay files, via a throwaway index (real index/worktree untouched), then commit
+    # it onto local-dev-overlay. Unchanged files land at their existing content, so the
+    # tree differs only in the edited files.
+    fd, tmpidx = tempfile.mkstemp(prefix="overlay-idx.")
+    os.close(fd)
+    try:
+        env = {**os.environ, "GIT_INDEX_FILE": tmpidx}
+        subprocess.run(["git", "read-tree", base], env=env, check=True)
+        subprocess.run(["git", "update-index", "--add", "--", *files], env=env, check=True)
+        tree = subprocess.run(["git", "write-tree"], env=env, capture_output=True,
+                              text=True, check=True).stdout.strip()
+    finally:
+        os.remove(tmpidx)
+    commit = subprocess.run(
+        ["git", "commit-tree", tree, "-p", BRANCH, "-m", OVERLAY_MSG],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    git("update-ref", f"refs/heads/{BRANCH}", commit, check=True)
+
+    print(f"updated overlay: captured {len(changed)} edited file(s) onto {BRANCH}:")
+    for f in changed:
+        print(f"  {f}")
+    return 0
+
+
+def cmd_status(base: str, files: list[str], verbose: bool = False, **_) -> int:
+    total = len(files)
+    print(f"overlay source branch:   {BRANCH} ({total} file(s))")
+    print(f"current (target) branch: {current_branch()}")
+    # A file is hidden by skip-worktree (tracked at HEAD) OR by the exclude block (added, HEAD-absent).
+    hidden = hidden_set(files) | overlay_excluded_set()
+    on_branch = on_overlay_branch()
+    applied, hidden_n = applied_stats(base, files, hidden)
+    not_applied = [f for f in files if working_hash(f) != blob_at(BRANCH, f)]
+
+    if on_branch:
+        print("you are ON the overlay branch; 'applied' is N/A (the files ARE the branch, not an overlay).")
+    elif applied == 0:
+        print("overlay is not applied")
+    elif applied == total and hidden_n == total:
+        print("overlay is fully applied, but hidden")
+    elif applied == total:
+        print("overlay is fully applied")
+    else:
+        print("overlay is partially applied (files differ from overlay versions:")
+        for f in not_applied:
+            print(f"  {f}")
+        print(")")
+
+    installed, ghtotal = guard_hook_status()
+    if installed == ghtotal:
+        print("guard hooks: installed")
+    elif installed == 0:
+        print(f"guard hooks: NOT installed — run `{prog()} install-hooks` to add them")
+    else:
+        print(f"guard hooks: partially installed ({installed}/{ghtotal}) — run `{prog()} install-hooks` to (re)install")
+
+    if verbose:
+        print()
+        for f in files:
+            want = blob_at(BRANCH, f)
+            head_blob = blob_at("HEAD", f)
+            have = working_hash(f)
+            if on_branch:
+                st = "on-branch"  # file == branch tip trivially; not an overlay-vs-feature state
+            elif have == want:
+                st = "applied (hidden)" if f in hidden else "applied"
+            elif have == head_blob:
+                st = "not applied"
+            else:
+                st = "modified"
+            print(f"  {st:<16} {f}")
+    return 0
+
+
+def cmd_state(base: str, files: list[str], **_) -> int:
+    # Hidden by skip-worktree (tracked at HEAD) OR by the exclude block (added, HEAD-absent).
+    hidden = hidden_set(files) | overlay_excluded_set()
+    applied, hidden_n = applied_stats(base, files, hidden)
+    total = len(files)
+    print(f"overlay: applied={applied}/{total} hidden={hidden_n}")
+    if applied == 0:
+        return 0
+    return 11 if hidden_n > 0 else 10
+
+
+# git checkout HEAD -- <path> silently refuses a skip-worktree path, reporting it as
+# "did not match any file(s) known to git" — and because checkout fails the WHOLE batch on
+# one bad pathspec, a single hidden overlay file aborts the entire revert. So any command that
+# reverts must clear skip-worktree on EVERY overlay file up front (before classifying or running
+# checkout), not just on the subset it decides to revert. working_hash() also reads the on-disk
+# file, so unhiding first makes classification see real content, not stale index state.
+def _unhide_all(files: list[str]) -> None:
+    """Clear skip-worktree on the overlay files that are currently skip-worktree'd.
+
+    Only acts on paths actually marked 'S' in the index: `git update-index --no-skip-worktree`
+    fails its WHOLE batch on a path not in the index (e.g. an overlay-added, untracked file), so
+    passing the full file list would clear nothing. Overlay-added files are untracked and have no
+    skip-worktree flag anyway — they are hidden via .git/info/exclude, handled separately."""
+    skipped = hidden_set(files)
+    if skipped:
+        git("update-index", "--no-skip-worktree", "--", *skipped)
+
+
+def _checkout_head(paths: list[str]) -> int:
+    """git checkout HEAD -- <paths>, resilient to one bad path aborting the batch. Tries the whole
+    batch first (fast path); on failure, falls back to per-file so a single problematic pathspec
+    can't block the rest. Returns how many files were actually restored."""
+    if not paths:
+        return 0
+    if git("checkout", "HEAD", "--", *paths).returncode == 0:
+        return len(paths)
+    restored = 0
+    for p in paths:
+        if git("checkout", "HEAD", "--", p).returncode == 0:
+            restored += 1
+        else:
+            print(f"  ⚠ could not restore {p} to HEAD (skipped)")
+    return restored
+
+
+def cmd_remove(base: str, files: list[str], force: bool = False, **_) -> int:
+    # Un-hide first: checkout can't touch skip-worktree paths, and working_hash below must see the
+    # real on-disk content to classify correctly. (Done automatically — no separate `unhide` step.)
+    _unhide_all(files)
+    deleted = deleted_set(files)
+    to_revert, modified, overlaid = [], [], 0
+    for f in files:
+        want = blob_at(BRANCH, f)
+        have = working_hash(f)
+        if f in deleted:
+            # The overlay removes this file. "Applied" means it's absent on disk; removing the
+            # overlay restores the HEAD version. If it's present (overlay not applied here), skip.
+            if not have:
+                overlaid += 1
+                to_revert.append(f)
+            continue
+        if have == want and want:
+            overlaid += 1
+            to_revert.append(f)
+        elif have:
+            if have != blob_at("HEAD", f):
+                modified.append(f)
+    if overlaid == 0 and not modified:
+        print("That'd be a NO-OP. Cowardly refusing to run it again")
+        return 0
+
+    clobber = 0
+    if modified:
+        print("These overlay file(s) have local edits BEYOND the overlay and would be reverted:")
+        for f in modified:
+            print(f"  {f}")
+        proceed = False
+        if force:
+            proceed = True
+        elif not sys.stdin.isatty():
+            print("Not a terminal and no -f; keeping modified files, reverting only clean overlay files.")
+        else:
+            ans = input("ARE YOU SURE you want to revert (lose) these edits? [y/N] ")
+            proceed = ans in ("y", "Y", "yes", "YES")
+        if proceed:
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")  # noqa: DTZ005 local timestamp for a .bak filename
+            for f in modified:
+                with open(f, "rb") as src, open(f"{f}.{ts}.bak", "wb") as dst:
+                    dst.write(src.read())
+            print(f"clobbered files: {' '.join(modified)}. backed up to *.{ts}.bak")
+            to_revert.extend(modified)
+            clobber = len(modified)
+        else:
+            print("keeping modified file(s); reverting only clean overlay files.")
+
+    if not to_revert:
+        print("nothing to revert.")
+        return 0
+    # Overlay files that DON'T exist at HEAD are additions (the overlay created them, e.g. a new
+    # dev/db script). `git checkout HEAD` can't restore a path that isn't in HEAD — so delete those
+    # from the working tree, and checkout only the rest (resiliently, per _checkout_head).
+    at_head = [f for f in to_revert if blob_at("HEAD", f)]
+    added = [f for f in to_revert if not blob_at("HEAD", f)]
+    restored = _checkout_head(at_head)
+    # hide may have listed an overlay-added file in .git/info/exclude; clear those entries as we
+    # delete the files, so no stale exclude line survives the revert.
+    _set_overlay_excludes(added, exclude=False)
+    for f in added:
+        if os.path.exists(f):
+            os.remove(f)
+    msg = f"un-overlaid {len(to_revert)} file(s): {restored} restored to HEAD"
+    msg += f", {len(added)} overlay-added file(s) deleted." if added else "."
+    if clobber:
+        msg += f" {clobber} had extra edits (backed up, then reverted)."
+    kept = len(modified) - clobber
+    if kept:
+        msg += f" {kept} modified file(s) kept."
+    print(msg)
+    print(f"The overlay branch is untouched; re-apply anytime with `{prog()} apply`.")
+    return 0
+
+
+def _toggle_hide(base: str, files: list[str], hide: bool) -> int:
+    # Guard 1 (hide only): overlay must be applied — hiding an unapplied file is meaningless.
+    # unhide is exempt: it is the recovery lever for a hidden overlay, and must still clear the
+    # skip-worktree / exclude mechanism even when some file no longer matches the overlay tip
+    # (e.g. the overlay base drifted from HEAD after a rebase). A single non-matching file must
+    # not block un-hiding the rest, or the overlay gets stuck hidden with no way out.
+    if hide:
+        not_applied = sum(1 for f in files if working_hash(f) != blob_at(BRANCH, f))
+        if not_applied:
+            die(f"overlay is not applied. Run '{prog()} apply' first, then hide.")
+    # Two kinds of overlay file need two different hiding mechanisms:
+    #   - present at HEAD (the common case): skip-worktree quiets the working-tree edit.
+    #   - absent at HEAD (an overlay-ADDED file, e.g. a new dev/db script): `apply` wrote it
+    #     untracked, and it has no HEAD blob, so there is no clean index entry to skip-worktree.
+    #     Staging it would trip the pre-commit guard (which refuses to commit while any overlay
+    #     file is staged) and block every commit on the branch. So hide quiets it via a
+    #     .git/info/exclude entry instead — git stops reporting it as untracked, nothing is staged.
+    tracked_at_head = [f for f in files if blob_at("HEAD", f)]
+    added = [f for f in files if not blob_at("HEAD", f)]
+
+    # Guard 2/3: refuse if already in the requested state. A file counts as hidden if its
+    # mechanism is engaged — skip-worktree for tracked files, the exclude block for added ones.
+    hidden = hidden_set(files)
+    excluded = overlay_excluded_set()
+    hidden_n = sum(1 for f in tracked_at_head if f in hidden) + \
+        sum(1 for f in added if f in excluded)
+    total = len(files)
+    if hide and hidden_n == total:
+        die(f"overlay files are already hidden ({total}). Nothing to do.")
+    if not hide and hidden_n == 0:
+        die("overlay files are already shown. Nothing to do.")
+
+    flag = "--skip-worktree" if hide else "--no-skip-worktree"
+    changed = 0
+    for f in tracked_at_head:
+        if hide and f in hidden:
+            continue
+        if not hide and f not in hidden:
+            continue
+        git("update-index", flag, "--", f, check=True)
+        changed += 1
+
+    exc_changed = _set_overlay_excludes(added, exclude=hide)
+
+    if hide:
+        print(f"hid {changed} overlay file(s): `git status`/`git diff` will now stay quiet about them.")
+        if exc_changed:
+            print(f"  ({exc_changed} overlay-added file(s) hidden via .git/info/exclude, not staged.)")
+        print(f"Run `{prog()} unhide` before a pull/checkout that may touch these paths.")
+    else:
+        print(f"unhid {changed} overlay file(s): `git status`/`git diff` will report them again.")
+        if exc_changed:
+            print(f"  ({exc_changed} overlay-added file(s) removed from .git/info/exclude.)")
+    return 0
+
+
+def cmd_hide(base: str, files: list[str], **_) -> int:
+    return _toggle_hide(base, files, hide=True)
+
+
+def cmd_unhide(base: str, files: list[str], **_) -> int:
+    return _toggle_hide(base, files, hide=False)
+
+
+def cmd_clean(base: str, files: list[str], **_) -> int:
+    _unhide_all(files)  # tolerant; also lets working_hash below see real content, not stale index
+    overlay_deleted = deleted_set(files)
+    to_revert, kept = [], 0
+    for f in files:
+        want = blob_at(BRANCH, f)
+        have = working_hash(f)
+        head_blob = blob_at("HEAD", f)
+        if f in overlay_deleted:
+            # Overlay removes this file; restore it to HEAD when its deletion is in effect (absent).
+            if not have:
+                to_revert.append(f)
+            continue
+        if have == want and want:
+            to_revert.append(f)
+        elif have and have != head_blob:
+            print(f"  ⚠ keeping {f}: has local edits beyond the overlay (not reverting)")
+            kept += 1
+    reverted = deleted = 0
+    if to_revert:
+        # Same split as remove: overlay-added files (absent at HEAD) are deleted, not checked out.
+        at_head = [f for f in to_revert if blob_at("HEAD", f)]
+        added = [f for f in to_revert if not blob_at("HEAD", f)]
+        reverted = _checkout_head(at_head)
+        # hide may have listed an overlay-added file in .git/info/exclude; clear those entries as
+        # we delete the files, so no stale exclude line remains.
+        _set_overlay_excludes(added, exclude=False)
+        for f in added:
+            if os.path.exists(f):
+                os.remove(f)
+        deleted = len(added)
+    msg = f"clean: reverted {reverted} file(s) to HEAD"
+    msg += f", deleted {deleted} overlay-added file(s)," if deleted else ","
+    msg += " cleared skip-worktree."
+    if kept:
+        msg += f" {kept} kept (local edits beyond the overlay)."
+    print(msg)
+    print(f"The {BRANCH} branch is untouched; re-apply anytime with `{prog()} apply`.")
+    return 0
+
+
+def cmd_implode(base: str, files: list[str], **_) -> int:
+    strip_guard_hooks()
+    print("imploded: stripped the repo-overlay guard hooks (git-lfs hooks preserved).")
+    print(f"The {BRANCH} branch is NOT deleted — remove it yourself with `git branch -D {BRANCH}` if you want.")
+    return 0
+
+
+def _resolve_init_base(explicit: str | None) -> str:
+    """The base for init-sentinel: an explicit --base ref if given, else the pinned BASE_REF when
+    it is still a valid ancestor of BRANCH. Refuses to guess (a wrong base folds feature commits
+    into the overlay) — tells the user to pass --base."""
+    if explicit:
+        base = rev_parse_verify(explicit)
+        if not base:
+            die(f"--base {explicit} does not resolve to a commit.")
+        if not is_ancestor(base, BRANCH):
+            die(f"--base {explicit} ({base[:12]}) is not an ancestor of '{BRANCH}'.")
+        return base
+    pinned = pinned_base()
+    if pinned and is_ancestor(pinned, BRANCH):
+        return pinned
+    die(
+        f"cannot determine the overlay's base automatically "
+        f"({'pinned base orphaned by a rebase' if pinned else f'{BASE_REF} unset'}).\n"
+        f"       Re-run with `{prog()} init-sentinel --base <commit>`, where <commit> is the feature "
+        f"tip the overlay sits on (the commit directly below your overlay commits)."
+    )
+
+
+def cmd_init_sentinel(base: str, files: list[str], init_base: str | None = None, **_) -> int:
+    """Insert the empty, trailer-bearing sentinel at the bottom of the overlay region so the base
+    is self-describing and rebase-proof. Idempotent: a no-op when a sentinel already exists.
+
+    Rewrites BRANCH (local-only), so it refuses on a dirty tree or while the overlay is applied on
+    another branch, backs up to BACKUP_TAG first, and verifies the overlay content is byte-identical
+    afterward (only an empty commit was inserted)."""
+    existing = find_sentinel()
+    if existing:
+        print(f"sentinel already present ({existing[:12]}); nothing to do.")
+        return 0
+    if current_branch() != BRANCH:
+        die(f"check out '{BRANCH}' first (init-sentinel rewrites it): git switch {BRANCH}")
+    if git("diff", "--quiet").returncode != 0 or git("diff", "--cached", "--quiet").returncode != 0:
+        die("working tree / index is dirty; commit or stash first (init-sentinel rewrites the branch).")
+
+    init_base = _resolve_init_base(init_base)
+    tip_before = rev_parse_verify(BRANCH)
+
+    # Back up the pre-rewrite tip so the content check has a reference and the user can recover.
+    git("update-ref", f"refs/tags/{BACKUP_TAG}", tip_before, check=True)
+
+    # Empty sentinel = base's tree, parented on base → changes no files.
+    sentinel = subprocess.run(
+        ["git", "commit-tree", f"{init_base}^{{tree}}", "-p", init_base, "-m", SENTINEL_MSG],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    # Replay the overlay commits (init_base..BRANCH) onto the sentinel. --empty=keep so an existing
+    # empty commit (none expected here) survives; our new sentinel is the only intended empty commit.
+    rb = subprocess.run(
+        ["git", "rebase", "--onto", sentinel, init_base, BRANCH,
+         "--empty=keep", "--committer-date-is-author-date"],
+        capture_output=True, text=True, check=False,
+    )
+    if rb.returncode != 0:
+        subprocess.run(["git", "rebase", "--abort"], capture_output=True, check=False)
+        git("update-ref", f"refs/heads/{BRANCH}", tip_before, check=True)  # restore
+        die(f"replay failed, branch restored: {rb.stderr.strip() or rb.stdout.strip()}")
+
+    # Verify: overlay content must be byte-identical to the backup (only an empty commit added).
+    if git("diff", "--quiet", f"refs/tags/{BACKUP_TAG}", BRANCH).returncode != 0:
+        git("update-ref", f"refs/heads/{BRANCH}", tip_before, check=True)  # restore
+        die(f"content changed after insert — restored to {tip_before[:12]}. "
+            f"Backup kept at tag {BACKUP_TAG}.")
+
+    git("update-ref", BASE_REF, init_base, check=True)  # refresh cache
+    print(f"sentinel inserted ({sentinel[:12]}); base = {init_base[:12]}.")
+    print(f"overlay content unchanged (verified vs {BACKUP_TAG}).")
+    print(f"Rebase the overlay branch with `git rebase --empty=keep` so the sentinel is not dropped.")
+    print(f"When you're satisfied, drop the backup: git tag -d {BACKUP_TAG}")
+    return 0
+
+
+def cmd_list_files(base: str, files: list[str], selector: str | None = None, **_) -> int:
+    if selector is None:
+        print("\n".join(files))
+    elif selector == "--staged":
+        staged = set(git_out("diff", "--cached", "--name-only").splitlines())
+        for f in files:
+            if f in staged:
+                print(f)
+    elif selector == "--pushed":
+        managed = set(files)
+        for line in sys.stdin:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            lsha, rsha = parts[1], parts[3]
+            zero = "0" * 40
+            if lsha == zero:
+                continue
+            rng = lsha if rsha == zero else f"{rsha}..{lsha}"
+            for p in git_out("diff", "--name-only", rng).splitlines():
+                if p in managed:
+                    print(p)
+    else:
+        die(f"list-files: unknown selector {selector} (use --staged or --pushed)")
+    return 0
+
+
+# --- guard hooks -----------------------------------------------------------
+
+def strip_guard_hooks() -> None:
+    """Remove our guard block from every hook (git-lfs and anything else intact).
+    A hook we created that is now just a bare shebang is deleted, not left empty."""
+    hd = hooks_dir()
+    if not os.path.isdir(hd):
+        return
+    for name in os.listdir(hd):
+        path = os.path.join(hd, name)
+        if not os.path.isfile(path):
+            continue
+        with open(path) as fh:
+            lines = fh.readlines()
+        if not any(GUARD_MARKER in ln or LEGACY_GUARD_MARKER in ln for ln in lines):
+            continue
+        out, skip = [], False
+        for ln in lines:
+            if ln.rstrip("\n") in (GUARD_MARKER, LEGACY_GUARD_MARKER):
+                skip = True
+            if not skip:
+                out.append(ln)
+            if ln.rstrip("\n") in (GUARD_END, LEGACY_GUARD_END):
+                skip = False
+        remainder = [ln for ln in out if not (ln.startswith("#!") or ln.strip() == "")]
+        if not remainder:
+            os.remove(path)
+            print(f"  removed empty hook {name} (had only our guard)")
+        else:
+            with open(path, "w") as fh:
+                fh.writelines(out)
+            print(f"  stripped guard from {name}")
+
+
+def guard_hook_status() -> tuple[int, int]:
+    hd = hooks_dir()
+    installed = 0
+    for h in GUARD_HOOKS:
+        path = os.path.join(hd, h)
+        try:
+            with open(path) as fh:
+                content = fh.read()
+            if GUARD_MARKER in content or LEGACY_GUARD_MARKER in content:
+                installed += 1
+        except OSError:
+            pass
+    return installed, len(GUARD_HOOKS)
+
+
+# Hook bodies reference the script via $REPO_OVERLAY (set in the installed block) and name the
+# remediation command via {prog} (filled at install time with the invoked name, so a `lims-overlay`
+# symlink still prints `lims-overlay …` in its own repo's hooks). The {{ }} are literal braces for
+# shell parameter expansion, escaped for str.format().
+HOOK_BODIES = {
+    "pre-commit": r'''
+staged="$("$REPO_OVERLAY" list-files --staged 2>/dev/null)"
+if [ -n "$staged" ]; then
+  printf >&2 "\nOVERLAY GUARD: refusing commit — overlay file(s) are staged:\n%s\n" "$staged"
+  printf >&2 "Unstage them (git restore --staged <file>); the overlay must never be committed.\n\n"
+  exit 1
+fi''',
+    "pre-push": r'''
+if "$REPO_OVERLAY" list-files --pushed "$@" 2>/dev/null | grep -q .; then
+  printf >&2 "\nOVERLAY GUARD: a commit being pushed modifies an overlay-managed file:\n"
+  "$REPO_OVERLAY" list-files --pushed "$@" 2>/dev/null | sed "s/^/  /" >&2
+  printf >&2 "Refusing push. The overlay must never leave your machine.\n\n"
+  exit 1
+fi''',
+    "pre-rebase": r'''
+# `state` returns 0 while ON the overlay branch, so this does NOT block rebasing the overlay
+# branch itself (do that with `git rebase --empty=keep` so the empty sentinel survives). It only
+# fires when the overlay is APPLIED on a feature branch, where rebase would skip skip-worktree paths.
+"$REPO_OVERLAY" state >/dev/null 2>&1; st=$?
+if [ "$st" -ge 10 ]; then
+  printf >&2 "\nOVERLAY GUARD: overlay is applied; rebase may silently skip skip-worktree paths.\n"
+  printf >&2 "Run \x60{prog} remove\x60 first, then rebase.\n\n"
+  exit 1
+fi''',
+    "post-checkout": r'''
+"$REPO_OVERLAY" state >/dev/null 2>&1; st=$?
+if [ "$st" -eq 11 ]; then
+  printf >&2 "\n⚠ OVERLAY GUARD: overlay is applied AND hidden. Those files may silently hold\n"
+  printf >&2 "  overlay content on this branch (git will not update or flag them). Run\n"
+  printf >&2 "  \x60{prog} unhide\x60 (then status) or \x60{prog} remove\x60.\n\n"
+elif [ "$st" -eq 10 ]; then
+  printf >&2 "\n⚠ OVERLAY GUARD: overlay is applied (visible) on this branch; run \x60{prog} status\x60.\n\n"
+fi''',
+}
+
+
+def cmd_install_hooks(base: str, files: list[str], **_) -> int:
+    hd = hooks_dir()
+    self_path = os.path.abspath(sys.argv[0])
+    disp = os.path.basename(sys.argv[0])  # the invoked name (repo-overlay or a lims-overlay symlink)
+    for hook, body in HOOK_BODIES.items():
+        body = body.replace("{prog}", disp)
+        path = os.path.join(hd, hook)
+        if os.path.exists(path):
+            with open(path) as fh:
+                lines = fh.readlines()
+        else:
+            lines = ["#!/bin/sh\n"]
+        # strip any prior guard block (current OR legacy marker, so a re-install upgrades old hooks)
+        if any(GUARD_MARKER in ln or LEGACY_GUARD_MARKER in ln for ln in lines):
+            out, skip = [], False
+            for ln in lines:
+                if ln.rstrip("\n") in (GUARD_MARKER, LEGACY_GUARD_MARKER):
+                    skip = True
+                if not skip:
+                    out.append(ln)
+                if ln.rstrip("\n") in (GUARD_END, LEGACY_GUARD_END):
+                    skip = False
+            lines = out
+        block = [
+            f"{GUARD_MARKER}\n",
+            f"# Installed by `{disp} install-hooks`. Guards against acting while the\n",
+            "# dev overlay is applied. Edit via that command, not by hand.\n",
+            f'REPO_OVERLAY="{self_path}"\n',
+            f"{body}\n",
+            f"{GUARD_END}\n",
+        ]
+        with open(path, "w") as fh:
+            fh.writelines(lines + block)
+        os.chmod(path, 0o755)
+        print(f"  installed guard into {hook}")
+    # ensure git-lfs call still present on the hooks it owns
+    for h in ("post-checkout", "pre-push"):
+        path = os.path.join(hd, h)
+        with open(path) as fh:
+            content = fh.read()
+        if f"git lfs {h}" not in content:
+            with open(path, "a") as fh:
+                fh.write(f'git lfs {h} "$@"\n')
+            print(f"  re-appended git-lfs call to {h}")
+    print(f"guard hooks installed in {hd}")
+    return 0
+
+
+# --- dispatch --------------------------------------------------------------
+
+def prog() -> str:
+    return os.path.basename(sys.argv[0])
+
+
+# These commands need neither the resolved base nor the overlay file list. init-sentinel in
+# particular must run WHEN resolve_base() would die (no sentinel / orphaned base), so it cannot
+# depend on it — it resolves its own base via _resolve_init_base.
+_NO_FILES = {"install-hooks", "init-sentinel"}
+
+
+HELP_TEXT = f"""\
+{{prog}} — manage a "permanent stash" of a repo's dev-only file overrides,
+kept as a commit on a local-only branch (default '{BRANCH}') and applied to the working tree.
+
+Run from inside a repo listed in the registry ({REGISTRY_PATH});
+it operates on the current directory's checkout.
+
+Usage: {{prog}} <command>
+
+Commands:
+  apply          Copy the overlay files into the working tree (unstaged).
+  status [-v]    Show which branch is overlaid onto the current branch, plus the overlay's
+                 application state. With -v, list every overlay file and its per-file status
+                 (applied / not applied / modified).
+  update         Save your current working-tree edits to the overlay files onto the overlay
+                 branch (a new commit). Unchanged files are skipped; requires the overlay
+                 applied. No branch switching needed. Preview edits first with `status -v`.
+  remove [-f]    Un-overlay: restore the overlay files to their HEAD version. Files with extra
+                 local edits are reverted only after an ARE YOU SURE? prompt (-f bypasses it);
+                 either way each is backed up in place as <file>.<timestamp>.bak first.
+  hide           Quiet the overlay files in 'git status'/'git diff': skip-worktree for files
+                 tracked at HEAD; a .git/info/exclude entry for overlay-added (HEAD-absent)
+                 files, which have no index entry to skip-worktree and must not be staged.
+  unhide         Reverse hide: clear skip-worktree and remove the exclude entries.
+  clean          Un-apply: revert files, clear skip-worktree and exclude entries.
+  implode        Strip guard hooks. Does not delete the overlay branch. That's for you to do.
+  state          One-line machine state for scripts/hooks; exit 0=not applied, 10=applied, 11=hidden.
+                 Always 0 (not applied) while ON the overlay branch — see init-sentinel.
+  list-files     Print the managed file paths (--staged / --pushed selectors for hooks).
+  install-hooks  Install git guard hooks (pre-commit/pre-push/pre-rebase/post-checkout),
+                 chaining to any existing git-lfs hooks.
+  init-sentinel [--base <commit>]
+                 Insert the empty sentinel commit that marks the overlay's base, making it
+                 self-describing and rebase-proof. Idempotent (no-op if already present).
+                 Backs up to tag '{BACKUP_TAG}' and verifies content is unchanged.
+
+Under the hood:
+- The overlay branch is per-repo (from the registry; default '{BRANCH}').
+- The base is the SENTINEL commit's first parent; the overlay is every commit after it.
+  The sentinel is found by its '{SENTINEL_TRAILER}' trailer, so it survives a rebase that
+  rewrites SHAs — rebase the overlay branch with `git rebase --empty=keep` so it isn't dropped.
+- apply writes each overlay blob to the working tree (git show to see the changes unless hidden)
+- remove reverts via: git checkout
+- hide/unhide toggles via: git update-index --skip-worktree
+- update commits the current files onto the overlay branch via: git commit-tree
+"""
+
+
+CMDS = ("apply | status | update | remove | hide | unhide | clean | implode | "
+        "list-files | install-hooks | init-sentinel")
+
+
+class _Parser(argparse.ArgumentParser):
+    """Prints the hand-formatted, bash-matching help and error wording."""
+
+    def format_help(self) -> str:
+        return HELP_TEXT.format(prog=prog())
+
+    def error(self, message: str) -> typing.NoReturn:
+        # Match the bash version's messages instead of argparse's default phrasing.
+        if "required" in message and "<command>" in message:
+            die(f"a command is required: {CMDS}")
+        if "invalid choice" in message:
+            bad = message.split("'")[1] if "'" in message else "?"
+            die(f"unknown command: {bad} (use {CMDS})")
+        die(message)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = _Parser(prog=prog(), add_help=False)
+    p.add_argument("-h", "--help", action="help", help=argparse.SUPPRESS)
+    sub = p.add_subparsers(dest="command", required=True, metavar="<command>")
+    for name in ("apply", "status", "update", "remove", "hide", "unhide", "clean",
+                 "implode", "state", "list-files", "install-hooks", "init-sentinel"):
+        cp = sub.add_parser(name, add_help=False)
+        cp.add_argument("-h", "--help", action="help", help=argparse.SUPPRESS)
+        if name == "status":
+            cp.add_argument("-v", "--verbose", action="store_true")
+        elif name == "remove":
+            cp.add_argument("-f", "--force", action="store_true")
+        elif name == "init-sentinel":
+            cp.add_argument("--base", dest="init_base", metavar="<commit>", default=None)
+    return p
+
+
+COMMANDS = {
+    "apply": cmd_apply,
+    "status": cmd_status,
+    "update": cmd_update,
+    "remove": cmd_remove,
+    "hide": cmd_hide,
+    "unhide": cmd_unhide,
+    "clean": cmd_clean,
+    "implode": cmd_implode,
+    "state": cmd_state,
+    "list-files": cmd_list_files,
+    "install-hooks": cmd_install_hooks,
+    "init-sentinel": cmd_init_sentinel,
+}
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    # The list-files selector (--staged/--pushed) is a hook-facing sub-option that argparse
+    # subparsers won't take as a leading-dash positional; pull it out and handle it directly.
+    list_selector = None
+    for s in ("--staged", "--pushed"):
+        if s in raw:
+            list_selector = s
+            raw = [a for a in raw if a != s]
+    # Global -v/-f may appear before OR after the command (bash parity). Pull them
+    # out, then re-insert after the command so argparse's subparsers accept them.
+    globals_seen = [a for a in raw if a in ("-v", "--verbose", "-f", "--force")]
+    rest = [a for a in raw if a not in ("-v", "--verbose", "-f", "--force")]
+    if rest and not rest[0].startswith("-"):
+        rest = [rest[0], *globals_seen, *rest[1:]]
+    else:
+        rest = [*rest, *globals_seen]
+    args = build_parser().parse_args(rest)
+    resolve_repo()
+    require_branch()
+    # _NO_FILES commands (install-hooks, init-sentinel) must not call resolve_base(): init-sentinel
+    # is the recovery path for exactly the no-sentinel / orphaned-base case where it would die.
+    if args.command in _NO_FILES:
+        base, files = "", []
+    else:
+        base = resolve_base()
+        files = overlay_files(base)
+    kwargs = {}
+    if args.command == "status":
+        kwargs["verbose"] = args.verbose
+    elif args.command == "remove":
+        kwargs["force"] = args.force
+    elif args.command == "init-sentinel":
+        kwargs["init_base"] = getattr(args, "init_base", None)
+    elif args.command == "list-files":
+        kwargs["selector"] = list_selector
+    elif list_selector is not None:
+        die(f"{list_selector} is only valid with 'list-files'")
+    return COMMANDS[args.command](base, files, **kwargs)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -92,6 +92,10 @@ Copy each path listed in a file (one per line) into a target directory. Paths ma
 
 Rename a file by percent-encoding characters unsafe on FAT/exFAT (quotes, colons, etc.).
 
+### repo-overlay
+
+A "permanent stash" for a repo's dev-only file overrides (log4j2 noise suppression, local `application.yml`, Tiltfile tweaks, …), kept as commits on a local-only branch (default `local-dev-overlay`) that is never pushed or merged — so the overrides survive the way a forgotten `git stash pop` would not. `apply` writes them into the working tree; `hide`/`unhide` quiet them from `git status` (skip-worktree, or `.git/info/exclude` for added files); `update` saves working-tree edits back onto the overlay branch; `remove`/`clean` revert; `install-hooks` adds pre-commit/pre-push/pre-rebase/post-checkout guards so the overrides never get committed or pushed. The overlay's base is marked by a rebase-proof empty sentinel commit (`init-sentinel`). Which repos it manages — each one's overlay branch and description — comes from `~/.config/repo-overlay/repos.toml`, keyed by repo path. A heavier relative of `git-shutup-this-is-mine` / `git-better-skip-worktree`: a whole committed branch of overrides rather than a per-file bit.
+
 ### space
 
 Show disk usage for files or directories, sorted by size. `-h` uses human-readable units; `-a` includes dot files.
