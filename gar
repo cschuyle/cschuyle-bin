@@ -3512,11 +3512,53 @@ check_mac_java() {
     fi
 }
 
+# Print each distinct copy of a command on PATH, in PATH order (first one wins).
+# Copies resolving to the same file are collapsed, and macOS system copies
+# (/usr/bin etc.) are skipped: those are routinely shadowed by Homebrew on purpose.
+gar_command_path_copies() {
+    local cmd="$1" path real seen=$'\n'
+    while IFS= read -r path; do
+        case "$path" in /bin/* | /sbin/* | /usr/bin/* | /usr/sbin/*) continue ;; esac
+        real=$(realpath "$path" 2>/dev/null || printf '%s' "$path")
+        [[ "$seen" == *$'\n'"$real"$'\n'* ]] && continue
+        seen+="$real"$'\n'
+        printf '%s\n' "$path"
+    done < <(type -aP "$cmd")
+}
+
+# WARN when more than one distinct copy of a command is on PATH (e.g. Homebrew's
+# kubectl vs the one Docker Desktop links into /usr/local/bin), since which one
+# runs then depends on PATH order.
+gar_warn_command_shadowed() {
+    local cmd="$1" copies=() path label real
+    while IFS= read -r path; do
+        copies+=("$path")
+    done < <(gar_command_path_copies "$cmd")
+    ((${#copies[@]} > 1)) || return 0
+    local desc="" i
+    for i in "${!copies[@]}"; do
+        path="${copies[$i]}"
+        label=$(gar_tilde_path "$path")
+        if [[ -L "$path" ]]; then
+            real=$(realpath "$path" 2>/dev/null || true)
+            [[ -n "$real" ]] && label+=" -> $(gar_tilde_path "$real")"
+        fi
+        if ((i == 0)); then
+            desc="using $label; shadowed: "
+        else
+            ((i > 1)) && desc+=", "
+            desc+="$label"
+        fi
+    done
+    report_warn "Command $cmd: ${#copies[@]} copies on PATH ($desc)"
+}
+
 check_commands() {
     local commands_manifest="$1" hints_file="$2" cmd hint
     while IFS= read -r cmd; do
         if command -v "$cmd" >/dev/null 2>&1; then
             report_ok "Command $cmd"
+            gar_warn_command_shadowed "$cmd"
         else
             hint=$(lookup_install_hint "$cmd" "$hints_file" 2>/dev/null || true)
             if [[ -n "$hint" ]]; then

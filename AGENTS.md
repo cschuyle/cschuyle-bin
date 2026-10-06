@@ -125,6 +125,14 @@ Brewfile — `brew bundle check` treats a bare `brew "name"` for a keg-only
 formula as unsatisfied unless it is *unlinked*, which is the opposite of what's
 wanted here.
 
+**Shadowed commands.** For each command in a `commands` manifest that is on
+PATH, `check_commands` WARNs if more than one distinct copy is on PATH
+(`gar_warn_command_shadowed`), naming the one in use and the shadowed ones.
+Copies resolving to the same file are collapsed, and macOS system copies
+(`/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`) are ignored, since Homebrew routinely
+shadows those on purpose. Example: the kubernetes role's Homebrew `kubectl` vs
+the one Docker Desktop links into `/usr/local/bin`.
+
 **`gar info <name>`.** `cmd_info` dispatches, in order: `brew`/`homebrew`
 (literal) → full Homebrew audit section (forces `gar_show_all`, runs
 `check_mac_homebrew`); a machine-env repo → its git status; an app; a

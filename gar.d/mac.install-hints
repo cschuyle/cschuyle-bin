@@ -53,3 +53,4 @@ Karakeep|App: Mac App Store; extension — Opera: https://chromewebstore.google.
 1Password|Install in Waterfox from https://addons.mozilla.org/en-US/firefox/addon/1password-x-password-manager/
 Link Text and Location Copier|Install in Waterfox from https://addons.mozilla.org/en-US/firefox/addon/link-text-and-location-copier/
 Pinboard Pin|Install in Waterfox from https://addons.mozilla.org/en-US/firefox/addon/pinboard-pin/ (https://github.com/Cito/Pinboard-Pin)
+OpenLens|brew install --cask openlens

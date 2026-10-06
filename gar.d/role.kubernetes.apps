@@ -1,0 +1,3 @@
+# Apps added by the kubernetes role.
+# Format: display name|path[|path...]  (any listed path existing counts as installed)
+OpenLens|/Applications/OpenLens.app
