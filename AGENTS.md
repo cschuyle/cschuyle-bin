@@ -133,6 +133,24 @@ Copies resolving to the same file are collapsed, and macOS system copies
 shadows those on purpose. Example: the kubernetes role's Homebrew `kubectl` vs
 the one Docker Desktop links into `/usr/local/bin`.
 
+**SDKMAN tools audit (mac).** `check_mac_sdkman_tools` audits SDKMAN candidates
+declared in a `sdkman-tools` manifest (`<platform|shared>.sdkman-tools` plus each
+active role's `role.<role>.sdkman-tools`, combined like the other capability
+manifests). Each line is `candidate|constraint` (e.g. `maven|>=3.8.0,<3.9.0`),
+`#` comments allowed. For each line it sources SDKMAN once, reads `sdk current
+<candidate>`, and reports OK/MISS by testing the version against the constraint
+with `gar_version_in_constraint` — a pure (SDKMAN-free, unit-testable) evaluator
+supporting comma-joined `>=` / `>` / `<=` / `<` / `=` clauses, with an empty
+constraint meaning presence-only. The *mechanism* lives in the script; *which*
+tools and *which* versions are policy that lives entirely in the manifests, so a
+non-matching machine (no base manifest, role inactive) gets an empty manifest and
+the check is a silent no-op. The natera role uses it (private
+`role.natera.sdkman-tools` overlay) to pin Maven to 3.8.x: Homebrew tracks the
+latest Maven (3.9+), which hard-errors on the lims monorepo's duplicate-
+`<dependency>` POMs, so `brew "maven"` is also forbidden via
+`role.natera.brew-forbidden` to keep it off PATH. Only the mac runner wires
+`sdkman-tools`, under its own `SDKMAN tools` timing section.
+
 **`gar info <name>`.** `cmd_info` dispatches, in order: `brew`/`homebrew`
 (literal) → full Homebrew audit section (forces `gar_show_all`, runs
 `check_mac_homebrew`); a machine-env repo → its git status; an app; a
