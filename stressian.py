@@ -1,7 +1,10 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["ruaccent", "truststore"]
+# dependencies = ["ruaccent", "truststore", "huggingface_hub<2"]
 # ///
+# huggingface_hub<2: every modern transformers caps hub <2, so without this uv
+# backtracks to transformers 4.12.2 -> tokenizers 0.10.3, which has no wheels and
+# fails trying to build from source with Rust.
 """Add Russian stress marks to Cyrillic text using the ruaccent model."""
 import os
 import pathlib
