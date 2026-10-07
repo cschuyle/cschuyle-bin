@@ -3,9 +3,14 @@
 
 The overrides (log4j2 noise suppression, aspectj-weaving off, Tiltfile recovery
 notes, application.yml logging config, ...) live as ONE (or more) commits on a
-local-only branch (``local-dev-overlay`` by default). That branch is never pushed and
-never merged into a feature branch, so the overrides never reach an MR — but the commit
-means they can't be lost the way a forgotten ``git stash pop`` can.
+dev-only branch (``local-dev-overlay`` by default). That branch is never merged into a
+feature branch, so the overrides never reach an MR — but the commit means they can't be
+lost the way a forgotten ``git stash pop`` can.
+
+The branch MAY be pushed for backup so the overlay survives a lost laptop; the former
+pre-push guard that blocked all pushes has been removed. Where to push is your call per
+machine — the repo's own origin, or a separate personal remote to keep the shared origin
+uncluttered. The tool stays remote-agnostic; it's just a branch now.
 
 The overlay's base (the commit the overrides sit on top of) is marked by an empty
 SENTINEL commit at the bottom of the overlay region, carrying a unique message
@@ -62,7 +67,7 @@ GUARD_END = "# <<< repo-overlay guard <<<"
 # Pre-rename marker spellings, recognized (and upgraded/stripped) so old lims hooks are handled.
 LEGACY_GUARD_MARKER = "# >>> lims-overlay guard >>>"
 LEGACY_GUARD_END = "# <<< lims-overlay guard <<<"
-GUARD_HOOKS = ["pre-commit", "pre-push", "pre-rebase", "post-checkout"]
+GUARD_HOOKS = ["pre-commit", "pre-rebase", "post-checkout"]
 # The sentinel is an empty commit at the bottom of the overlay region; its first parent is the
 # overlay's base. Found by this trailer (not by SHA), so it survives a rebase that rewrites SHAs.
 SENTINEL_TRAILER = "repo-overlay-sentinel:"
@@ -985,13 +990,6 @@ if [ -n "$staged" ]; then
   printf >&2 "Unstage them (git restore --staged <file>); the overlay must never be committed.\n\n"
   exit 1
 fi''',
-    "pre-push": r'''
-if "$REPO_OVERLAY" list-files --pushed "$@" 2>/dev/null | grep -q .; then
-  printf >&2 "\nOVERLAY GUARD: a commit being pushed modifies an overlay-managed file:\n"
-  "$REPO_OVERLAY" list-files --pushed "$@" 2>/dev/null | sed "s/^/  /" >&2
-  printf >&2 "Refusing push. The overlay must never leave your machine.\n\n"
-  exit 1
-fi''',
     "pre-rebase": r'''
 # `state` returns 0 while ON the overlay branch, so this does NOT block rebasing the overlay
 # branch itself (do that with `git rebase --empty=keep` so the empty sentinel survives). It only
@@ -1049,8 +1047,10 @@ def cmd_install_hooks(base: str, files: list[str], **_) -> int:
             fh.writelines(lines + block)
         os.chmod(path, 0o755)
         print(f"  installed guard into {hook}")
-    # ensure git-lfs call still present on the hooks it owns
-    for h in ("post-checkout", "pre-push"):
+    # ensure git-lfs call still present on the hooks it owns. (pre-push is no longer
+    # tool-managed — overlay branches are now pushable — so its git-lfs chain, if any,
+    # is left to git-lfs's own management and untouched here.)
+    for h in ("post-checkout",):
         path = os.path.join(hd, h)
         with open(path) as fh:
             content = fh.read()
@@ -1103,7 +1103,7 @@ Commands:
   state          One-line machine state for scripts/hooks; exit 0=not applied, 10=applied, 11=hidden.
                  Always 0 (not applied) while ON the overlay branch — see init-sentinel.
   list-files     Print the managed file paths (--staged / --pushed selectors for hooks).
-  install-hooks  Install git guard hooks (pre-commit/pre-push/pre-rebase/post-checkout),
+  install-hooks  Install git guard hooks (pre-commit/pre-rebase/post-checkout),
                  chaining to any existing git-lfs hooks.
   init-sentinel [--base <commit>]
                  Insert the empty sentinel commit that marks the overlay's base, making it
