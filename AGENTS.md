@@ -12,7 +12,7 @@ The same policy is mirrored for Cursor in [`.cursor/rules/git-and-commits.mdc`](
 
 ## gar: machine-env repo checking
 
-`gar` is a machine-config auditor: it compares desired-state manifests in
+`gar` (a stdlib-only Python 3 script) is a machine-config auditor: it compares desired-state manifests in
 `gar.d/` against the live machine and reports `OK` / `MISS` / `WARN` /
 `EXPECTED MODS` (a `MISS` counts as a problem and makes `gar` exit non-zero;
 `WARN` and `EXPECTED MODS` are advisory only). One of its checks audits a set of
@@ -140,7 +140,7 @@ run no other checks, and don't affect the normal audit's exit status. Dependenci
 by leaf name (`gdubw/gng/gng` ↔ `brew "gng"`). Casks are reported in a separate
 sub-section with a caveat, because some installed casks are tracked as GUI apps in
 a `.apps` manifest rather than a `cask "..."` Brewfile line, so a cask listed here
-isn't necessarily unaccounted-for. Helper `gar_brewfile_declared <brewfile> <kind>`
+isn't necessarily unaccounted-for. Helper `gar_brewfile_declared(<brewfile text>, <kind>)`
 extracts the declared short names; `cmd_extra_brew <leaves|requested>` does the set
 difference.
 
