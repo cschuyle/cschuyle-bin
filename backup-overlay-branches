@@ -1,0 +1,85 @@
+#!/usr/bin/env zsh
+# backup-overlay-branches — back up every repo-overlay overlay to its off-machine
+# remote, by running `repo-overlay backup` in each registered repo.
+#
+# repo-overlay keeps each managed repo's dev-only overrides on a branch. The
+# overlay branch itself can't be pushed to a fresh remote cheaply (it drags the
+# repo's whole history + git-LFS objects), so `repo-overlay backup` derives a
+# tiny, LFS-free, orphan-rooted MIRROR of the overlay and pushes that instead.
+# This script just iterates the registry and invokes that command per repo, so
+# the whole machine's overlays get backed up in one call (e.g. the daily sweep).
+#
+# Each repo opts in by setting `backup-remote` in the registry
+# (~/.config/repo-overlay/repos.toml); a repo without it is built locally but not
+# pushed by `repo-overlay backup`, which this script reports as a skip. Repos not
+# cloned on this machine are skipped. Safe and idempotent to run anywhere.
+#
+#   backup-overlay-branches        # back up every registered repo's overlay
+#   backup-overlay-branches -n     # dry run: list what WOULD run, change nothing
+#
+# Lives in cschuyle-bin (personal toolset) because it depends on `repo-overlay`,
+# also a personal tool — a natera-ai-backups script may not depend on either.
+#
+# Dependencies: repo-overlay (personal, on PATH), git, python3 >=3.11 (tomllib).
+
+emulate -L zsh
+set -eu
+
+local dry=0
+[[ "${1:-}" == "-n" || "${1:-}" == "--dry-run" ]] && dry=1
+
+command -v repo-overlay >/dev/null 2>&1 || {
+    echo "backup-overlay-branches: repo-overlay not on PATH (need the personal tool)" >&2
+    exit 1
+}
+
+local registry="${XDG_CONFIG_HOME:-$HOME/.config}/repo-overlay/repos.toml"
+[[ -r "$registry" ]] || { echo "backup-overlay-branches: no registry at $registry (nothing to back up)" >&2; exit 0 }
+
+# Registry keys are repo absolute paths; let tomllib parse rather than hand-roll it.
+local -a repos
+repos=("${(@f)$(python3 - "$registry" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    reg = tomllib.load(f)
+for repo in reg:
+    print(repo)
+PY
+)}")
+
+local done=0 missing=0 failed=0
+local repo
+for repo in "${repos[@]}"; do
+    [[ -n "$repo" ]] || continue
+
+    # Repo not cloned here (or moved — registry key is an exact abs path).
+    if [[ ! -d "$repo/.git" ]]; then
+        echo "MISS  $repo — not a git repo on this machine (skipping)"
+        (( ++missing ))
+        continue
+    fi
+
+    if (( dry )); then
+        echo "would run: repo-overlay backup   (in ${repo:t})"
+        (( ++done ))
+        continue
+    fi
+
+    echo "=== ${repo:t} ==="
+    # repo-overlay resolves the repo from its CWD; run it inside the checkout.
+    # It builds the mirror and pushes if backup-remote is set, else reports local-only.
+    if ( cd "$repo" && repo-overlay backup ); then
+        (( ++done ))
+    else
+        echo "FAIL  ${repo:t} — repo-overlay backup failed (see output above)" >&2
+        (( ++failed ))
+    fi
+done
+
+echo ""
+if (( dry )); then
+    echo "Done (dry run). would-run=$done  missing=$missing"
+else
+    echo "Done. ran=$done  missing=$missing  failed=$failed"
+fi
+(( failed == 0 ))

@@ -7,10 +7,12 @@ dev-only branch (``local-dev-overlay`` by default). That branch is never merged 
 feature branch, so the overrides never reach an MR — but the commit means they can't be
 lost the way a forgotten ``git stash pop`` can.
 
-The branch MAY be pushed for backup so the overlay survives a lost laptop; the former
-pre-push guard that blocked all pushes has been removed. Where to push is your call per
-machine — the repo's own origin, or a separate personal remote to keep the shared origin
-uncluttered. The tool stays remote-agnostic; it's just a branch now.
+The overlay branch itself sits on real repo history, so pushing it to a fresh remote drags the
+whole history + any git-LFS objects. Instead, ``backup`` derives a tiny orphan-rooted mirror of
+just the overlay (a synthetic root holding the overlaid files at base content, with the overlay
+commits replayed on top) and pushes THAT — no history, no LFS, instant. Where it pushes is a
+per-machine choice (registry ``backup-remote``). The former pre-push guard that blocked all pushes
+is gone, so the raw overlay branch may also be pushed by hand if you ever want to.
 
 The overlay's base (the commit the overrides sit on top of) is marked by an empty
 SENTINEL commit at the bottom of the overlay region, carrying a unique message
@@ -56,6 +58,15 @@ REGISTRY_PATH = os.path.join(
 CFG: "RepoConfig | None" = None
 BRANCH = "local-dev-overlay"
 OVERLAY_MSG = "local dev overlay"
+# Backup-branch defaults (overridable per repo in the registry via backup-branch / backup-remote).
+# The backup branch is a DERIVED, orphan-rooted mirror of the overlay for off-machine backup — see
+# cmd_backup. backup_remote=None means the repo hasn't opted into push backup on this machine.
+BACKUP_BRANCH = BRANCH + "-backup"
+BACKUP_REMOTE: "str | None" = None
+# Deterministic message for the synthetic orphan root the backup branch is built on.
+BACKUP_ROOT_MSG = ("repo-overlay backup root (synthetic; not a real repo commit)\n\n"
+                   "Holds the overlaid files at their base content so the overlay commits have a\n"
+                   "tiny, LFS-free, pushable base. Rebuilt by `repo-overlay backup`.")
 
 # These refs/tags live INSIDE each repo, so they never collide across repos — no need to
 # encode the repo in the name. BASE_REF has a legacy lims-era spelling we still migrate.
@@ -79,6 +90,8 @@ class RepoConfig(typing.NamedTuple):
     path: str          # absolute, realpath'd repo toplevel (the registry key)
     branch: str        # overlay branch name for this repo
     description: str    # commit message used when `update` saves overlay edits
+    backup_branch: str  # derived orphan-rooted backup branch name (default <branch>-backup)
+    backup_remote: "str | None"  # git remote `backup` pushes to; None = not opted in on this machine
 
 
 def die(msg: str) -> typing.NoReturn:
@@ -187,7 +200,7 @@ def resolve_repo() -> str:
     """cd into the git repo containing the cwd, match it against the registry, and set the module
     globals CFG / BRANCH / OVERLAY_MSG from the matched entry. Dies (with a move/rename hint when
     the path looks like a relocated configured repo) if the repo isn't registered."""
-    global CFG, BRANCH, OVERLAY_MSG
+    global CFG, BRANCH, OVERLAY_MSG, BACKUP_BRANCH, BACKUP_REMOTE
     repo = git_out("rev-parse", "--show-toplevel")
     if not repo:
         die(f"not inside a git repository (cwd: {os.getcwd()}).")
@@ -203,9 +216,13 @@ def resolve_repo() -> str:
         if not branch:
             die(f"registry entry for '{repo}' is missing 'branch' ({REGISTRY_PATH}).")
         CFG = RepoConfig(path=repo, branch=branch,
-                         description=entry.get("description", "local dev overlay"))
+                         description=entry.get("description", "local dev overlay"),
+                         backup_branch=entry.get("backup-branch") or f"{branch}-backup",
+                         backup_remote=entry.get("backup-remote") or None)
         BRANCH = CFG.branch
         OVERLAY_MSG = CFG.description
+        BACKUP_BRANCH = CFG.backup_branch
+        BACKUP_REMOTE = CFG.backup_remote
         return repo
 
     configured = sorted(by_real.keys())
@@ -902,6 +919,124 @@ def cmd_init_sentinel(base: str, files: list[str], init_base: str | None = None,
     return 0
 
 
+def _overlay_commits(base: str) -> list[str]:
+    """The overlay commits to replay, oldest→newest: the first-parent chain base..BRANCH, with any
+    EMPTY commit dropped. The sentinel (an empty commit that changes no files) is the only expected
+    empty one, so this excludes it without depending on which trailer spelling it carries — the
+    legacy `lims-overlay-sentinel:` sentinel isn't found by find_sentinel()'s current-trailer grep,
+    so keying off emptiness is both simpler and spelling-agnostic. A genuinely empty overlay commit
+    (none expected) would also be dropped, which is correct for a content backup."""
+    out = git_out("rev-list", "--reverse", "--first-parent", f"{base}..{BRANCH}")
+    commits = [c for c in out.splitlines() if c]
+    nonempty = []
+    for c in commits:
+        # Empty = its tree equals its first parent's tree (changes no files).
+        parent = rev_parse_verify(f"{c}^")
+        if parent and git_out("rev-parse", f"{c}^{{tree}}") == git_out("rev-parse", f"{parent}^{{tree}}"):
+            continue
+        nonempty.append(c)
+    return nonempty
+
+
+def _tree_of_overlaid(src_rev: str, files: list[str]) -> str:
+    """Write a tree containing ONLY `files`, each at its blob/mode in `src_rev` (omitting any the
+    rev lacks), via a throwaway index. Pure plumbing — never touches the working tree or real index.
+
+    This is the whole trick behind `backup`: because overlay_files() is exactly the set of paths the
+    overlay touches, every overlay commit's effect is captured by its blobs for these paths. So the
+    orphan root is this tree at the base, and each replayed commit's tree is this tree at that commit
+    — no cherry-pick, no merge, no conflict possible."""
+    with tempfile.NamedTemporaryFile(prefix="repo-overlay-idx-", delete=False) as tf:
+        idx = tf.name
+    try:
+        env = {**os.environ, "GIT_INDEX_FILE": idx}
+        subprocess.run(["git", "read-tree", "--empty"], env=env, check=True,
+                       capture_output=True, text=True)
+        # One ls-tree over the paths at src_rev gives mode+sha for the ones that exist there.
+        # ls-tree emits "<mode> <type> <sha>\t<path>"; --index-info wants "<mode> <sha>\t<path>".
+        # Feed via --index-info stdin (handles any number of entries; one --cacheinfo per entry
+        # is required otherwise, and bulk --cacheinfo silently misreads later args as paths).
+        ls = subprocess.run(["git", "ls-tree", "-z", "-r", src_rev, "--", *files],
+                            env=env, check=True, capture_output=True, text=True)
+        lines = []
+        for rec in ls.stdout.split("\0"):
+            if not rec:
+                continue
+            meta, path = rec.split("\t", 1)
+            mode, _otype, sha = meta.split(" ", 2)
+            lines.append(f"{mode} {sha}\t{path}")
+        if lines:
+            subprocess.run(["git", "update-index", "--index-info"], env=env, check=True,
+                           input="\n".join(lines) + "\n", capture_output=True, text=True)
+        tree = subprocess.run(["git", "write-tree"], env=env, check=True,
+                              capture_output=True, text=True).stdout.strip()
+        return tree
+    finally:
+        try:
+            os.unlink(idx)
+        except OSError:
+            pass
+
+
+def cmd_backup(base: str, files: list[str], **_) -> int:
+    """(Re)derive the orphan-rooted backup branch from the current overlay and push it.
+
+    The overlay branch can't be pushed to a fresh remote cheaply: its base is real repo history, so
+    the push drags the whole history + any git-LFS objects (which the server's pre-receive hook then
+    demands). This builds a tiny mirror instead: a synthetic orphan ROOT holding the overlaid files
+    at their base content, with the N overlay commits replayed on top — same count, messages, order,
+    and diffs, but no repo history and no LFS. It force-updates BACKUP_BRANCH (rebuilt from scratch
+    each run, so SHAs change but structure is preserved) and pushes it to BACKUP_REMOTE.
+
+    Never touches the working tree or current branch — all plumbing (commit-tree / write-tree)."""
+    commits = _overlay_commits(base)
+    if not commits:
+        die(f"'{BRANCH}' has no overlay commits above its base — nothing to back up.")
+
+    # 1. Orphan root: overlaid files at base content, no parent.
+    root_tree = _tree_of_overlaid(base, files)
+    root = subprocess.run(["git", "commit-tree", root_tree, "-m", BACKUP_ROOT_MSG],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+    # 2. Replay each overlay commit onto the growing branch, preserving author/committer/message.
+    #    Each replayed tree = the overlaid paths at that commit (see _tree_of_overlaid).
+    parent = root
+    for c in commits:
+        tree = _tree_of_overlaid(c, files)
+        env = {**os.environ}
+        # Carry the original identity + message so the mirror is a faithful, diffable copy.
+        for role in ("AUTHOR", "COMMITTER"):
+            env[f"GIT_{role}_NAME"] = git_out("show", "-s", "--format=%an", c)
+            env[f"GIT_{role}_EMAIL"] = git_out("show", "-s", "--format=%ae", c)
+            env[f"GIT_{role}_DATE"] = git_out("show", "-s", "--format=%aI", c)
+        msg = git_bytes("show", "-s", "--format=%B", c)
+        made = subprocess.run(["git", "commit-tree", tree, "-p", parent],
+                              input=msg, env=env, capture_output=True, check=True)
+        parent = made.stdout.decode().strip()
+
+    git("update-ref", f"refs/heads/{BACKUP_BRANCH}", parent, check=True)
+    print(f"built {BACKUP_BRANCH}: orphan root + {len(commits)} overlay commit(s) "
+          f"(tip {parent[:12]}).")
+
+    # 3. Push — only if a backup remote is configured for this repo on this machine.
+    if not BACKUP_REMOTE:
+        print(f"no backup-remote set for this repo in the registry — built locally, not pushed.")
+        print(f"  opt in: add  backup-remote = \"<remote>\"  to this repo's entry in {REGISTRY_PATH}")
+        print(f"  (and ensure that git remote exists: git remote add <remote> <url>)")
+        return 0
+
+    if not git_out("remote", "get-url", BACKUP_REMOTE):
+        die(f"backup-remote '{BACKUP_REMOTE}' is configured in the registry but is not a git remote "
+            f"in this repo.\n       Add it: git remote add {BACKUP_REMOTE} <url>")
+
+    # Force: the branch is rebuilt from scratch each run, so its history is intentionally replaced.
+    push = git("push", "-f", "-u", BACKUP_REMOTE, f"{BACKUP_BRANCH}:{BACKUP_BRANCH}")
+    if push.returncode != 0:
+        die(f"push to {BACKUP_REMOTE} failed:\n{push.stderr.strip() or push.stdout.strip()}")
+    print(f"pushed {BACKUP_BRANCH} -> {BACKUP_REMOTE}.")
+    return 0
+
+
 def cmd_list_files(base: str, files: list[str], selector: str | None = None, **_) -> int:
     if selector is None:
         print("\n".join(files))
@@ -1109,6 +1244,10 @@ Commands:
                  Insert the empty sentinel commit that marks the overlay's base, making it
                  self-describing and rebase-proof. Idempotent (no-op if already present).
                  Backs up to tag '{BACKUP_TAG}' and verifies content is unchanged.
+  backup         (Re)derive a tiny, LFS-free, orphan-rooted mirror of the overlay (same commits,
+                 messages, order — no repo history) as branch '<branch>-backup' and push it to the
+                 registry's backup-remote. Rebuilt from scratch each run (force-push); never touches
+                 the working tree. No backup-remote set → builds locally, doesn't push.
 
 Under the hood:
 - The overlay branch is per-repo (from the registry; default '{BRANCH}').
@@ -1123,7 +1262,7 @@ Under the hood:
 
 
 CMDS = ("apply | status | update | remove | hide | unhide | clean | implode | "
-        "list-files | install-hooks | init-sentinel")
+        "list-files | install-hooks | init-sentinel | backup")
 
 
 class _Parser(argparse.ArgumentParser):
@@ -1147,7 +1286,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-h", "--help", action="help", help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest="command", required=True, metavar="<command>")
     for name in ("apply", "status", "update", "remove", "hide", "unhide", "clean",
-                 "implode", "state", "list-files", "install-hooks", "init-sentinel"):
+                 "implode", "state", "list-files", "install-hooks", "init-sentinel", "backup"):
         cp = sub.add_parser(name, add_help=False)
         cp.add_argument("-h", "--help", action="help", help=argparse.SUPPRESS)
         if name == "status":
@@ -1172,6 +1311,7 @@ COMMANDS = {
     "list-files": cmd_list_files,
     "install-hooks": cmd_install_hooks,
     "init-sentinel": cmd_init_sentinel,
+    "backup": cmd_backup,
 }
 
 
