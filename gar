@@ -138,7 +138,8 @@ def shell_q(s):
     res = []
     for i, c in enumerate(s):
         if ord(c) < 32 or ord(c) == 127:
-            res.append("$'\\%s'" % {"\t": "t", "\n": "n", "\r": "r"}.get(c, "%03o" % ord(c)))
+            code = {"\t": "t", "\n": "n", "\r": "r"}.get(c, f"{ord(c):03o}")
+            res.append(f"$'\\{code}'")
         elif c in _Q_SPECIAL or (c == "~" and i == 0):
             res.append("\\" + c)
         else:
@@ -166,7 +167,7 @@ def gar_timings_init():
     d = os.path.join(HOME, ".gar", "timings")
     try:
         os.makedirs(d, exist_ok=True)
-        f = os.path.join(d, "timings-%s.txt" % time.strftime("%Y%m%d-%H%M%S"))
+        f = os.path.join(d, f"timings-{time.strftime('%Y%m%d-%H%M%S')}.txt")
         open(f, "w").close()
         gar_timings_file = f
     except OSError:
@@ -176,7 +177,7 @@ def gar_timings_init():
 def gar_timings_mark(kind, label, dur=""):
     if not gar_timings_file:
         return
-    line = "%s\t%s\t%s\t%s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), kind, label, dur or "-")
+    line = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')}\t{kind}\t{label}\t{dur or '-'}\n"
     with _timings_lock:
         try:
             with open(gar_timings_file, "a") as f:
@@ -193,7 +194,7 @@ def gar_timed(label, fn, *args):
     try:
         return fn(*args)
     finally:
-        gar_timings_mark("END", label, "%ds" % (int(time.time()) - start))
+        gar_timings_mark("END", label, f"{int(time.time()) - start}s")
 
 
 # Run a command with a hard wall-clock timeout, killing it (and returning
@@ -236,23 +237,23 @@ def gar_check_config_path(kind, mode, path):
     """True if OK (right type, or optional-and-absent); prints to stderr and
     returns False on: dangling symlink, wrong file type, or unreadable path."""
     if os.path.islink(path) and not os.path.exists(path):
-        err("gar: config path is a broken symlink: %s -> %s" % (path, os.readlink(path)))
+        err(f"gar: config path is a broken symlink: {path} -> {os.readlink(path)}")
         return False
     # Genuinely absent: OK for optional (intentional "no local config"), an
     # error for required (the repo's own gar.d).
     if not os.path.exists(path):
         if mode == "required":
-            err("gar: required config path is missing: %s" % path)
+            err(f"gar: required config path is missing: {path}")
             return False
         return True
     if kind == "dir" and not os.path.isdir(path):
-        err("gar: config path should be a directory but is not: %s" % path)
+        err(f"gar: config path should be a directory but is not: {path}")
         return False
     if kind == "file" and not os.path.isfile(path):
-        err("gar: config path should be a regular file but is not: %s" % path)
+        err(f"gar: config path should be a regular file but is not: {path}")
         return False
     if not os.access(path, os.R_OK) or (kind == "dir" and not os.access(path, os.X_OK)):
-        err("gar: config path is not readable: %s" % path)
+        err(f"gar: config path is not readable: {path}")
         return False
     return True
 
@@ -376,7 +377,7 @@ def read_manifest(path):
 def gar_resolve_manifest(platform, name):
     for prefix in (platform, "shared"):
         for d in gar_manifest_dirs():
-            f = os.path.join(d, "%s.%s" % (prefix, name))
+            f = os.path.join(d, f"{prefix}.{name}")
             if os.path.isfile(f):
                 return f
     return ""
@@ -400,7 +401,7 @@ def _sorted_listdir(d):
 def gar_collect_role_manifest_for_role(role, capability):
     parts = []
     for d in gar_manifest_dirs():
-        f = os.path.join(d, "role.%s.%s" % (role, capability))
+        f = os.path.join(d, f"role.{role}.{capability}")
         if os.path.isfile(f):
             parts.append(read_text(f) + "\n")
     return "".join(parts)
@@ -588,21 +589,21 @@ def cmd_apps(args):
             usage()
             sys.exit(0)
         else:
-            err("Unknown option for apps: %s" % a)
+            err(f"Unknown option for apps: {a}")
             usage(sys.stderr)
             sys.exit(2)
 
     if role:
         if not gar_role_is_known(role):
-            err("Unknown role: %s" % role)
+            err(f"Unknown role: {role}")
             sys.exit(1)
         gar_init_workdir()
         text = gar_collect_role_manifest_for_role(role, "apps")
         if not text:
-            out("No apps for role %s" % role)
+            out(f"No apps for role {role}")
             return
         entries = parse_manifest(text)
-        out("Tracked apps for role %s:\n" % role)
+        out(f"Tracked apps for role {role}:\n")
     else:
         detect_roles()
         gar_init_workdir()
@@ -612,10 +613,10 @@ def cmd_apps(args):
     for entry in entries:
         name, path = split_entry(entry)
         out(name)
-        out("  Path: %s" % gar_app_format_paths(path))
+        out(f"  Path: {gar_app_format_paths(path)}")
         hint = lookup_install_hint(name)
         if hint is not None:
-            out("  Install: %s" % hint)
+            out(f"  Install: {hint}")
         else:
             out("  Install: App Store or vendor site")
         out()
@@ -635,7 +636,7 @@ def lookup_browser_extension_entry(query):
     query_id = gar_normalize_ext_id(query)
     for line in read_manifest(os.path.join(GAR_DIR, "mac.browser-extensions")):
         browser, ext_id, label = split_fields(line, 3)
-        if gar_name_eq(query, label) or gar_name_eq(query, "%s/%s" % (browser, label)):
+        if gar_name_eq(query, label) or gar_name_eq(query, f"{browser}/{label}"):
             return browser, ext_id, label
         if gar_name_eq(query, ext_id) or gar_name_eq(query_id, gar_normalize_ext_id(ext_id)):
             return browser, ext_id, label
@@ -712,8 +713,8 @@ def lookup_brew_hint(query):
             if not m or m.group(1) == "tap" or not gar_name_eq(query, m.group(2)):
                 continue
             if m.group(1) == "brew":
-                return "brew install %s" % m.group(2)
-            return "brew install --cask %s" % m.group(2)
+                return f"brew install {m.group(2)}"
+            return f"brew install --cask {m.group(2)}"
     return None
 
 
@@ -857,7 +858,7 @@ def gar_brew_hint_commands(brew_name):
     cmds = []
     for line in read_manifest(gar_hints_file()):
         name, hint = split_fields(line, 2)
-        if name and hint and (" %s " % brew_name) in (" %s " % hint):
+        if name and hint and (f" {brew_name} ") in (f" {hint} "):
             cmds.append(name)
     return cmds
 
@@ -918,22 +919,22 @@ def gar_brew_blocked_by_spotlight():
 def gar_brew_item_command(brew_bin, item):
     m = re.match(r"^Tap\s+(\S+)\s+needs", item)
     if m:
-        return "brew tap %s" % m.group(1)
+        return f"brew tap {m.group(1)}"
     m = re.match(r"^Formula\s+(\S+)\s+needs", item)
     if m:
         name = m.group(1)
         action = gar_brew_item_action(brew_bin, "formula", name, item)
         if action == "link":
-            return "brew link --force %s" % name
+            return f"brew link --force {name}"
         if action == "upgrade":
-            return "brew upgrade %s" % name
-        return "brew install %s" % name
+            return f"brew upgrade {name}"
+        return f"brew install {name}"
     m = re.match(r"^Cask\s+(\S+)\s+needs", item)
     if m:
         name = m.group(1)
         if gar_brew_item_action(brew_bin, "cask", name, item) == "upgrade":
-            return "brew upgrade --cask %s" % name
-        return "brew install --cask %s" % name
+            return f"brew upgrade --cask {name}"
+        return f"brew install --cask {name}"
     return ""
 
 
@@ -956,55 +957,55 @@ def offer_brew_install_missing(brew_bin, items):
         m_cask = re.match(r"^Cask\s+(\S+)\s+needs", item)
         if m_tap:
             name = m_tap.group(1)
-            if not gar_prompt_yn("Tap %s?" % name, "brew tap %s" % name):
+            if not gar_prompt_yn(f"Tap {name}?", f"brew tap {name}"):
                 continue
-            attempt([brew_bin, "tap", name], "Tapped %s." % name, "Homebrew: could not tap %s" % name)
+            attempt([brew_bin, "tap", name], f"Tapped {name}.", f"Homebrew: could not tap {name}")
         elif m_link:
             name = m_link.group(1)
-            if not gar_prompt_yn("Link %s (brew)?" % name, "brew link --overwrite --force %s" % name):
+            if not gar_prompt_yn(f"Link {name} (brew)?", f"brew link --overwrite --force {name}"):
                 continue
             attempt([brew_bin, "link", "--overwrite", "--force", name],
-                    "Linked %s." % name, "Homebrew: could not link %s" % name)
+                    f"Linked {name}.", f"Homebrew: could not link {name}")
         elif m_formula:
             name = m_formula.group(1)
             action = gar_brew_item_action(brew_bin, "formula", name, item)
             if action == "link":
                 # Keg-only formulae (the only kind bundle reports as needing a
                 # link) refuse a plain `brew link`.
-                if not gar_prompt_yn("Link %s (brew)?" % name, "brew link --force %s" % name):
+                if not gar_prompt_yn(f"Link {name} (brew)?", f"brew link --force {name}"):
                     continue
                 attempt([brew_bin, "link", "--force", name],
-                        "Linked %s." % name, "Homebrew: could not link %s" % name)
+                        f"Linked {name}.", f"Homebrew: could not link {name}")
             elif action == "upgrade":
-                if not gar_prompt_yn("Upgrade %s (brew)?" % name, "brew upgrade %s" % name):
+                if not gar_prompt_yn(f"Upgrade {name} (brew)?", f"brew upgrade {name}"):
                     continue
                 attempt([brew_bin, "upgrade", name],
-                        "Upgraded %s." % name, "Homebrew: could not upgrade %s" % name)
+                        f"Upgraded {name}.", f"Homebrew: could not upgrade {name}")
             else:
                 is_gng = name == "gng" or name.endswith("/gng")
                 if is_gng:
                     help_text = "brew trust --formula gdubw/gng/gng\nbrew install " + name
                 else:
                     help_text = "brew install " + name
-                if not gar_prompt_yn("Install %s (brew)?" % name, help_text):
+                if not gar_prompt_yn(f"Install {name} (brew)?", help_text):
                     continue
                 if is_gng and run_tty([brew_bin, "trust", "--formula", "gdubw/gng/gng"]) != 0:
                     report_warn("Homebrew: could not trust gdubw/gng/gng")
                     continue
                 attempt([brew_bin, "install", name],
-                        "Installed %s." % name, "Homebrew: could not install %s" % name)
+                        f"Installed {name}.", f"Homebrew: could not install {name}")
         elif m_cask:
             name = m_cask.group(1)
             if gar_brew_item_action(brew_bin, "cask", name, item) == "upgrade":
-                if not gar_prompt_yn("Upgrade %s (brew cask)?" % name, "brew upgrade --cask %s" % name):
+                if not gar_prompt_yn(f"Upgrade {name} (brew cask)?", f"brew upgrade --cask {name}"):
                     continue
                 attempt([brew_bin, "upgrade", "--cask", name],
-                        "Upgraded %s." % name, "Homebrew: could not upgrade cask %s" % name)
+                        f"Upgraded {name}.", f"Homebrew: could not upgrade cask {name}")
             else:
-                if not gar_prompt_yn("Install %s (brew cask)?" % name, "brew install --cask %s" % name):
+                if not gar_prompt_yn(f"Install {name} (brew cask)?", f"brew install --cask {name}"):
                     continue
                 attempt([brew_bin, "install", "--cask", name],
-                        "Installed %s." % name, "Homebrew: could not install cask %s" % name)
+                        f"Installed {name}.", f"Homebrew: could not install cask {name}")
 
 
 def check_mac_homebrew():
@@ -1012,7 +1013,7 @@ def check_mac_homebrew():
     if not brew_bin:
         report_miss("Homebrew (not installed)")
         return
-    report_ok("Homebrew (%s)" % brew_bin)
+    report_ok(f"Homebrew ({brew_bin})")
 
     text = gar_combined_capability_manifest("mac", "Brewfile")
     if not text:
@@ -1049,22 +1050,21 @@ def check_mac_homebrew():
             if elsewhere:
                 cmd, cmd_path = elsewhere
                 gar_section_emit_header()
-                out("%s is brew-required but exists in another location (%s), so assuming you don't want it brew-installed"
-                    % (gar_capitalize_first(cmd), gar_tilde_path(cmd_path)))
+                out(f"{gar_capitalize_first(cmd)} is brew-required but exists in another location ({gar_tilde_path(cmd_path)}), so assuming you don't want it brew-installed")
                 continue
         still_missing.append(item)
         hint = brew_miss_hint(item)
         if hint:
-            report_miss("Homebrew: %s (%s)" % (item, hint))
+            report_miss(f"Homebrew: {item} ({hint})")
         else:
-            report_miss("Homebrew: %s" % item)
+            report_miss(f"Homebrew: {item}")
 
     if still_missing:
         if gar_brew_blocked_by_spotlight():
             # Offering would just hang; list the fixes to run once it's back on.
             report_warn("Homebrew: not offering fixes — Spotlight is disabled on /, so brew install/upgrade hangs in its Xcode lookup (mdfind). Fix: sudo mdutil -i on /, then run:")
             for item in still_missing:
-                out("  %s" % gar_brew_item_command(brew_bin, item))
+                out(f"  {gar_brew_item_command(brew_bin, item)}")
         else:
             offer_brew_install_missing(brew_bin, still_missing)
 
@@ -1079,10 +1079,9 @@ def check_mac_brew_forbidden():
         return
     for name in gar_combined_lines("mac", "brew-forbidden"):
         if gar_brew_installed(brew_bin, "formula", name):
-            report_miss("Homebrew: %s is installed but conflicts with a role tool (uninstall: brew uninstall %s)"
-                        % (name, name))
+            report_miss(f"Homebrew: {name} is installed but conflicts with a role tool (uninstall: brew uninstall {name})")
         else:
-            report_ok("Homebrew: %s not installed (no conflict)" % name)
+            report_ok(f"Homebrew: {name} not installed (no conflict)")
 
 
 # --- Docker -----------------------------------------------------------------
@@ -1113,7 +1112,7 @@ def gar_print_docker_configured():
     out("\nConfigured:")
     docker_host = os.environ.get("DOCKER_HOST")
     if docker_host is not None and docker_host != "":
-        out("  DOCKER_HOST: %s (%s) — overrides docker context" % (docker_host, gar_docker_classify(docker_host)))
+        out(f"  DOCKER_HOST: {docker_host} ({gar_docker_classify(docker_host)}) — overrides docker context")
     else:
         out("  DOCKER_HOST: (unset)")
 
@@ -1133,13 +1132,13 @@ def gar_print_docker_configured():
         if ctx:
             ctx_engine = gar_docker_classify(endpoint or ctx)
             if endpoint:
-                out("  active context: %s → %s (%s)" % (ctx, endpoint, ctx_engine))
+                out(f"  active context: {ctx} → {endpoint} ({ctx_engine})")
             else:
-                out("  active context: %s (%s)" % (ctx, ctx_engine))
+                out(f"  active context: {ctx} ({ctx_engine})")
         else:
             out("  active context: (could not read)")
         if saved_ctx and saved_ctx != ctx:
-            out("  saved context: %s (in ~/.docker/config.json)" % saved_ctx)
+            out(f"  saved context: {saved_ctx} (in ~/.docker/config.json)")
         out("  contexts:")
         _, ls = run([docker_bin, "context", "ls", "--format", "{{.Name}}|{{.Current}}|{{.DockerEndpoint}}"])
         for line in ls.split("\n"):
@@ -1148,25 +1147,21 @@ def gar_print_docker_configured():
                 continue
             ctx_engine = gar_docker_classify(ep or name)
             mark = "    * " if current == "true" else "      "
-            out("%s%s → %s (%s)" % (mark, name, ep or "?", ctx_engine))
+            out(f"{mark}{name} → {ep or '?'} ({ctx_engine})")
     else:
         out("  docker: not on PATH (cannot read context)")
         if saved_ctx:
-            out("  saved context: %s (%s)" % (saved_ctx, gar_docker_classify(saved_ctx)))
+            out(f"  saved context: {saved_ctx} ({gar_docker_classify(saved_ctx)})")
 
     installed = []
     if os.path.exists("/Applications/Docker.app"):
         installed.append("Docker Desktop")
     if os.path.exists("/Applications/Rancher Desktop.app"):
         installed.append("Rancher Desktop")
-    out("  engines installed: %s" % (", ".join(installed) or "(none)"))
+    out(f"  engines installed: {', '.join(installed) or '(none)'}")
 
 
 # --- info -------------------------------------------------------------------
-
-def _plural_reason(n, one, many):
-    return one if n == 1 else many % n
-
 
 # Render `gar info <repo>` for a machine-env repo entry (name, path, branch).
 # Reports status; when not OK, says why. Local (tracked, non-skip-worktree) mods
@@ -1181,18 +1176,18 @@ def cmd_info_repo(entry):
     catchup = configured is not None
     configured = configured or ""
 
-    out("%s (machine-env repo)" % name)
-    out("Path: %s" % path)
-    out("Tracks: %s" % config_branch)
+    out(f"{name} (machine-env repo)")
+    out(f"Path: {path}")
+    out(f"Tracks: {config_branch}")
 
     if not os.path.isdir(path):
         if catchup:
-            out("Catch-up: yes (rebase onto %s)" % (configured or "origin default"))
-        out("Status: MISSING (no checkout at %s)" % path)
+            out(f"Catch-up: yes (rebase onto {configured or 'origin default'})")
+        out(f"Status: MISSING (no checkout at {path})")
         sys.exit(0)
     if not os.path.isdir(os.path.join(path, ".git")):
         if catchup:
-            out("Catch-up: yes (rebase onto %s)" % (configured or "origin default"))
+            out(f"Catch-up: yes (rebase onto {configured or 'origin default'})")
         out("Status: NOT A GIT REPO")
         sys.exit(0)
 
@@ -1201,7 +1196,7 @@ def cmd_info_repo(entry):
     if catchup:
         mainline = gar_repo_catchup_mainline_ref(path, configured) or ""
         if mainline:
-            out("Catch-up: yes (rebase onto %s)" % mainline)
+            out(f"Catch-up: yes (rebase onto {mainline})")
         else:
             out("Catch-up: yes (rebase mainline could not be resolved — no origin default)")
 
@@ -1209,8 +1204,7 @@ def cmd_info_repo(entry):
     reasons = []
     mod_count = gar_repo_local_mod_count(path)
     if mod_count > 0:
-        reasons.append(_plural_reason(mod_count, "1 file with uncommitted local changes",
-                                      "%d files with uncommitted local changes"))
+        reasons.append(f"{gar_plural(mod_count, 'file')} with uncommitted local changes")
     # For catch-up repos, sitting on a feature branch is expected — don't flag
     # the branch mismatch, and report behind/action against the mainline ref.
     if catchup:
@@ -1219,37 +1213,31 @@ def cmd_info_repo(entry):
         else:
             ahead = gar_repo_unpushed_count(path, config_branch)
             if ahead:
-                reasons.append(_plural_reason(ahead, "1 unpushed commit on %s" % config_branch,
-                                              "%%d unpushed commits on %s" % config_branch))
+                reasons.append(f"{gar_plural(ahead, 'unpushed commit')} on {config_branch}")
             if gar_repo_catchup_fetch(path, mainline):
                 behind = gar_repo_catchup_behind_count(path, mainline)
                 if behind:
-                    reasons.append(_plural_reason(
-                        behind, "1 commit behind %s (rebase would catch up)" % mainline,
-                        "%%d commits behind %s (rebase would catch up)" % mainline))
+                    reasons.append(f"{gar_plural(behind, 'commit')} behind {mainline} (rebase would catch up)")
     else:
         if current_branch and current_branch != config_branch:
-            reasons.append("on branch %s, not tracked branch %s" % (current_branch, config_branch))
+            reasons.append(f"on branch {current_branch}, not tracked branch {config_branch}")
         ahead = gar_repo_unpushed_count(path, config_branch)
         if ahead:
-            reasons.append(_plural_reason(ahead, "1 unpushed commit on %s" % config_branch,
-                                          "%%d unpushed commits on %s" % config_branch))
+            reasons.append(f"{gar_plural(ahead, 'unpushed commit')} on {config_branch}")
         if gar_repo_try_fetch(path, config_branch):
             behind = gar_repo_behind_count(path, config_branch)
             if behind:
-                reasons.append(_plural_reason(
-                    behind, "1 commit behind origin/%s (pull would update)" % config_branch,
-                    "%%d commits behind origin/%s (pull would update)" % config_branch))
+                reasons.append(f"{gar_plural(behind, 'commit')} behind origin/{config_branch} (pull would update)")
         remote_default = gar_repo_remote_default_branch(path) or ""
         if remote_default and remote_default != config_branch:
-            reasons.append("configured to track %s but origin default is %s" % (config_branch, remote_default))
+            reasons.append(f"configured to track {config_branch} but origin default is {remote_default}")
 
     if not reasons:
         out("Status: OK")
     else:
         out("Status: not OK")
         for r in reasons:
-            out("  - %s" % r)
+            out(f"  - {r}")
 
     # Expected (skip-worktree'd) mods: list each differing file, indented and
     # shell-quoted.
@@ -1258,9 +1246,9 @@ def cmd_info_repo(entry):
         if len(expected) == 1:
             out("Expected local mods (skip-worktree), 1 file:")
         else:
-            out("Expected local mods (skip-worktree), %d files:" % len(expected))
+            out(f"Expected local mods (skip-worktree), {len(expected)} files:")
         for f in expected:
-            out("  %s" % shell_q(f))
+            out(f"  {shell_q(f)}")
     sys.exit(0)
 
 
@@ -1294,11 +1282,11 @@ def cmd_info(query):
     app_entry = lookup_app_entry(query)
     if app_entry:
         canonical, path = app_entry
-        out("%s (app)" % canonical)
-        out("Expected path: %s" % gar_app_format_paths(path))
+        out(f"{canonical} (app)")
+        out(f"Expected path: {gar_app_format_paths(path)}")
         app_found = gar_app_first_existing_path(path)
         if app_found:
-            out("Status: installed (%s)" % app_found)
+            out(f"Status: installed ({app_found})")
         else:
             out("Status: not installed")
         hint = lookup_install_hint(query)
@@ -1320,11 +1308,11 @@ def cmd_info(query):
     ext_entry = lookup_browser_extension_entry(query)
     if ext_entry:
         browser, ext_id, label = ext_entry
-        out("%s (%s extension)" % (label, browser))
-        out("Extension ID: %s" % ext_id)
+        out(f"{label} ({browser} extension)")
+        out(f"Extension ID: {ext_id}")
         app_path = mac_browser_app_path(browser)
         if not app_path or not os.path.exists(app_path):
-            out("Status: browser not installed" + (" (%s)" % app_path if app_path else ""))
+            out("Status: browser not installed" + (f" ({app_path})" if app_path else ""))
         elif mac_browser_extension_installed(browser, ext_id):
             out("Status: installed")
         else:
@@ -1345,7 +1333,7 @@ def cmd_info(query):
         # many tracked CLIs (gh, awscli, …) install via "brew install <name>".
         kn = gar_brew_parse_hint(hint)
         if kn:
-            out("%s (brew %s)" % (query, kn[0]))
+            out(f"{query} (brew {kn[0]})")
             gar_print_brew_status(kn[0], kn[1])
         else:
             out(query)
@@ -1359,9 +1347,9 @@ def cmd_info(query):
     if hint is not None:
         # hint is "brew install <name>" or "brew install --cask <name>".
         kind, name = gar_brew_parse_hint(hint)
-        out("%s (brew %s)" % (query, kind))
+        out(f"{query} (brew {kind})")
         gar_print_brew_status(kind, name)
-        out("Install: %s" % hint)
+        out(f"Install: {hint}")
         info = lookup_general_info(query)
         if info is not None:
             gar_print_general_info(info)
@@ -1373,7 +1361,7 @@ def cmd_info(query):
         gar_print_general_info(info)
         sys.exit(0)
 
-    err("No gar entry for: %s" % query)
+    err(f"No gar entry for: {query}")
     sys.exit(1)
 
 
@@ -1404,7 +1392,7 @@ def gar_roles_add(role):
     if os.path.isfile(f):
         for line in read_text(f).split("\n"):
             if _roles_file_line_role(line) == role:
-                out("Role %s is already enabled (%s)." % (role, gar_tilde_path(f)))
+                out(f"Role {role} is already enabled ({gar_tilde_path(f)}).")
                 return True
     try:
         os.makedirs(os.path.dirname(f), exist_ok=True)
@@ -1414,7 +1402,7 @@ def gar_roles_add(role):
             fh.write(sep + role + "\n")
     except OSError:
         return False
-    out("Enabled role %s (%s)." % (role, gar_tilde_path(f)))
+    out(f"Enabled role {role} ({gar_tilde_path(f)}).")
     return True
 
 
@@ -1423,7 +1411,7 @@ def gar_roles_add(role):
 def gar_roles_remove(role):
     f = gar_roles_file()
     if not os.path.isfile(f):
-        out("Role %s is not enabled (no roles file)." % role)
+        out(f"Role {role} is not enabled (no roles file).")
         return True
     text = read_text(f)
     lines = text.split("\n")
@@ -1431,9 +1419,9 @@ def gar_roles_remove(role):
         lines.pop()
     kept = [l for l in lines if _roles_file_line_role(l) != role]
     if len(kept) == len(lines):
-        out("Role %s is not enabled (%s)." % (role, gar_tilde_path(f)))
+        out(f"Role {role} is not enabled ({gar_tilde_path(f)}).")
         return True
-    tmp = "%s.gar.%d" % (f, os.getpid())
+    tmp = f"{f}.gar.{os.getpid()}"
     try:
         with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as fh:
             fh.write("".join(l + "\n" for l in kept))
@@ -1444,12 +1432,12 @@ def gar_roles_remove(role):
         except OSError:
             pass
         return False
-    out("Disabled role %s (%s)." % (role, gar_tilde_path(f)))
+    out(f"Disabled role {role} ({gar_tilde_path(f)}).")
     return True
 
 
 def gar_role_is_known(role):
-    prefix = "role.%s." % role
+    prefix = f"role.{role}."
     for d in gar_manifest_dirs():
         for name in _sorted_listdir(d):
             if name.startswith(prefix) and os.path.isfile(os.path.join(d, name)):
@@ -1479,7 +1467,7 @@ def gar_role_is_active(role):
 
 # Capability suffixes for role.<role>.* under all manifest roots (unique, sorted).
 def gar_role_capabilities(role):
-    prefix = "role.%s." % role
+    prefix = f"role.{role}."
     caps = set()
     for d in gar_manifest_dirs():
         for name in _sorted_listdir(d):
@@ -1516,23 +1504,23 @@ def gar_role_capability_label(cap):
 def gar_print_role_capability_items(capability, lines):
     for line in lines:
         if capability in ("apps", "machine-env-repos"):
-            out("    %s" % line.split("|", 1)[0])
+            out(f"    {line.split('|', 1)[0]}")
         elif capability == "Brewfile":
             m = BREW_LINE_RE.match(line)
             if not m:
-                out("    %s" % line)
+                out(f"    {line}")
             elif m.group(1) == "brew":
-                out("    %s" % m.group(2))
+                out(f"    {m.group(2)}")
             else:
-                out("    %s %s" % (m.group(1), m.group(2)))
+                out(f"    {m.group(1)} {m.group(2)}")
         elif capability == "login-items":
             label, names = split_entry(line)
             if "|" in names:
-                out("    %s (exactly one of: %s)" % (label, gar_app_format_paths(names)))
+                out(f"    {label} (exactly one of: {gar_app_format_paths(names)})")
             else:
-                out("    %s" % label)
+                out(f"    {label}")
         else:
-            out("    %s" % line)
+            out(f"    {line}")
 
 
 def gar_print_role_details(role):
@@ -1540,7 +1528,7 @@ def gar_print_role_details(role):
         lines = parse_manifest(gar_collect_role_manifest_for_role(role, cap))
         if not lines:
             continue
-        out("  %s" % gar_role_capability_label(cap))
+        out(f"  {gar_role_capability_label(cap)}")
         gar_print_role_capability_items(cap, lines)
 
 
@@ -1556,7 +1544,7 @@ def cmd_roles(args):
             action = a[2:]
             target = args[1] if len(args) > 1 else ""
             if not target:
-                err("roles %s requires a role id" % a)
+                err(f"roles {a} requires a role id")
                 usage(sys.stderr)
                 sys.exit(2)
             args = args[2:]
@@ -1564,13 +1552,13 @@ def cmd_roles(args):
             usage()
             sys.exit(0)
         else:
-            err("Unknown option for roles: %s" % a)
+            err(f"Unknown option for roles: {a}")
             usage(sys.stderr)
             sys.exit(2)
 
     if action:
         if not gar_role_is_known(target):
-            err("Unknown role: %s\n\nKnown roles:" % target)
+            err(f"Unknown role: {target}\n\nKnown roles:")
             for r in gar_known_roles():
                 err("  " + r)
             sys.exit(2)
@@ -1579,7 +1567,7 @@ def cmd_roles(args):
             err("Failed to update roles file")
             sys.exit(1)
         detect_roles()
-        out("Active roles: %s" % gar_format_roles())
+        out(f"Active roles: {gar_format_roles()}")
         sys.exit(0)
 
     detect_roles()
@@ -1590,7 +1578,7 @@ def cmd_roles(args):
         if show_all and not first:
             out()
         first = False
-        out(("✓ %s" if gar_role_is_active(role) else "  %s") % role)
+        out(f"{'✓' if gar_role_is_active(role) else ' '} {role}")
         if show_all:
             gar_print_role_details(role)
 
@@ -1610,7 +1598,7 @@ def gar_format_roles():
 def gar_warn_unknown_roles():
     for role in gar_active_roles:
         if not gar_role_is_known(role):
-            out("WARN Unknown role: %s (no role.%s.* in gar.d/ or ~/.config/gar/d/)" % (role, role))
+            out(f"WARN Unknown role: {role} (no role.{role}.* in gar.d/ or ~/.config/gar/d/)")
 
 
 # --- Reporting --------------------------------------------------------------
@@ -1632,20 +1620,20 @@ def gar_section_emit_header():
 def report_ok(msg):
     if gar_show_all:
         gar_section_emit_header()
-        out("OK   %s" % msg)
+        out(f"OK   {msg}")
 
 
 def report_miss(msg):
     global issues
     gar_section_emit_header()
-    out("MISS %s" % msg)
+    out(f"MISS {msg}")
     issues += 1
 
 
 def report_warn(msg):
     global warnings
     gar_section_emit_header()
-    out("WARN %s" % msg)
+    out(f"WARN {msg}")
     warnings += 1
 
 
@@ -1660,7 +1648,7 @@ def gar_note_fixed(kind):
 
 # "N thing" / "N things"
 def gar_plural(n, word):
-    return "%d %s" % (n, word) if n == 1 else "%d %ss" % (n, word)
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
 # Emit a single line with the status prefix padded to a common column width, so
@@ -1675,7 +1663,7 @@ GAR_STATUS_WIDTH = 13  # width of the longest prefix, "EXPECTED MODS"
 def report_line(status, msg):
     global warnings
     gar_section_emit_header()
-    out("%-*s  %s" % (GAR_STATUS_WIDTH, status, msg))
+    out(f"{status:<{GAR_STATUS_WIDTH}}  {msg}")
     if status == "WARN":
         warnings += 1
 
@@ -1790,7 +1778,7 @@ def gar_repo_catchup_mainline_ref(repo, configured):
     if configured:
         return configured
     default = gar_repo_remote_default_branch(repo)
-    return "origin/%s" % default if default else None
+    return f"origin/{default}" if default else None
 
 
 def _rev_count(repo, rng):
@@ -1863,11 +1851,11 @@ def gar_prompt_yn(prompt, help_text="", default="Y"):
 
     default = "N" if default.lower() in ("n", "no") else "Y"
     opts = "y/N" if default == "N" else "Y/n"
-    suffix = "[%s/?-Print install command]" % opts if help_text else "[%s]" % opts
+    suffix = f"[{opts}/?-Print install command]" if help_text else f"[{opts}]"
 
     try:
         while True:
-            sys.stderr.write("%s %s " % (prompt, suffix))
+            sys.stderr.write(f"{prompt} {suffix} ")
             sys.stderr.flush()
             reply = stream.readline()
             if not reply:
@@ -1891,7 +1879,7 @@ def gar_repo_unpushed_count(repo, branch="main"):
         return 0
     if not _verify(repo, branch) or not _verify(repo, "origin/" + branch):
         return 0
-    return _rev_count(repo, "origin/%s..%s" % (branch, branch))
+    return _rev_count(repo, f"origin/{branch}..{branch}")
 
 
 def gar_repo_behind_count(repo, branch="main"):
@@ -1899,7 +1887,7 @@ def gar_repo_behind_count(repo, branch="main"):
         return 0
     if not _verify(repo, branch) or not _verify(repo, "origin/" + branch):
         return 0
-    return _rev_count(repo, "%s..origin/%s" % (branch, branch))
+    return _rev_count(repo, f"{branch}..origin/{branch}")
 
 
 def gar_repo_try_fetch(repo, branch="main"):
@@ -2024,7 +2012,7 @@ def gar_machine_env_prefetch_all(repos, catchup_manifest=""):
         return {}
     with ThreadPoolExecutor(max_workers=len(repos)) as pool:
         futures = {
-            path: pool.submit(gar_timed, "repo prefetch: %s" % name,
+            path: pool.submit(gar_timed, f"repo prefetch: {name}",
                               gar_machine_env_prefetch_repo, name, path, branch, catchup_manifest)
             for name, path, branch in repos
         }
@@ -2067,7 +2055,7 @@ def gar_mer_flush():
                    key=lambda i: (GAR_MER_RANK.get(gar_mer_rows[i][0], 9), gar_mer_rows[i][1].lower(), i))
     for i in order:
         status, name, path, msg = gar_mer_rows[i]
-        line = ("%-*s  %-*s  %s" % (wname, name, wpath, "(%s)" % path, msg)).rstrip()
+        line = f"{name:<{wname}}  {'(' + path + ')':<{wpath}}  {msg}".rstrip()
         if status == "OK":
             report_ok_preformatted(line)
         else:
@@ -2100,8 +2088,7 @@ def report_machine_env_repo(name, path, r):
         reported = True
     ahead = r["ahead"]
     if ahead > 0:
-        gar_mer_row("WARN", name, path, _plural_reason(
-            ahead, "1 unpushed commit on %s" % config_branch, "%%d unpushed commits on %s" % config_branch))
+        gar_mer_row("WARN", name, path, f"{gar_plural(ahead, 'unpushed commit')} on {config_branch}")
         reported = True
     behind = r["behind"]
     if r["catchup"]:
@@ -2113,12 +2100,12 @@ def report_machine_env_repo(name, path, r):
                         "catch-up repo but rebase mainline could not be resolved (no origin default)")
             reported = True
         elif r["fetched"] and behind > 0:
-            gar_mer_row("WARN", name, path, "catch-up: rebase %s onto %s; %s" % (
-                branch or "HEAD", mainline, _plural_reason(behind, "1 commit behind", "%d commits behind")))
+            gar_mer_row("WARN", name, path,
+                        f"catch-up: rebase {branch or 'HEAD'} onto {mainline}; {gar_plural(behind, 'commit')} behind")
             reported = True
     elif r["fetched"] and behind > 0:
-        gar_mer_row("WARN", name, path, "pull would update %s; %s origin/%s" % (
-            config_branch, _plural_reason(behind, "1 commit behind", "%d commits behind"), config_branch))
+        gar_mer_row("WARN", name, path, f"pull would update {config_branch}; "
+                                        f"{gar_plural(behind, 'commit')} behind origin/{config_branch}")
         reported = True
     # Advisory only (does not count as an issue): the configured branch isn't the
     # repo's remote default. Skipped when the remote default is unknown, and for
@@ -2126,7 +2113,7 @@ def report_machine_env_repo(name, path, r):
     # mainline ref).
     if not r["catchup"] and remote_default and remote_default != config_branch:
         gar_mer_row("WARN", name, path,
-                    "configured to track %s but origin default is %s" % (config_branch, remote_default))
+                    f"configured to track {config_branch} but origin default is {remote_default}")
         reported = True
     if not reported:
         gar_mer_row("OK", name, path, "")
@@ -2156,19 +2143,19 @@ def offer_machine_env_repo_pull(name, path, r):
             return
         behind = r["behind"]
         if not r["fetched"]:
-            if not gar_timed("repo fetch (retry): %s" % name, gar_repo_catchup_fetch, path, mainline):
+            if not gar_timed(f"repo fetch (retry): {name}", gar_repo_catchup_fetch, path, mainline):
                 return
             behind = gar_repo_catchup_behind_count(path, mainline)
         if behind <= 0:
             return
-        prompt = "Catch up %s (%s; rebase %s onto %s, %s)?" % (
-            name, path, branch or "HEAD", mainline, _plural_reason(behind, "1 commit behind", "%d commits behind"))
+        prompt = (f"Catch up {name} ({path}; rebase {branch or 'HEAD'} onto {mainline}, "
+                  f"{gar_plural(behind, 'commit')} behind)?")
         if gar_prompt_yn(prompt):
-            if gar_timed("repo rebase: %s" % name, gar_repo_rebase_onto_mainline, path, mainline):
-                out("Updated %s (%s)" % (name, path))
+            if gar_timed(f"repo rebase: {name}", gar_repo_rebase_onto_mainline, path, mainline):
+                out(f"Updated {name} ({path})")
                 gar_note_fixed("warning")
             else:
-                report_warn("Machine env repo %s (%s — rebase failed)" % (name, path))
+                report_warn(f"Machine env repo {name} ({path} — rebase failed)")
         return
 
     # Only offer a pull when the repo is currently checked out on the branch we
@@ -2178,25 +2165,24 @@ def offer_machine_env_repo_pull(name, path, r):
 
     behind = r["behind"]
     if not r["fetched"]:
-        if not gar_timed("repo fetch (retry): %s" % name, gar_repo_try_fetch, path, config_branch):
+        if not gar_timed(f"repo fetch (retry): {name}", gar_repo_try_fetch, path, config_branch):
             return
         behind = gar_repo_behind_count(path, config_branch)
     if behind <= 0:
         return
 
     ahead = r["ahead"]
-    prompt = "Pull %s (%s; %s origin/%s" % (
-        name, path, _plural_reason(behind, "1 commit behind", "%d commits behind"), config_branch)
+    prompt = f"Pull {name} ({path}; {gar_plural(behind, 'commit')} behind origin/{config_branch}"
     if ahead > 0:
-        prompt += ", " + _plural_reason(ahead, "1 unpushed commit", "%d unpushed commits")
+        prompt += f", {gar_plural(ahead, 'unpushed commit')}"
     prompt += ")?"
 
     if gar_prompt_yn(prompt):
-        if gar_timed("repo pull: %s" % name, gar_repo_pull, path, config_branch):
-            out("Updated %s (%s)" % (name, path))
+        if gar_timed(f"repo pull: {name}", gar_repo_pull, path, config_branch):
+            out(f"Updated {name} ({path})")
             gar_note_fixed("warning")
         else:
-            report_warn("Machine env repo %s (%s — pull failed)" % (name, path))
+            report_warn(f"Machine env repo {name} ({path} — pull failed)")
 
 
 def check_machine_env_repos(repos_lines, skip_manifest="", catchup_manifest=""):
@@ -2224,13 +2210,13 @@ def check_git_config(config_manifest, hints_file):
     for key in read_manifest(config_manifest):
         _, val = run(["git", "config", "--global", "--get", key])
         if val:
-            report_ok("Git config %s (%s)" % (key, val))
+            report_ok(f"Git config {key} ({val})")
         else:
             hint = lookup_install_hint(key, hints_file)
             if hint:
-                report_miss("Git config %s (%s)" % (key, hint))
+                report_miss(f"Git config {key} ({hint})")
             else:
-                report_miss("Git config %s (not set; run: git config --global %s VALUE)" % (key, key))
+                report_miss(f"Git config {key} (not set; run: git config --global {key} VALUE)")
 
 
 # --- Mac settings -----------------------------------------------------------
@@ -2401,7 +2387,7 @@ def mac_iterm_create_profile(source_name, new_name):
         out_path.parent.mkdir(parents=True, exist_ok=True)
         text = json.dumps(existing, indent=2, sort_keys=True) + "\n"
     except TypeError as exc:
-        err("could not serialize profile: %s" % exc)
+        err(f"could not serialize profile: {exc}")
         return False
     except OSError:
         return False
@@ -2453,9 +2439,9 @@ def mac_name_looks_system_assigned(name):
         return False
     name = mac_name_strip_local_suffix(name)
     models = "MacBook-Air|MacBook-Pro|Mac-mini|Mac-Studio|Mac-Pro|iMac|MacBook"
-    if re.match(r"^[A-Za-z0-9][A-Za-z0-9-]*s-(%s)$" % models, name):
+    if re.match(rf"^[A-Za-z0-9][A-Za-z0-9-]*s-({models})$", name):
         return True
-    if re.match(r"^(%s)$" % models, name):
+    if re.match(rf"^({models})$", name):
         return True
     name = name.replace("\u2019", "'")
     for model in ("'s MacBook Air", "'s MacBook Pro", "'s Mac mini", "'s Mac Studio",
@@ -2572,7 +2558,7 @@ def mac_write_json_setting(path, key, raw):
 
         if text.strip() == "" or re.fullmatch(r"\s*\{\s*\}\s*", text):
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text("{\n    %s: %s\n}\n" % (json.dumps(key), literal))
+            p.write_text(f"{{\n    {json.dumps(key)}: {literal}\n}}\n")
             return True
 
         # Replace the existing value in place, preserving comments/formatting.
@@ -2589,7 +2575,7 @@ def mac_write_json_setting(path, key, raw):
         idx = text.find("{")
         if idx == -1:
             return False
-        p.write_text("%s\n    %s: %s,%s" % (text[:idx + 1], json.dumps(key), literal, text[idx + 1:]))
+        p.write_text(f"{text[:idx + 1]}\n    {json.dumps(key)}: {literal},{text[idx + 1:]}")
         return True
     except OSError:
         return False
@@ -2734,7 +2720,7 @@ def mac_chrome_read_pref(location, key):
             value, _ = _chrome_current_value(root, name, parts)
             info = cache.get(name) or {}
             label = info.get("name") or info.get("user_name")
-            label = "%s (%s)" % (name, label) if isinstance(label, str) and label and label != name else name
+            label = f"{name} ({label})" if isinstance(label, str) and label and label != name else name
             if value is None:
                 text = ""
             elif isinstance(value, bool):
@@ -2835,19 +2821,18 @@ def offer_fix_iterm_profiles(missing_csv, label):
     source = "Default"
     missing = [m for m in re.split(r"[, ]+", missing_csv) if m]
     if source not in mac_iterm_profile_names():
-        report_warn("Setting %s (no %s profile to clone from)" % (label, source))
+        report_warn(f"Setting {label} (no {source} profile to clone from)")
         return
     for name in missing:
         if not name or name == source:
             continue
-        if not gar_prompt_yn('Fix %s: create iTerm profile "%s" (clone of %s)?' % (label, name, source)):
+        if not gar_prompt_yn(f'Fix {label}: create iTerm profile "{name}" (clone of {source})?'):
             continue
         if mac_iterm_create_profile(source, name):
-            out('Created iTerm profile "%s" (clone of %s; iTerm reloads Dynamic Profiles automatically).'
-                % (name, source))
+            out(f'Created iTerm profile "{name}" (clone of {source}; iTerm reloads Dynamic Profiles automatically).')
             gar_note_fixed("warning")
         else:
-            report_warn('Setting %s (could not create profile "%s")' % (label, name))
+            report_warn(f'Setting {label} (could not create profile "{name}")')
 
 
 def offer_fix_mac_setting(kind, location, key, expected, label):
@@ -2855,59 +2840,59 @@ def offer_fix_mac_setting(kind, location, key, expected, label):
         return
 
     if kind == "defaults":
-        if not gar_prompt_yn("Fix %s: set %s to %s?" % (label, key, expected)):
+        if not gar_prompt_yn(f"Fix {label}: set {key} to {expected}?"):
             return
         if gar_defaults_write(location, key, expected):
             if key == "com.apple.keyboard.fnState":
                 gar_mark_pending_restart(key)
-                out("Set %s to %s (requires a full RESTART — not just logout — to take effect in System Settings and actual key behavior)." % (key, expected))
+                out(f"Set {key} to {expected} (requires a full RESTART — not just logout — to take effect in System Settings and actual key behavior).")
             else:
-                out("Set %s to %s (may take effect after logout)." % (key, expected))
+                out(f"Set {key} to {expected} (may take effect after logout).")
             gar_note_fixed("warning")
         else:
-            report_warn("Setting %s (could not write %s)" % (label, key))
+            report_warn(f"Setting {label} (could not write {key})")
     elif kind == "json-editor":
         settings_path = mac_editor_settings_path(location)
         if not settings_path:
             return
-        if not gar_prompt_yn("Fix %s: set %s to %s in %s?" % (label, key, expected, settings_path)):
+        if not gar_prompt_yn(f"Fix {label}: set {key} to {expected} in {settings_path}?"):
             return
         if mac_write_json_setting(settings_path, key, expected):
-            out("Set %s to %s in %s." % (key, expected, settings_path))
+            out(f"Set {key} to {expected} in {settings_path}.")
             gar_note_fixed("warning")
         else:
-            report_warn("Setting %s (could not update %s)" % (label, settings_path))
+            report_warn(f"Setting {label} (could not update {settings_path})")
     elif kind == "chrome-json":
         if mac_chrome_is_running():
             out("Quit Google Chrome before applying this fix (prefs are overwritten while it runs).")
-            if not gar_prompt_yn("Chrome still running — fix %s anyway (set %s to %s)?" % (label, key, expected),
+            if not gar_prompt_yn(f"Chrome still running — fix {label} anyway (set {key} to {expected})?",
                                  "", "N"):
                 return
-        elif not gar_prompt_yn("Fix %s: set %s to %s in Chrome profile prefs?" % (label, key, expected)):
+        elif not gar_prompt_yn(f"Fix {label}: set {key} to {expected} in Chrome profile prefs?"):
             return
         if mac_chrome_write_pref(location, key, expected):
-            out("Set Chrome %s to %s (restart Chrome if it was running)." % (key, expected))
+            out(f"Set Chrome {key} to {expected} (restart Chrome if it was running).")
             gar_note_fixed("warning")
         else:
-            report_warn("Setting %s (could not update Chrome preferences)" % label)
+            report_warn(f"Setting {label} (could not update Chrome preferences)")
     elif kind == "iterm-profiles":
         offer_fix_iterm_profiles(expected, label)
     elif kind == "sound-menu-bar-always":
-        if not gar_prompt_yn("Fix %s: always show volume in the menu bar?" % label):
+        if not gar_prompt_yn(f"Fix {label}: always show volume in the menu bar?"):
             return
         if mac_fix_sound_menu_bar():
             out("Enabled always-on volume in the menu bar.")
             gar_note_fixed("warning")
         else:
-            report_warn("Setting %s (could not update Control Center)" % label)
+            report_warn(f"Setting {label} (could not update Control Center)")
     elif kind == "next-window-switch-key":
-        if not gar_prompt_yn('Fix %s: map "Move focus to next window" to Command-<?' % label):
+        if not gar_prompt_yn(f'Fix {label}: map "Move focus to next window" to Command-<?'):
             return
         if mac_fix_next_window_angle():
             out("Mapped Move focus to next window to Command-< (log out/in if it does not take effect right away).")
             gar_note_fixed("warning")
         else:
-            report_warn("Setting %s (could not update symbolic hotkey)" % label)
+            report_warn(f"Setting {label} (could not update symbolic hotkey)")
 
 
 # Path to qBittorrent's INI config (its actual settings store on this machine —
@@ -2947,39 +2932,39 @@ def check_mac_settings():
             if not mac_karabiner_installed() or not mac_czech_qwerty_enabled():
                 continue
             if mac_next_window_is_switch_key_binding():
-                report_ok("Setting %s" % label)
+                report_ok(f"Setting {label}")
             else:
-                report_warn("Setting %s (map to Command-<; toggle-switch-key toggles with Command-`)" % label)
+                report_warn(f"Setting {label} (map to Command-<; toggle-switch-key toggles with Command-`)")
                 offer()
             continue
         if kind == "sound-menu-bar-always":
             if mac_controlcenter_sound_always():
-                report_ok("Setting %s" % label)
+                report_ok(f"Setting {label}")
             else:
-                report_warn("Setting %s (enable in System Settings → Control Center → Sound → Show in Menu Bar → Always)" % label)
+                report_warn(f"Setting {label} (enable in System Settings → Control Center → Sound → Show in Menu Bar → Always)")
                 offer()
             continue
         if kind == "machine-name-not-default":
             actual = mac_machine_name_primary()
             if mac_machine_name_is_system_assigned():
                 if actual:
-                    report_warn("Setting %s (is %s; rename in System Settings → General → About → Name)" % (label, actual))
+                    report_warn(f"Setting {label} (is {actual}; rename in System Settings → General → About → Name)")
                 else:
-                    report_warn("Setting %s (rename in System Settings → General → About → Name)" % label)
+                    report_warn(f"Setting {label} (rename in System Settings → General → About → Name)")
             else:
-                report_ok("Setting %s%s" % (label, " (%s)" % actual if actual else ""))
+                report_ok(f"Setting {label} ({actual})" if actual else f"Setting {label}")
             continue
         if kind == "qbittorrent-vpn-interface":
             if not gar_app_first_existing_path("/Applications/qbittorrent.app"):
                 continue
             actual = mac_qbittorrent_interface()
             if actual is None:
-                report_warn("Setting %s (not set; open qBittorrent → Settings → Advanced → Network Interface and pick a VPN interface, utun*)" % label)
+                report_warn(f"Setting {label} (not set; open qBittorrent → Settings → Advanced → Network Interface and pick a VPN interface, utun*)")
                 continue
             if re.fullmatch(r"utun[0-9]+", actual):
-                report_ok("Setting %s (%s)" % (label, actual))
+                report_ok(f"Setting {label} ({actual})")
             else:
-                report_warn("Setting %s (is %s; want a VPN interface, utun*)" % (label, actual or "all interfaces"))
+                report_warn(f"Setting {label} (is {actual or 'all interfaces'}; want a VPN interface, utun*)")
             continue
         if kind == "iterm-profiles":
             if not mac_iterm_installed():
@@ -2987,9 +2972,9 @@ def check_mac_settings():
             names = mac_iterm_profile_names()
             iterm_missing = ", ".join(w for w in ("Default", "Caution", "Midcaution") if w not in names)
             if not iterm_missing:
-                report_ok("Setting %s" % label)
+                report_ok(f"Setting {label}")
             else:
-                report_warn("Setting %s (missing: %s)" % (label, iterm_missing))
+                report_warn(f"Setting {label} (missing: {iterm_missing})")
                 offer(iterm_missing)
             continue
         if kind == "chrome-json":
@@ -2998,23 +2983,23 @@ def check_mac_settings():
                 continue
             rows = mac_chrome_read_pref(location, key)
             if not rows:
-                report_warn("Setting %s (no Chrome profiles found; want %s=%s)" % (label, key, expected))
+                report_warn(f"Setting {label} (no Chrome profiles found; want {key}={expected})")
                 offer()
                 continue
             bad = []
             detail = []
             for profile, value in rows:
                 if not value:
-                    bad.append("%s=not set" % profile)
+                    bad.append(f"{profile}=not set")
                 elif gar_setting_matches(value, expected, compare):
-                    detail.append("%s=%s" % (profile, value))
+                    detail.append(f"{profile}={value}")
                 else:
-                    bad.append("%s=%s" % (profile, value))
+                    bad.append(f"{profile}={value}")
             if bad:
-                report_warn("Setting %s (want %s; %s)" % (label, expected, ", ".join(bad)))
+                report_warn(f"Setting {label} (want {expected}; {', '.join(bad)})")
                 offer()
             else:
-                report_ok("Setting %s (%s)" % (label, ", ".join(detail)))
+                report_ok(f"Setting {label} ({', '.join(detail)})")
             continue
         if kind == "json-editor":
             app_path = mac_editor_app_path(location)
@@ -3022,36 +3007,36 @@ def check_mac_settings():
                 continue
             settings_path = mac_editor_settings_path(location)
             if not os.path.isfile(settings_path):
-                report_warn("Setting %s (not set; want %s)" % (label, expected))
+                report_warn(f"Setting {label} (not set; want {expected})")
                 offer()
                 continue
             status, actual = mac_read_json_setting(settings_path, key)
             if status != 0:
                 if status == 2:
-                    report_warn("Setting %s (not set; want %s)" % (label, expected))
+                    report_warn(f"Setting {label} (not set; want {expected})")
                     offer()
                 elif status == 3:
-                    report_warn("Setting %s (could not parse %s)" % (label, settings_path))
+                    report_warn(f"Setting {label} (could not parse {settings_path})")
                 else:
-                    report_warn("Setting %s (could not read %s)" % (label, settings_path))
+                    report_warn(f"Setting {label} (could not read {settings_path})")
                 continue
         elif kind == "defaults":
             actual = mac_read_defaults_setting(location, key)
             if actual is None:
-                report_warn("Setting %s (could not read %s %s)" % (label, location, key))
+                report_warn(f"Setting {label} (could not read {location} {key})")
                 offer()
                 continue
         else:
-            report_warn("Setting %s (unknown kind: %s)" % (label, kind))
+            report_warn(f"Setting {label} (unknown kind: {kind})")
             continue
 
         if gar_setting_matches(actual, expected, compare):
             if key == "com.apple.keyboard.fnState" and gar_pending_restart_active(key):
-                report_warn("Setting %s (%s; RESTART needed — not yet visible in System Settings or in actual key behavior)" % (label, actual))
+                report_warn(f"Setting {label} ({actual}; RESTART needed — not yet visible in System Settings or in actual key behavior)")
             else:
-                report_ok("Setting %s (%s)" % (label, actual))
+                report_ok(f"Setting {label} ({actual})")
         else:
-            report_warn("Setting %s (is %s; want %s)" % (label, actual, expected))
+            report_warn(f"Setting {label} (is {actual}; want {expected})")
             offer()
 
 
@@ -3071,17 +3056,17 @@ def _parallel_map(fn, items):
 def check_mac_secrets(secrets_lines):
     for key, ok in zip(secrets_lines, _parallel_map(mac_secret_exists, secrets_lines)):
         if ok:
-            report_ok("Secret %s" % key)
+            report_ok(f"Secret {key}")
         else:
-            report_miss("Secret %s (set with: set-secret %s VALUE)" % (key, key))
+            report_miss(f"Secret {key} (set with: set-secret {key} VALUE)")
 
 
 def check_env(env_lines):
     for name in env_lines:
         if os.environ.get(name):
-            report_ok("Env %s" % name)
+            report_ok(f"Env {name}")
         else:
-            report_miss("Env %s (not set in this shell)" % name)
+            report_miss(f"Env {name} (not set in this shell)")
 
 
 SDKMAN_INIT = os.path.join(HOME, ".sdkman", "bin", "sdkman-init.sh")
@@ -3115,7 +3100,8 @@ def check_mac_java():
         rc, current = sdk("current", "java")
         if rc == 0:
             has_java = True
-            report_ok("Java (%s)" % current.replace("\r", ""))
+            current = current.replace("\r", "")
+            report_ok(f"Java ({current})")
     else:
         report_miss("SDKMAN (install from https://sdkman.io, then: sdk install java)")
 
@@ -3123,7 +3109,8 @@ def check_mac_java():
     if rc == 0:
         has_java = True
         if not has_sdkman:
-            report_ok("Java (%s)" % version.split("\n", 1)[0])
+            first_line = version.split("\n", 1)[0]
+            report_ok(f"Java ({first_line})")
     elif not has_java:
         if has_sdkman:
             report_miss("Java (no SDKMAN candidate; run: sdk install java)")
@@ -3191,21 +3178,20 @@ def check_mac_sdkman_tools():
         if not candidate:
             continue
         label = candidate[:1].upper() + candidate[1:]
-        rng = " matching %s" % constraint if constraint else ""
+        rng = f" matching {constraint}" if constraint else ""
 
         if not sdkman_ready:
-            report_miss("%s (SDKMAN not installed; see https://sdkman.io, then: sdk install %s)" % (label, candidate))
+            report_miss(f"{label} (SDKMAN not installed; see https://sdkman.io, then: sdk install {candidate})")
             continue
 
         m = re.search(r"[0-9]+(\.[0-9]+)+", sdk("current", candidate)[1])
         current = m.group(0) if m else ""
         if not current:
-            report_miss("%s (no SDKMAN candidate; run: sdk install %s)" % (label, candidate))
+            report_miss(f"{label} (no SDKMAN candidate; run: sdk install {candidate})")
         elif gar_version_in_constraint(current, constraint):
-            report_ok("%s (%s, SDKMAN)" % (label, current))
+            report_ok(f"{label} ({current}, SDKMAN)")
         else:
-            report_miss("%s (%s out of range%s; run: sdk install %s && sdk default %s <version>)"
-                        % (label, current, rng, candidate, candidate))
+            report_miss(f"{label} ({current} out of range{rng}; run: sdk install {candidate} && sdk default {candidate} <version>)")
 
 
 # --- Commands, Perl, apps, login items, extensions --------------------------
@@ -3245,49 +3231,49 @@ def gar_warn_command_shadowed(cmd):
         if os.path.islink(path):
             label += " -> " + gar_tilde_path(os.path.realpath(path))
         labels.append(label)
-    report_warn("Command %s: %d copies on PATH (using %s; shadowed: %s)"
-                % (cmd, len(copies), labels[0], ", ".join(labels[1:])))
+    shadowed = ", ".join(labels[1:])
+    report_warn(f"Command {cmd}: {len(copies)} copies on PATH (using {labels[0]}; shadowed: {shadowed})")
 
 
 def check_commands(commands_lines, hints_file):
     for cmd in commands_lines:
         if which(cmd):
-            report_ok("Command %s" % cmd)
+            report_ok(f"Command {cmd}")
             gar_warn_command_shadowed(cmd)
         else:
             hint = lookup_install_hint(cmd, hints_file)
             if hint:
-                report_miss("Command %s (%s)" % (cmd, hint))
+                report_miss(f"Command {cmd} ({hint})")
             else:
-                report_miss("Command %s (not on PATH)" % cmd)
+                report_miss(f"Command {cmd} (not on PATH)")
 
 
 def check_mac_perl_modules():
     for module in read_manifest(os.path.join(GAR_DIR, "mac.perl-modules")):
         if run_ok(["perl", "-M" + module, "-e1"]):
-            report_ok("Perl module %s" % module)
+            report_ok(f"Perl module {module}")
             continue
         hint = lookup_install_hint(module)
         if hint:
             if gar_hint_is_multiline(hint):
-                report_miss("Perl module %s:" % module)
+                report_miss(f"Perl module {module}:")
                 out(printf_b(hint))
             else:
-                report_miss("Perl module %s (%s)" % (module, hint))
+                report_miss(f"Perl module {module} ({hint})")
         else:
-            report_miss("Perl module %s (not installed)" % module)
+            report_miss(f"Perl module {module} (not installed)")
 
 
 def check_mac_apps(apps_lines):
     for entry in apps_lines:
         name, path = split_entry(entry)
         if name == entry or not path:
-            report_miss("App manifest line (expected name|path): %s" % entry)
+            report_miss(f"App manifest line (expected name|path): {entry}")
             continue
         if gar_app_first_existing_path(path):
-            report_ok("App %s" % name)
+            report_ok(f"App {name}")
         else:
-            report_miss("App %s (%s)" % (name, gar_app_format_paths(path)))
+            report_miss(f"App {name} ({gar_app_format_paths(path)})")
 
 
 # osascript blocks indefinitely if macOS is showing an Automation permission
@@ -3310,24 +3296,24 @@ def check_mac_login_items(login_lines):
         label, names_field = split_entry(entry)
         candidates = gar_app_candidate_paths(names_field)
         if not label or not names_field or label == entry or not candidates:
-            report_miss("Login item manifest line (expected label|name[|name...]): %s" % entry)
+            report_miss(f"Login item manifest line (expected label|name[|name...]): {entry}")
             continue
         matched = [n for n in candidates if n in listed]
 
         if len(candidates) == 1:
             if matched:
-                report_ok("Login item %s" % label)
+                report_ok(f"Login item {label}")
             else:
-                report_miss("Login item %s (add %s in System Settings → General → Login Items)" % (label, names_field))
+                report_miss(f"Login item {label} (add {names_field} in System Settings → General → Login Items)")
             continue
 
         fmt = gar_app_format_paths(names_field)
         if len(matched) == 1:
-            report_ok("Login item %s (%s)" % (label, matched[0]))
+            report_ok(f"Login item {label} ({matched[0]})")
         elif not matched:
-            report_miss("Login item %s (add exactly one of: %s in System Settings → General → Login Items)" % (label, fmt))
+            report_miss(f"Login item {label} (add exactly one of: {fmt} in System Settings → General → Login Items)")
         else:
-            report_miss("Login item %s (exactly one of: %s; found: %s)" % (label, fmt, ", ".join(matched)))
+            report_miss(f"Login item {label} (exactly one of: {fmt}; found: {', '.join(matched)})")
 
 
 def check_mac_browser_extensions():
@@ -3344,12 +3330,12 @@ def check_mac_browser_extensions():
 
     for (browser, ext_id, label), st in zip(entries, _parallel_map(status, entries)):
         if st == "bad":
-            report_miss("Browser extension manifest line (expected browser|id|name): %s|%s|%s" % (browser, ext_id, label))
+            report_miss(f"Browser extension manifest line (expected browser|id|name): {browser}|{ext_id}|{label}")
         elif st == "ok":
-            report_ok("Extension %s/%s" % (browser, label))
+            report_ok(f"Extension {browser}/{label}")
         elif st == "miss":
             hint = lookup_install_hint(label)
-            report_miss("Extension %s/%s (%s)" % (browser, label, hint if hint else ext_id))
+            report_miss(f"Extension {browser}/{label} ({hint if hint else ext_id})")
 
 
 # --- Platform runners -------------------------------------------------------
@@ -3477,7 +3463,7 @@ def main(argv):
             cmd_extra_brew("leaves" if a == "--extra-brew-leaves" else "requested")
             return 0
         else:
-            err("Unknown option: %s" % a)
+            err(f"Unknown option: {a}")
             usage(sys.stderr)
             return 2
 
@@ -3486,7 +3472,7 @@ def main(argv):
         return 2
     detect_roles()
     if not gar_recheck:
-        out("gar: platform %s; roles %s" % (platform, gar_format_roles()))
+        out(f"gar: platform {platform}; roles {gar_format_roles()}")
         gar_warn_unknown_roles()
 
     gar_init_workdir()
@@ -3512,16 +3498,16 @@ def main(argv):
             fixed = gar_plural(gar_fixed_issues, "issue")
         else:
             fixed = gar_plural(gar_fixed_warnings, "warning")
-        out("Gar: Fixed %s.\n\nAfter fixes:" % fixed)
+        out(f"Gar: Fixed {fixed}.\n\nAfter fixes:")
         sys.stdout.flush()
         env = dict(os.environ, GAR_RECHECK="1")
         return subprocess.run([sys.executable, SCRIPT] + orig_args, env=env).returncode
 
-    warn_suffix = ". %s." % gar_plural(warnings, "warning") if warnings > 0 else ""
+    warn_suffix = f". {gar_plural(warnings, 'warning')}." if warnings > 0 else ""
     if issues > 0:
-        out("%d issue(s)%s" % (issues, warn_suffix))
+        out(f"{issues} issue(s){warn_suffix}")
         return 1
-    out("All checks passed%s" % warn_suffix)
+    out(f"All checks passed{warn_suffix}")
     return 0
 
 
