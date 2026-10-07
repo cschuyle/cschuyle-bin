@@ -125,6 +125,36 @@ Brewfile — `brew bundle check` treats a bare `brew "name"` for a keg-only
 formula as unsatisfied unless it is *unlinked*, which is the opposite of what's
 wanted here.
 
+**Inverse brew audit (mac).** Two standalone flags report the *other* direction —
+installed packages that no Brewfile asks for (the drift from one-off `brew
+install`s) — rather than desired-but-missing. `gar --extra-brew-leaves` compares
+all top-level formulae (`brew leaves`) plus installed casks against the composed
+desired set (base `Brewfile` + active-role overlays, via
+`gar_combined_capability_manifest`), and prints those not accounted for.
+`gar --extra-brew-requested` is the same but uses `brew leaves -r`
+(installed-on-request), excluding leaves that became top-level only after their
+dependents were removed. Both are standalone: they print the report and `exit 0`,
+run no other checks, and don't affect the normal audit's exit status. Dependencies
+(non-leaf formulae) are never considered, so the formula list isn't drowned in the
+~200 transitive deps a few top-level installs pull in. Tapped formulae are matched
+by leaf name (`gdubw/gng/gng` ↔ `brew "gng"`). Casks are reported in a separate
+sub-section with a caveat, because some installed casks are tracked as GUI apps in
+a `.apps` manifest rather than a `cask "..."` Brewfile line, so a cask listed here
+isn't necessarily unaccounted-for. Helper `gar_brewfile_declared <brewfile> <kind>`
+extracts the declared short names; `cmd_extra_brew <leaves|requested>` does the set
+difference.
+
+**Enabling/disabling roles.** `gar roles --add <role>` and
+`gar roles --remove <role>` edit `~/.config/gar/roles` in place instead of
+requiring a hand-edit. `--add` appends the role (creating the file/dir if needed)
+and is idempotent; `--remove` strips its line(s), preserving comments, blank lines,
+and the order of the other roles (round-trips to a byte-identical file). Both
+refuse an unknown role id (no `role.<id>.*` manifest anywhere) with `exit 2` and a
+list of known roles — a typo can't silently write an inert line. After mutating,
+each re-runs `detect_roles` and prints the resulting active set, then exits.
+Helpers `gar_roles_add` / `gar_roles_remove` do the file edit; `cmd_roles` validates
+via `gar_role_is_known`.
+
 **Shadowed commands.** For each command in a `commands` manifest that is on
 PATH, `check_commands` WARNs if more than one distinct copy is on PATH
 (`gar_warn_command_shadowed`), naming the one in use and the shadowed ones.

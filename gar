@@ -181,9 +181,11 @@ gar_result_get() {
 usage() {
     cat <<'EOF'
 Usage: gar [-ah]
+       gar [--extra-brew-leaves | --extra-brew-requested]
        gar apps [-r <role>]
        gar info [name]
        gar roles [-a|--all]
+       gar roles --add <role> | --remove <role>
        gar --man
 
 Check the current machine's configuration against the desired state in gar.d/
@@ -213,6 +215,16 @@ Roles
 
 Options and commands
   -a, --all     Show all checks, including OK (default: only MISS and WARN)
+  --extra-brew-leaves
+                List installed top-level Homebrew formulae (brew leaves) and casks
+                NOT called for by any Brewfile (platform base + active roles), then
+                exit. The inverse of the normal MISS audit — surfaces drift from
+                one-off installs. Dependencies are excluded; a listed cask may still
+                be tracked as a GUI app in a .apps manifest.
+  --extra-brew-requested
+                Like --extra-brew-leaves but only installed-on-request formulae
+                (brew leaves -r), excluding leaves that became top-level only after
+                their dependents were removed.
   -h, --help, --man
                 Show this help
   apps          List GUI apps tracked for this machine (platform base plus active
@@ -230,7 +242,10 @@ Options and commands
   roles         List known role ids (role.<id>.* under gar.d/ or ~/.config/gar/d/);
                 enabled roles are prefixed with "✓ " (others with two spaces).
                 With -a/--all: also list each role's overlay contents (apps,
-                Homebrew, commands, login items, env, secrets, repos, etc.)
+                Homebrew, commands, login items, env, secrets, repos, etc.).
+                With --add <role> / --remove <role>: enable or disable a role by
+                editing ~/.config/gar/roles (the role must be known), then print
+                the active set. --add is idempotent.
 
 Exit status: 0 if everything looks good, 1 if anything is missing.
 EOF
@@ -541,6 +556,77 @@ lookup_brew_hint() {
         done < <(read_manifest "$manifest")
     done < <(gar_all_capability_manifests mac Brewfile)
     return 1
+}
+
+# Print the short names declared in a composed Brewfile for one kind.
+#   gar_brewfile_declared <brewfile> <kind>   # kind = brew | cask
+# A tapped formula (e.g. gdubw/gng/gng) is reduced to its leaf name (gng), which
+# is how Brewfiles name it (brew "gng"). Trailing comments and options (e.g.
+# `, link: true`) after the quoted name are ignored.
+gar_brewfile_declared() {
+    local file="$1" kind="$2" line name
+    [[ -f "$file" ]] || return 0
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        [[ "$line" =~ ^[[:space:]]*"$kind"[[:space:]]+\"([^\"]+)\" ]] || continue
+        name="${BASH_REMATCH[1]}"
+        name="${name##*/}"
+        printf '%s\n' "$name"
+    done <"$file"
+}
+
+# Standalone inverse-audit: list installed Homebrew packages NOT called for by
+# any Brewfile (platform base + active roles). The opposite of check_mac_homebrew,
+# which reports desired-but-missing.
+#   cmd_extra_brew leaves      -> baseline is `brew leaves` (all top-level)
+#   cmd_extra_brew requested   -> baseline is `brew leaves -r` (installed on request)
+# Dependencies (formulae installed only as deps of something else) are never
+# considered — `brew leaves` already excludes them. Casks are reported in a
+# separate sub-section because some are tracked as GUI apps in a .apps manifest
+# rather than a `cask "..."` line, so a cask here isn't necessarily unaccounted-for.
+cmd_extra_brew() {
+    local mode="$1" brew_bin brewfile
+    brew_bin=$(gar_brew_bin)
+    if [[ -z "$brew_bin" ]]; then
+        printf 'Homebrew not installed.\n' >&2
+        exit 2
+    fi
+
+    gar_init_workdir
+    brewfile=$(gar_combined_capability_manifest mac Brewfile)
+
+    local declared_brew declared_cask
+    declared_brew=$(gar_brewfile_declared "$brewfile" brew | sort -u)
+    declared_cask=$(gar_brewfile_declared "$brewfile" cask | sort -u)
+
+    local leaves_args=(leaves)
+    [[ "$mode" == requested ]] && leaves_args=(leaves -r)
+    local installed_brew installed_cask
+    installed_brew=$("$brew_bin" "${leaves_args[@]}" 2>/dev/null | sed -E 's#.*/##' | sort -u)
+    installed_cask=$("$brew_bin" list --cask 2>/dev/null | sort -u)
+
+    local extra_brew extra_cask
+    extra_brew=$(comm -23 <(printf '%s\n' "$installed_brew") <(printf '%s\n' "$declared_brew"))
+    extra_cask=$(comm -23 <(printf '%s\n' "$installed_cask") <(printf '%s\n' "$declared_cask"))
+
+    if [[ "$mode" == requested ]]; then
+        printf 'Installed-on-request formulae not called for by any Brewfile (base + active roles):\n\n'
+    else
+        printf 'Top-level formulae not called for by any Brewfile (base + active roles):\n\n'
+    fi
+    if [[ -n "$extra_brew" ]]; then
+        printf '%s\n' "$extra_brew" | sed 's/^/  /'
+    else
+        printf '  (none)\n'
+    fi
+
+    printf '\nInstalled casks not declared via a cask "..." line\n'
+    printf '(some may be tracked as GUI apps in a .apps manifest rather than a cask line):\n\n'
+    if [[ -n "$extra_cask" ]]; then
+        printf '%s\n' "$extra_cask" | sed 's/^/  /'
+    else
+        printf '  (none)\n'
+    fi
 }
 
 # Resolve the Homebrew binary (PATH first, then the standard Apple-silicon and
@@ -1040,6 +1126,59 @@ gar_roles_file() {
     printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/gar/roles"
 }
 
+# Enable a role by appending it to ~/.config/gar/roles (creating the file/dir if
+# needed). No-op if already present. Prints a status line. Returns 1 on write
+# failure. The caller validates that the role is known.
+gar_roles_add() {
+    local role="$1" file
+    file=$(gar_roles_file)
+    if [[ -f "$file" ]]; then
+        local r
+        while IFS= read -r r || [[ -n "$r" ]]; do
+            r="${r%%#*}"
+            r="${r#"${r%%[![:space:]]*}"}"
+            r="${r%"${r##*[![:space:]]}"}"
+            if [[ "$r" == "$role" ]]; then
+                printf 'Role %s is already enabled (%s).\n' "$role" "$(gar_tilde_path "$file")"
+                return 0
+            fi
+        done <"$file"
+    fi
+    mkdir -p "$(dirname "$file")" || return 1
+    printf '%s\n' "$role" >>"$file" || return 1
+    printf 'Enabled role %s (%s).\n' "$role" "$(gar_tilde_path "$file")"
+}
+
+# Disable a role by removing its line(s) from ~/.config/gar/roles. Preserves
+# comments and other roles. Prints a status line. Returns 1 on write failure.
+gar_roles_remove() {
+    local role="$1" file tmp line r found=0
+    file=$(gar_roles_file)
+    if [[ ! -f "$file" ]]; then
+        printf 'Role %s is not enabled (no roles file).\n' "$role"
+        return 0
+    fi
+    tmp="$file.gar.$$"
+    : >"$tmp" || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        r="${line%%#*}"
+        r="${r#"${r%%[![:space:]]*}"}"
+        r="${r%"${r##*[![:space:]]}"}"
+        if [[ "$r" == "$role" ]]; then
+            found=1
+            continue
+        fi
+        printf '%s\n' "$line" >>"$tmp"
+    done <"$file"
+    if (( ! found )); then
+        rm -f "$tmp"
+        printf 'Role %s is not enabled (%s).\n' "$role" "$(gar_tilde_path "$file")"
+        return 0
+    fi
+    mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+    printf 'Disabled role %s (%s).\n' "$role" "$(gar_tilde_path "$file")"
+}
+
 gar_role_is_known() {
     local role="$1" dir f
     while IFS= read -r dir; do
@@ -1187,12 +1326,22 @@ gar_print_role_details() {
 }
 
 cmd_roles() {
-    local role show_all=0 first=1
+    local role show_all=0 first=1 action="" target=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -a|--all)
                 show_all=1
                 shift
+                ;;
+            --add|--remove)
+                action="${1#--}"
+                target="${2:-}"
+                if [[ -z "$target" ]]; then
+                    echo "roles $1 requires a role id" >&2
+                    usage >&2
+                    exit 2
+                fi
+                shift 2
                 ;;
             -h|--help)
                 usage
@@ -1205,6 +1354,22 @@ cmd_roles() {
                 ;;
         esac
     done
+
+    if [[ -n "$action" ]]; then
+        if ! gar_role_is_known "$target"; then
+            printf 'Unknown role: %s\n\nKnown roles:\n' "$target" >&2
+            gar_known_roles | sed 's/^/  /' >&2
+            exit 2
+        fi
+        if [[ "$action" == add ]]; then
+            gar_roles_add "$target" || { echo "Failed to update roles file" >&2; exit 1; }
+        else
+            gar_roles_remove "$target" || { echo "Failed to update roles file" >&2; exit 1; }
+        fi
+        detect_roles
+        printf 'Active roles: %s\n' "$(gar_format_roles)"
+        exit 0
+    fi
 
     detect_roles
     if (( show_all )); then
@@ -4073,6 +4238,16 @@ main() {
             -a|--all)
                 gar_show_all=1
                 shift
+                ;;
+            --extra-brew-leaves)
+                detect_roles
+                cmd_extra_brew leaves
+                exit 0
+                ;;
+            --extra-brew-requested)
+                detect_roles
+                cmd_extra_brew requested
+                exit 0
                 ;;
             *)
                 echo "Unknown option: $1" >&2
