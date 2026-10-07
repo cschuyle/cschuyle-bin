@@ -125,7 +125,7 @@ if [[ -n "$DEST_HOST" ]]; then
   
   rsync --dry-run --archive --verbose${UPDATE_PARAM} --out-format='%n' "${SOURCES[@]}" "$DEST_HOST:$DEST_DIR/" | \
     # Filter out summary lines, directories, and openrsync's "Skip newer" notices
-    grep -v '^Transfer starting\|sen\|^total\|^$\|^Skip newer' | \
+    grep -v '^Transfer starting\|^sending incremental file list$\|^created directory \|^sent \|^total\|^$\|^Skip newer' | \
     grep -v '\._' | \
     grep -v '/$' > "$TEMP_FILE"
   
@@ -133,7 +133,7 @@ else
   
   rsync --dry-run --archive --verbose${UPDATE_PARAM} --out-format='%n' "${SOURCES[@]}" "$DEST_DIR/" | \
     # Filter out summary lines, directories, and openrsync's "Skip newer" notices
-    grep -v '^Transfer starting\|sen\|^total\|^$\|^Skip newer' | \
+    grep -v '^Transfer starting\|^sending incremental file list$\|^created directory \|^sent \|^total\|^$\|^Skip newer' | \
     grep -v '\._' | \
     grep -v '/$' > "$TEMP_FILE"
   
@@ -151,22 +151,30 @@ cat "$TEMP_FILE"
 # -z compress
 # -v verbose
 # -f specify filename
+# -m (extract side) don't restore mtimes; added only when the destination
+#    filesystem refuses to set file times (e.g. a Windows drive under WSL at
+#    /mnt/z), where tar would otherwise print "Cannot utime" for every file and
+#    exit non-zero even though the data was copied.
+
+# Shell snippet run in the destination directory (locally or over ssh): probe
+# whether file times can be set there, then extract, adding -m if they can't.
+EXTRACT_SH='M=; p=$(mktemp ./.tarsync_probe.XXXXXX 2>/dev/null) && { touch -t 200001010000 "$p" 2>/dev/null || { M=m; echo "tarsync: destination cannot set file times; not preserving mtimes" >&2; }; rm -f "$p"; }; tar -x'"${Z}"'${M}f -'
 
 # Create tar archive and pipe to destination
 if [[ -n "$DEST_HOST" ]]; then
   if [[ "$DRY_RUN" == true ]]; then
-    echo "tar -C \"$TAR_BASE\" -Sc${Z}vf - -T \"$TEMP_FILE\" | ssh $PORT_ARG \"$DEST_HOST\" \"cd \\\"$DEST_DIR\\\" && tar -x${Z}f -\""
+    echo "tar -C \"$TAR_BASE\" -Sc${Z}vf - -T \"$TEMP_FILE\" | ssh $PORT_ARG \"$DEST_HOST\" \"cd \\\"$DEST_DIR\\\" && $EXTRACT_SH\""
   else
     set -x
-    tar -C "$TAR_BASE" -Sc${Z}vf - -T "$TEMP_FILE" | ssh $PORT_ARG "$DEST_HOST" "cd \"$DEST_DIR\" && tar -x${Z}f -"
+    tar -C "$TAR_BASE" -Sc${Z}vf - -T "$TEMP_FILE" | ssh $PORT_ARG "$DEST_HOST" "cd \"$DEST_DIR\" && $EXTRACT_SH"
     set +x
   fi
 else
   if [[ "$DRY_RUN" == true ]]; then
-    echo "tar -C \"$TAR_BASE\" -Sc${Z}vf - -T \"$TEMP_FILE\" | (cd \"$DEST_DIR\" && tar -x${Z}f -)"
+    echo "tar -C \"$TAR_BASE\" -Sc${Z}vf - -T \"$TEMP_FILE\" | (cd \"$DEST_DIR\" && sh -c '$EXTRACT_SH')"
   else
     set -x
-    tar -C "$TAR_BASE" -Sc${Z}vf - -T "$TEMP_FILE" | (cd "$DEST_DIR" && tar -x${Z}f -)
+    tar -C "$TAR_BASE" -Sc${Z}vf - -T "$TEMP_FILE" | (cd "$DEST_DIR" && sh -c "$EXTRACT_SH")
     set +x
   fi
 fi
