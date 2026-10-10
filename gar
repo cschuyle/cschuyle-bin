@@ -29,7 +29,9 @@ gar_section_name = ""
 gar_section_header_printed = False
 gar_tmpdir = ""
 gar_active_roles = []
+gar_muted = set()  # lowercased names from ~/.config/gar/muted
 issues = 0
+muted = 0
 warnings = 0
 # Interactive fixes applied this run, split by the severity of the finding they
 # fixed (a MISS is an issue; a WARN is a warning). Any fix triggers a re-run in
@@ -224,6 +226,10 @@ def gar_roles_file():
     return os.path.join(gar_config_base(), "roles")
 
 
+def gar_muted_file():
+    return os.path.join(gar_config_base(), "muted")
+
+
 # Existing manifest roots in order: repo gar.d, then local ~/.config/gar/d.
 def gar_manifest_dirs():
     dirs = [GAR_DIR]
@@ -268,6 +274,7 @@ def gar_preflight_config():
     ok = gar_check_config_path("dir", "optional", gar_config_base()) and ok
     ok = gar_check_config_path("dir", "optional", gar_local_dir()) and ok
     ok = gar_check_config_path("file", "optional", gar_roles_file()) and ok
+    ok = gar_check_config_path("file", "optional", gar_muted_file()) and ok
     return ok
 
 
@@ -347,6 +354,21 @@ Options and commands
                 With --add <role> / --remove <role>: enable or disable a role by
                 editing ~/.config/gar/roles (the role must be known), then print
                 the active set. --add is idempotent.
+
+  mute [-f|--force] [name...]
+                Mute MISS reports for missing things you don't want (an app,
+                command, brew formula/cask/tap, Perl module, login item, browser
+                extension, env/secret/git-config key, SDKMAN candidate) by adding
+                them to ~/.config/gar/muted (one per
+                line, # comments). A name matches case-insensitively as the bare
+                name (OpenLens), the report label (App OpenLens), or the whole
+                MISS line pasted from the report. A muted MISS doesn't count as an issue, isn't
+                offered a fix, and shows as MUTE only under -a; the summary line
+                counts them. A name must match a current MISS (gar runs a quiet
+                audit to check; muted MISSes count) unless --force is given.
+                With no name: list muted names.
+  unmute <name...>, mute --remove <name...>
+                Remove names from ~/.config/gar/muted.
 
 Exit status: 0 if everything looks good, 1 if anything is missing.
 """
@@ -893,6 +915,16 @@ def gar_brew_item_name(item):
     return m.group(2) if m else None
 
 
+# Names a `brew bundle check` item can be muted by: the tap/formula/cask name
+# and, for a tapped formula (gdubw/gng/gng), its leaf name.
+def gar_brew_item_mute_names(item):
+    m = re.match(r"^(?:Tap|Formula|Cask)\s+(\S+)\s+needs", item)
+    if not m:
+        return ()
+    name = m.group(1)
+    return (name, name.rsplit("/", 1)[-1])
+
+
 # Classify a `brew bundle check` item into the action that satisfies it:
 # link ("needs to be linked"), upgrade ("installed or updated" but already
 # installed, i.e. outdated), or install.
@@ -1052,12 +1084,11 @@ def check_mac_homebrew():
                 gar_section_emit_header()
                 out(f"{gar_capitalize_first(cmd)} is brew-required but exists in another location ({gar_tilde_path(cmd_path)}), so assuming you don't want it brew-installed")
                 continue
-        still_missing.append(item)
+        thing = gar_brew_item_mute_names(item)
         hint = brew_miss_hint(item)
-        if hint:
-            report_miss(f"Homebrew: {item} ({hint})")
-        else:
-            report_miss(f"Homebrew: {item}")
+        report_miss(f"Homebrew: {item} ({hint})" if hint else f"Homebrew: {item}", thing)
+        if not gar_is_muted(*thing, item):
+            still_missing.append(item)
 
     if still_missing:
         if gar_brew_blocked_by_spotlight():
@@ -1384,43 +1415,37 @@ def _roles_file_line_role(line):
     return line.split("#", 1)[0].strip()
 
 
-# Enable a role by appending it to ~/.config/gar/roles (creating the file/dir if
-# needed). No-op if already present. Prints a status line. Returns False on
-# write failure. The caller validates that the role is known.
-def gar_roles_add(role):
-    f = gar_roles_file()
+# Append item as its own line to a one-item-per-line config file (creating the
+# file/dir if needed). Returns "present" if already listed (ignoring # comments),
+# "added", or None on write failure.
+def gar_listfile_add(f, item):
     if os.path.isfile(f):
         for line in read_text(f).split("\n"):
-            if _roles_file_line_role(line) == role:
-                out(f"Role {role} is already enabled ({gar_tilde_path(f)}).")
-                return True
+            if _roles_file_line_role(line) == item:
+                return "present"
     try:
         os.makedirs(os.path.dirname(f), exist_ok=True)
-        # Don't glue the role onto a last line that lacks its newline.
+        # Don't glue the item onto a last line that lacks its newline.
         sep = "\n" if os.path.isfile(f) and read_text(f)[-1:] not in ("", "\n") else ""
         with open(f, "a") as fh:
-            fh.write(sep + role + "\n")
+            fh.write(sep + item + "\n")
     except OSError:
-        return False
-    out(f"Enabled role {role} ({gar_tilde_path(f)}).")
-    return True
+        return None
+    return "added"
 
 
-# Disable a role by removing its line(s) from ~/.config/gar/roles. Preserves
-# comments and other roles. Prints a status line. Returns False on write failure.
-def gar_roles_remove(role):
-    f = gar_roles_file()
+# Remove item's line(s) from a one-item-per-line config file, preserving
+# comments, blank lines and other lines. Returns "absent", "removed", or None
+# on write failure. match(a, b) compares a line's item to the target.
+def gar_listfile_remove(f, item, match=lambda a, b: a == b):
     if not os.path.isfile(f):
-        out(f"Role {role} is not enabled (no roles file).")
-        return True
-    text = read_text(f)
-    lines = text.split("\n")
+        return "absent"
+    lines = read_text(f).split("\n")
     if lines and lines[-1] == "":
         lines.pop()
-    kept = [l for l in lines if _roles_file_line_role(l) != role]
+    kept = [l for l in lines if not match(_roles_file_line_role(l), item)]
     if len(kept) == len(lines):
-        out(f"Role {role} is not enabled ({gar_tilde_path(f)}).")
-        return True
+        return "absent"
     tmp = f"{f}.gar.{os.getpid()}"
     try:
         with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as fh:
@@ -1431,9 +1456,36 @@ def gar_roles_remove(role):
             os.remove(tmp)
         except OSError:
             pass
-        return False
-    out(f"Disabled role {role} ({gar_tilde_path(f)}).")
-    return True
+        return None
+    return "removed"
+
+
+# Enable a role by appending it to ~/.config/gar/roles. No-op if already
+# present. Prints a status line. Returns False on write failure. The caller
+# validates that the role is known.
+def gar_roles_add(role):
+    f = gar_roles_file()
+    r = gar_listfile_add(f, role)
+    if r == "present":
+        out(f"Role {role} is already enabled ({gar_tilde_path(f)}).")
+    elif r == "added":
+        out(f"Enabled role {role} ({gar_tilde_path(f)}).")
+    return r is not None
+
+
+# Disable a role by removing its line(s) from ~/.config/gar/roles. Preserves
+# comments and other roles. Prints a status line. Returns False on write failure.
+def gar_roles_remove(role):
+    f = gar_roles_file()
+    if not os.path.isfile(f):
+        out(f"Role {role} is not enabled (no roles file).")
+        return True
+    r = gar_listfile_remove(f, role)
+    if r == "absent":
+        out(f"Role {role} is not enabled ({gar_tilde_path(f)}).")
+    elif r == "removed":
+        out(f"Disabled role {role} ({gar_tilde_path(f)}).")
+    return r is not None
 
 
 def gar_role_is_known(role):
@@ -1601,6 +1653,127 @@ def gar_warn_unknown_roles():
             out(f"WARN Unknown role: {role} (no role.{role}.* in gar.d/ or ~/.config/gar/d/)")
 
 
+# --- Muting -----------------------------------------------------------------
+
+# A muted entry may be pasted straight from a report line; drop the status.
+def gar_mute_normalize(name):
+    return re.sub(r"^(MISS|MUTE)\s+", "", name.strip())
+
+
+def detect_muted():
+    global gar_muted
+    gar_muted = set()
+    f = gar_muted_file()
+    if os.path.isfile(f):
+        gar_muted = {gar_mute_normalize(n).lower() for n in parse_manifest(read_text(f))}
+
+
+# Forms of a MISS message a muted entry can match: the whole message (as
+# pasted from the report) and its label, i.e. the part before " (hint)" or a
+# trailing ":" (e.g. "App OpenLens", "Homebrew: Cask foo needs to be installed").
+def gar_miss_mute_forms(msg):
+    label = msg.split(" (", 1)[0].rstrip(":").strip()
+    return (msg, label)
+
+
+# True if any of the given names (case-insensitive) is in ~/.config/gar/muted.
+def gar_is_muted(*names):
+    return any(n and n.lower() in gar_muted for n in names)
+
+
+def cmd_mute(args, unmute=False):
+    verb = "unmute" if unmute else "mute"
+    if args[:1] in (["-h"], ["--help"]):
+        usage()
+        sys.exit(0)
+    if args[:1] in (["-r"], ["--remove"]):
+        unmute, verb, args = True, "mute --remove", args[1:]
+    force = False
+    if not unmute and args[:1] in (["-f"], ["--force"]):
+        force, args = True, args[1:]
+    for a in args:
+        if a.startswith("-"):
+            err(f"Unknown option for {verb}: {a}")
+            usage(sys.stderr)
+            sys.exit(2)
+    f = gar_muted_file()
+    if not args:
+        if unmute:
+            err(f"{verb} requires a name")
+            usage(sys.stderr)
+            sys.exit(2)
+        for name in parse_manifest(read_text(f)) if os.path.isfile(f) else []:
+            out(name)
+        return
+    current = set()
+    if not unmute and not force:
+        err("gar: checking current findings...")
+        current = gar_current_miss_names()
+    names = [gar_mute_normalize(a) for a in args]
+    # All or nothing: refuse the whole command if any name matches nothing.
+    unmatched = [n for n in names if not unmute and not force and n.lower() not in current]
+    for name in unmatched:
+        err(f"No current MISS matches {name} (use --force to mute it anyway).")
+    if unmatched:
+        err("Nothing muted.")
+        sys.exit(1)
+    ok = True
+    for name in names:
+        if unmute:
+            r = gar_listfile_remove(f, name, lambda a, b: gar_name_eq(gar_mute_normalize(a), b))
+            if r == "absent":
+                out(f"{name} is not muted ({gar_tilde_path(f)}).")
+            elif r == "removed":
+                out(f"Unmuted {name} ({gar_tilde_path(f)}).")
+        else:
+            r = "present" if gar_is_muted_in_file(f, name) else gar_listfile_add(f, name)
+            if r == "present":
+                out(f"{name} is already muted ({gar_tilde_path(f)}).")
+            elif r == "added":
+                out(f"Muted {name} ({gar_tilde_path(f)}).")
+        if r is None:
+            err(f"Failed to update {gar_tilde_path(f)}")
+        ok = ok and r is not None
+    if not ok:
+        sys.exit(1)
+
+
+def gar_is_muted_in_file(f, name):
+    if not os.path.isfile(f):
+        return False
+    return any(gar_name_eq(gar_mute_normalize(n), name) for n in parse_manifest(read_text(f)))
+
+
+# GAR_MISS_DUMP=<file>: append each MISS (muted or not) as a JSON line of the
+# names it can be muted by. `gar mute` uses this to validate names.
+def gar_dump_miss(msg, things):
+    f = os.environ.get("GAR_MISS_DUMP")
+    if not f:
+        return
+    names = [t for t in things if t] + list(gar_miss_mute_forms(msg))
+    try:
+        with open(f, "a") as fh:
+            fh.write(json.dumps(names) + "\n")
+    except OSError:
+        pass
+
+
+# Mute names (lowercased) of every MISS the audit currently finds, from a quiet,
+# prompt-free re-run of gar.
+def gar_current_miss_names():
+    with tempfile.NamedTemporaryFile("r", suffix=".jsonl") as tf:
+        env = dict(os.environ, GAR_RECHECK="1", GAR_MISS_DUMP=tf.name)
+        subprocess.run([sys.executable, SCRIPT], env=env, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        names = set()
+        for line in tf.read().splitlines():
+            try:
+                names.update(n.lower() for n in json.loads(line))
+            except ValueError:
+                pass
+        return names
+
+
 # --- Reporting --------------------------------------------------------------
 
 def gar_section_begin(name):
@@ -1623,8 +1796,18 @@ def report_ok(msg):
         out(f"OK   {msg}")
 
 
-def report_miss(msg):
-    global issues
+# thing: name(s) of the missing item, checked against ~/.config/gar/muted. A
+# muted MISS isn't counted as an issue and only shows (as MUTE) under -a.
+def report_miss(msg, thing=None):
+    global issues, muted
+    things = thing if isinstance(thing, (list, tuple)) else (thing,)
+    gar_dump_miss(msg, things)
+    if gar_is_muted(*things, *gar_miss_mute_forms(msg)):
+        muted += 1
+        if gar_show_all:
+            gar_section_emit_header()
+            out(f"MUTE {msg}")
+        return
     gar_section_emit_header()
     out(f"MISS {msg}")
     issues += 1
@@ -2214,9 +2397,9 @@ def check_git_config(config_manifest, hints_file):
         else:
             hint = lookup_install_hint(key, hints_file)
             if hint:
-                report_miss(f"Git config {key} ({hint})")
+                report_miss(f"Git config {key} ({hint})", key)
             else:
-                report_miss(f"Git config {key} (not set; run: git config --global {key} VALUE)")
+                report_miss(f"Git config {key} (not set; run: git config --global {key} VALUE)", key)
 
 
 # --- Mac settings -----------------------------------------------------------
@@ -3058,7 +3241,7 @@ def check_mac_secrets(secrets_lines):
         if ok:
             report_ok(f"Secret {key}")
         else:
-            report_miss(f"Secret {key} (set with: set-secret {key} VALUE)")
+            report_miss(f"Secret {key} (set with: set-secret {key} VALUE)", key)
 
 
 def check_env(env_lines):
@@ -3066,7 +3249,7 @@ def check_env(env_lines):
         if os.environ.get(name):
             report_ok(f"Env {name}")
         else:
-            report_miss(f"Env {name} (not set in this shell)")
+            report_miss(f"Env {name} (not set in this shell)", name)
 
 
 SDKMAN_INIT = os.path.join(HOME, ".sdkman", "bin", "sdkman-init.sh")
@@ -3103,7 +3286,7 @@ def check_mac_java():
             current = current.replace("\r", "")
             report_ok(f"Java ({current})")
     else:
-        report_miss("SDKMAN (install from https://sdkman.io, then: sdk install java)")
+        report_miss("SDKMAN (install from https://sdkman.io, then: sdk install java)", ("sdkman", "java"))
 
     rc, version = run(["java", "-version"], stderr_to_stdout=True)
     if rc == 0:
@@ -3113,9 +3296,9 @@ def check_mac_java():
             report_ok(f"Java ({first_line})")
     elif not has_java:
         if has_sdkman:
-            report_miss("Java (no SDKMAN candidate; run: sdk install java)")
+            report_miss("Java (no SDKMAN candidate; run: sdk install java)", "java")
         else:
-            report_miss("Java (no runtime; prefer SDKMAN: sdk install java)")
+            report_miss("Java (no runtime; prefer SDKMAN: sdk install java)", "java")
 
 
 def _version_key(v):
@@ -3181,13 +3364,13 @@ def check_mac_sdkman_tools():
         rng = f" matching {constraint}" if constraint else ""
 
         if not sdkman_ready:
-            report_miss(f"{label} (SDKMAN not installed; see https://sdkman.io, then: sdk install {candidate})")
+            report_miss(f"{label} (SDKMAN not installed; see https://sdkman.io, then: sdk install {candidate})", candidate)
             continue
 
         m = re.search(r"[0-9]+(\.[0-9]+)+", sdk("current", candidate)[1])
         current = m.group(0) if m else ""
         if not current:
-            report_miss(f"{label} (no SDKMAN candidate; run: sdk install {candidate})")
+            report_miss(f"{label} (no SDKMAN candidate; run: sdk install {candidate})", candidate)
         elif gar_version_in_constraint(current, constraint):
             report_ok(f"{label} ({current}, SDKMAN)")
         else:
@@ -3243,9 +3426,9 @@ def check_commands(commands_lines, hints_file):
         else:
             hint = lookup_install_hint(cmd, hints_file)
             if hint:
-                report_miss(f"Command {cmd} ({hint})")
+                report_miss(f"Command {cmd} ({hint})", cmd)
             else:
-                report_miss(f"Command {cmd} (not on PATH)")
+                report_miss(f"Command {cmd} (not on PATH)", cmd)
 
 
 def check_mac_perl_modules():
@@ -3256,12 +3439,13 @@ def check_mac_perl_modules():
         hint = lookup_install_hint(module)
         if hint:
             if gar_hint_is_multiline(hint):
-                report_miss(f"Perl module {module}:")
-                out(printf_b(hint))
+                report_miss(f"Perl module {module}:", module)
+                if not gar_is_muted(module, f"Perl module {module}"):
+                    out(printf_b(hint))
             else:
-                report_miss(f"Perl module {module} ({hint})")
+                report_miss(f"Perl module {module} ({hint})", module)
         else:
-            report_miss(f"Perl module {module} (not installed)")
+            report_miss(f"Perl module {module} (not installed)", module)
 
 
 def check_mac_apps(apps_lines):
@@ -3273,7 +3457,7 @@ def check_mac_apps(apps_lines):
         if gar_app_first_existing_path(path):
             report_ok(f"App {name}")
         else:
-            report_miss(f"App {name} ({gar_app_format_paths(path)})")
+            report_miss(f"App {name} ({gar_app_format_paths(path)})", name)
 
 
 # osascript blocks indefinitely if macOS is showing an Automation permission
@@ -3304,14 +3488,14 @@ def check_mac_login_items(login_lines):
             if matched:
                 report_ok(f"Login item {label}")
             else:
-                report_miss(f"Login item {label} (add {names_field} in System Settings → General → Login Items)")
+                report_miss(f"Login item {label} (add {names_field} in System Settings → General → Login Items)", label)
             continue
 
         fmt = gar_app_format_paths(names_field)
         if len(matched) == 1:
             report_ok(f"Login item {label} ({matched[0]})")
         elif not matched:
-            report_miss(f"Login item {label} (add exactly one of: {fmt} in System Settings → General → Login Items)")
+            report_miss(f"Login item {label} (add exactly one of: {fmt} in System Settings → General → Login Items)", label)
         else:
             report_miss(f"Login item {label} (exactly one of: {fmt}; found: {', '.join(matched)})")
 
@@ -3335,7 +3519,7 @@ def check_mac_browser_extensions():
             report_ok(f"Extension {browser}/{label}")
         elif st == "miss":
             hint = lookup_install_hint(label)
-            report_miss(f"Extension {browser}/{label} ({hint if hint else ext_id})")
+            report_miss(f"Extension {browser}/{label} ({hint if hint else ext_id})", (label, ext_id))
 
 
 # --- Platform runners -------------------------------------------------------
@@ -3441,6 +3625,7 @@ def main(argv):
     except AttributeError:
         pass
     orig_args = list(argv)
+    detect_muted()
 
     if argv[:1] == ["info"]:
         cmd_info(argv[1] if len(argv) > 1 else "")
@@ -3450,6 +3635,9 @@ def main(argv):
         return 0
     if argv[:1] == ["roles"]:
         cmd_roles(argv[1:])
+        return 0
+    if argv[:1] in (["mute"], ["unmute"]):
+        cmd_mute(argv[1:], unmute=argv[0] == "unmute")
         return 0
 
     for a in argv:
@@ -3503,7 +3691,12 @@ def main(argv):
         env = dict(os.environ, GAR_RECHECK="1")
         return subprocess.run([sys.executable, SCRIPT] + orig_args, env=env).returncode
 
-    warn_suffix = f". {gar_plural(warnings, 'warning')}." if warnings > 0 else ""
+    extras = []
+    if warnings > 0:
+        extras.append(gar_plural(warnings, "warning"))
+    if muted > 0:
+        extras.append(f"{muted} muted")
+    warn_suffix = "".join(f". {e}" for e in extras) + "." if extras else ""
     if issues > 0:
         out(f"{issues} issue(s){warn_suffix}")
         return 1

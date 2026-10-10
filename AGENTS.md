@@ -155,6 +155,25 @@ each re-runs `detect_roles` and prints the resulting active set, then exits.
 Helpers `gar_roles_add` / `gar_roles_remove` do the file edit; `cmd_roles` validates
 via `gar_role_is_known`.
 
+**Muting missing things.** `gar mute <name>...` appends names to
+`~/.config/gar/muted` (one per line, `#` comments; validated by the startup
+preflight like `roles`); `gar unmute <name>...` / `gar mute --remove` removes
+them; bare `gar mute` lists them. A muted name matches (case-insensitive) a
+MISS by the item's bare name, the report label (`App OpenLens`), or the whole
+pasted `MISS …` line (a leading `MISS`/`MUTE` is stripped). `gar mute`
+validates every name against the current MISSes — it re-runs `gar` with
+`GAR_RECHECK=1 GAR_MISS_DUMP=<file>`, where `report_miss` appends each MISS's
+matchable names as a JSON line — and is all-or-nothing: if any name matches
+nothing it writes nothing and exits 1. `--force` skips validation (to mute
+ahead of time). `report_miss(msg, thing)` takes the missing item's name(s) (app, command,
+brew tap/formula/cask plus a tapped formula's leaf name, Perl module, login
+item, extension label or id, env/secret/git-config key, SDKMAN candidate) and,
+if it or the message matches a muted entry, skips the MISS: not counted as an issue, no
+fix offered (muted brew items are dropped before the install offers), printed
+as `MUTE` only under `-a`. The summary appends `N muted.` Manifest-syntax MISSes
+and `brew-forbidden` aren't mutable. The roles-file and muted-file edits share
+`gar_listfile_add` / `gar_listfile_remove`.
+
 **Shadowed commands.** For each command in a `commands` manifest that is on
 PATH, `check_commands` WARNs if more than one distinct copy is on PATH
 (`gar_warn_command_shadowed`), naming the one in use and the shadowed ones.
