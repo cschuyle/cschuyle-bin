@@ -1,0 +1,8 @@
+# Version floors/ranges for commands already on PATH (command|constraint).
+# Constraint syntax is gar_version_in_constraint's: comma-joined >= > <= < = clauses.
+# Unlike mac.commands (bare presence), this fails a command that is present but too old.
+
+# macOS ships an unsupported /usr/bin/python3 (3.9); require a supported one on PATH.
+# No requirement on HOW it's installed — any python3 >=3.11 that wins on PATH satisfies this
+# (Homebrew's `brew install python3` is the easy way, but pyenv/uv/etc. are equally fine).
+python3|>=3.11

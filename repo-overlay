@@ -40,9 +40,38 @@ import os
 import subprocess
 import sys
 import tempfile
-import tomllib
 import typing
 from datetime import datetime
+
+# tomllib is stdlib only on Python 3.11+. The `#!/usr/bin/env python3` shebang can resolve to an
+# older interpreter (e.g. macOS ships /usr/bin/python3 == 3.9), so if tomllib is unavailable we
+# re-exec this script under the newest python3.X we can find on PATH that has it. We only re-exec
+# once (guarded by an env var) so a genuinely tomllib-less environment fails loudly instead of
+# looping. No machine-wide PATH change needed; keeps the script runnable wherever a modern python
+# is installed under a versioned name.
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import shutil
+
+    if os.environ.get("_REPO_OVERLAY_REEXEC"):
+        sys.exit(
+            "repo-overlay: this Python (%s) lacks the stdlib 'tomllib' module (needs 3.11+), and "
+            "re-exec under a newer python3.X already failed. Install a newer Python "
+            "(e.g. `brew install python`) or put a python3.11+ on PATH." % sys.version.split()[0]
+        )
+    # Prefer the highest versioned interpreter available; 3.11 is the floor for tomllib.
+    _candidates = ["python3.%d" % minor for minor in range(20, 10, -1)]
+    for _name in _candidates:
+        _path = shutil.which(_name)
+        if _path:
+            os.environ["_REPO_OVERLAY_REEXEC"] = "1"
+            os.execv(_path, [_path, os.path.abspath(__file__), *sys.argv[1:]])
+    sys.exit(
+        "repo-overlay: this Python (%s) lacks the stdlib 'tomllib' module (needs 3.11+), and no "
+        "newer python3.X was found on PATH. Install one (e.g. `brew install python`)."
+        % sys.version.split()[0]
+    )
 
 # Registry file lives under the XDG config dir (machine-local; not shipped with the script),
 # matching the ${XDG_CONFIG_HOME:-$HOME/.config}/<tool>/ idiom used by the other cschuyle-bin tools.

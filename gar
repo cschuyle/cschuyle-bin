@@ -3381,6 +3381,46 @@ def check_mac_sdkman_tools():
             report_miss(f"{label} ({current} out of range{rng}; run: sdk install {candidate} && sdk default {candidate} <version>)")
 
 
+# Audit version floors/ranges for commands already on PATH, declared in the
+# combined `command-versions` manifest (<platform|shared>.command-versions plus
+# active-role overlays). Each line is `command|constraint`, the constraint in
+# gar_version_in_constraint's syntax (e.g. `python3|>=3.11`). This is distinct
+# from `commands` (bare presence on PATH): here the command may well be present
+# but at an unacceptable version. The motivating case is python3 — macOS ships
+# an unsupported /usr/bin/python3 (3.9) that satisfies presence but not >=3.11,
+# so Homebrew's python3 must win on PATH; `brew bundle check` can't express that.
+# Mechanism only; which commands and which versions are manifest policy, so a
+# machine with no such manifest gets an empty list and this is a silent no-op.
+def check_mac_command_versions():
+    lines = gar_combined_lines("mac", "command-versions")
+    if not lines:
+        return
+
+    for line in lines:
+        command, _, constraint = line.partition("|")
+        command = command.strip()
+        constraint = constraint.strip()
+        if not command:
+            continue
+        rng = f" ({constraint})" if constraint else ""
+
+        path = which(command)
+        if not path:
+            report_miss(f"Command {command} (not on PATH; need{rng or ' it installed'})", command)
+            continue
+        # Read the version the same way the SDKMAN check does: first dotted number.
+        _, ver_out = run([path, "--version"], stderr_to_stdout=True)
+        m = re.search(r"[0-9]+(\.[0-9]+)+", ver_out)
+        current = m.group(0) if m else ""
+        requires = f" requires (v {constraint})" if constraint else ""
+        if not current:
+            report_miss(f"Can't read version: {command} at {gar_tilde_path(path)}{requires}", command)
+        elif gar_version_in_constraint(current, constraint):
+            report_ok(f"Command {command} ({current}, {gar_tilde_path(path)})")
+        else:
+            report_miss(f"Version too old: {command} (v{current}) at {gar_tilde_path(path)}{requires}. Install a newer one, e.g. brew install {command}", command)
+
+
 # --- Commands, Perl, apps, login items, extensions --------------------------
 
 # Each distinct copy of a command on PATH, in PATH order (first one wins).
@@ -3550,6 +3590,9 @@ def run_mac_checks():
 
     gar_section_begin("SDKMAN tools")
     gar_timed("SDKMAN tools", check_mac_sdkman_tools)
+
+    gar_section_begin("Command versions")
+    gar_timed("Command versions", check_mac_command_versions)
 
     gar_section_begin("Commands")
     gar_timed("Commands", check_commands, gar_combined_lines("mac", "commands"), hints_file)

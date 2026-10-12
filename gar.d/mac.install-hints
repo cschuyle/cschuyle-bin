@@ -8,7 +8,7 @@ qBittorrent|Download from https://www.qbittorrent.org/download; if macOS blocks 
 VS Code|Download from https://code.visualstudio.com/ and drag Visual Studio Code.app to /Applications
 Cursor|Download from https://cursor.com/ and drag Cursor.app to /Applications
 Claude|Download from https://claude.ai/download and drag Claude.app to /Applications
-claude|brew install --cask claude-code
+claude|curl -fsSL https://claude.ai/install.sh | bash
 Zoom|Download from https://zoom.us/download and drag zoom.us.app to /Applications
 Spotify|brew install --cask spotify
 VLC|Download from https://www.videolan.org/vlc/ and drag VLC.app to /Applications
