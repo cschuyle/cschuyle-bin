@@ -1404,7 +1404,11 @@ def detect_platform():
     u = os.uname()
     if u.sysname == "Darwin":
         return "mac"
-    if re.search(r"[Ss]ynology", " ".join(u)):
+    # os.uname() lacks `uname -a`'s hardware-platform field, which is where
+    # Synology DSM puts its "synology_<arch>_<model>" marker.
+    if (re.search(r"[Ss]ynology", " ".join(u) + " " + run(["uname", "-a"])[1])
+            or os.path.exists("/etc/synoinfo.conf")
+            or os.path.exists("/etc.defaults/synoinfo.conf")):
         return "synology"
     if u.sysname == "Linux":
         return "linux"
