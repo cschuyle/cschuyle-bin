@@ -678,6 +678,25 @@ def mac_chromium_extension_installed(support_dir, ext_id):
     return any(os.path.isdir(p) for p in glob.glob(pattern))
 
 
+# A Chromium browser's support dir sits behind macOS TCC. A major OS upgrade
+# resets the terminal app's folder grant, so the dir still exists (stat works)
+# but listing it raises PermissionError -- at which point the glob above matches
+# nothing and every extension reads as MISS even though all are installed.
+# Return True only for that case (exists but unreadable), so the caller can WARN
+# with a recovery hint instead of emitting a batch of misleading MISSes. A
+# genuinely absent dir (browser never run) is not this case -> return False.
+def mac_chromium_support_unreadable(support_dir):
+    if not os.path.isdir(support_dir):
+        return False
+    try:
+        os.listdir(support_dir)
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 def mac_gecko_extension_installed(support_dir, addon_id):
     base = Path(support_dir).expanduser()
     profile_dirs = []
@@ -712,12 +731,22 @@ def mac_gecko_extension_installed(support_dir, addon_id):
     return False
 
 
-def mac_browser_extension_installed(browser, ext_id):
+# Support dir for a Chromium-family browser (holds the per-profile Extensions/
+# dirs); "" for a non-Chromium (e.g. Waterfox, which uses mac_gecko_*) browser.
+def mac_chromium_support_dir(browser):
     support = os.path.join(HOME, "Library", "Application Support")
     if browser == "chrome":
-        return mac_chromium_extension_installed(os.path.join(support, "Google", "Chrome"), ext_id)
+        return os.path.join(support, "Google", "Chrome")
     if browser == "opera":
-        return mac_chromium_extension_installed(os.path.join(support, "com.operasoftware.Opera"), ext_id)
+        return os.path.join(support, "com.operasoftware.Opera")
+    return ""
+
+
+def mac_browser_extension_installed(browser, ext_id):
+    support = os.path.join(HOME, "Library", "Application Support")
+    chromium = mac_chromium_support_dir(browser)
+    if chromium:
+        return mac_chromium_extension_installed(chromium, ext_id)
     if browser == "waterfox":
         return mac_gecko_extension_installed(os.path.join(support, "Waterfox"), ext_id)
     return False
@@ -3544,8 +3573,51 @@ def check_mac_login_items(login_lines):
             report_miss(f"Login item {label} (exactly one of: {fmt}; found: {', '.join(matched)})")
 
 
+# The terminal app gar runs under, for the Full Disk Access recovery hint.
+def gar_terminal_app_name():
+    bundle = os.environ.get("__CFBundleIdentifier", "")
+    known = {
+        "com.googlecode.iterm2": "iTerm",
+        "com.apple.Terminal": "Terminal",
+        "com.microsoft.VSCode": "Visual Studio Code",
+        "dev.warp.Warp-Stable": "Warp",
+        "net.kovidgoyal.kitty": "kitty",
+        "com.github.wez.wezterm": "WezTerm",
+    }
+    if bundle in known:
+        return known[bundle]
+    term = os.environ.get("TERM_PROGRAM", "")
+    return term[:-4] if term.endswith(".app") else (term or "your terminal app")
+
+
+# A reset Chromium support-dir TCC grant makes every extension read as MISS
+# (see mac_chromium_support_unreadable). Detect it once per Chromium browser and
+# WARN with a Full Disk Access recovery hint instead, suppressing that browser's
+# per-extension MISSes. Returns the set of browsers whose dir is unreadable.
+def check_mac_chromium_access(browsers):
+    blocked = set()
+    for browser in browsers:
+        support = mac_chromium_support_dir(browser)
+        if support and mac_chromium_support_unreadable(support):
+            blocked.add(browser)
+    if blocked:
+        app = gar_terminal_app_name()
+        names = ", ".join(sorted(b.capitalize() for b in blocked))
+        report_warn(f"Browser extensions: cannot read {names} support dir "
+                    f"(all its extensions would misreport as MISS) -- likely a "
+                    f"macOS TCC grant reset after an OS upgrade")
+        out(f"Grant {app} Full Disk Access, then relaunch it and re-run gar:")
+        out(f"  1. System Settings > Privacy & Security > Full Disk Access")
+        out(f"  2. Enable {app} (add it with + if absent)")
+        out(f"  3. Quit and relaunch {app} (TCC changes apply on restart)")
+        out(f"Verify before re-running: ls -d ~/Library/Application\\ Support/"
+            f"Google/Chrome/*/Extensions")
+    return blocked
+
+
 def check_mac_browser_extensions():
     entries = [split_fields(l, 3) for l in read_manifest(os.path.join(GAR_DIR, "mac.browser-extensions"))]
+    blocked = check_mac_chromium_access({b for b, _, _ in entries})
 
     def status(entry):
         browser, ext_id, label = entry
@@ -3554,6 +3626,8 @@ def check_mac_browser_extensions():
         app_path = mac_browser_app_path(browser)
         if not app_path or not os.path.exists(app_path):
             return "skip"
+        if browser in blocked:
+            return "blocked"
         return "ok" if mac_browser_extension_installed(browser, ext_id) else "miss"
 
     for (browser, ext_id, label), st in zip(entries, _parallel_map(status, entries)):
@@ -3561,6 +3635,8 @@ def check_mac_browser_extensions():
             report_miss(f"Browser extension manifest line (expected browser|id|name): {browser}|{ext_id}|{label}")
         elif st == "ok":
             report_ok(f"Extension {browser}/{label}")
+        elif st == "blocked":
+            report_ok_preformatted(f"Extension {browser}/{label} (unverifiable: support dir unreadable)")
         elif st == "miss":
             hint = lookup_install_hint(label)
             report_miss(f"Extension {browser}/{label} ({hint if hint else ext_id})", (label, ext_id))
