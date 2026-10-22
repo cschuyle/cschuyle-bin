@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: pdfmultigrep [-i] [--layout] (-e PATTERN | -f FILE)... PDF [PDF ...]
+
+Search PDFs for many regexes at once. All patterns are compiled with flex into a
+single DFA, so each PDF's text is scanned once regardless of pattern count, and
+each hit reports which pattern matched:
+
+  file:page:rule:match
+
+Options:
+  -e PATTERN   Add a pattern (repeatable). Its rule name is the pattern itself.
+  -f FILE      Read patterns from FILE, one per line. A line of the form
+               NAME<TAB>PATTERN names the rule; otherwise the rule name is the
+               pattern. Blank lines and lines starting with # are ignored.
+  -i           Case-insensitive.
+  --layout     Pass -layout to pdftotext (keeps columns aligned).
+  -h, --help   Show this help.
+
+Patterns use flex (ERE-like) syntax. Spaces, double quotes and slashes are
+taken literally; {NAME} definition references are not supported.
+
+Lexer semantics, not grep semantics: matches are non-overlapping and scanned
+left to right; at each position the longest match wins, and on a tie the
+earlier pattern wins. So a greedy pattern can swallow text another pattern
+would have matched.
+
+Compiled matchers are cached in ${XDG_CACHE_HOME:-~/.cache}/pdfmultigrep.
+Exit status: 0 if any match, 1 if none, 2 on error.
+Requires: pdftotext (poppler), flex, cc.
+EOF
+}
+
+die() { echo "pdfmultigrep: $*" >&2; exit 2; }
+
+names=()
+patterns=()
+case_insensitive=0
+layout=()
+
+add_pattern_line() {
+  local line=$1
+  [[ -z "$line" || "$line" == \#* ]] && return 0
+  if [[ "$line" == *$'\t'* ]]; then
+    names+=("${line%%$'\t'*}")
+    patterns+=("${line#*$'\t'}")
+  else
+    names+=("$line")
+    patterns+=("$line")
+  fi
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -i) case_insensitive=1; shift ;;
+    --layout) layout=(-layout); shift ;;
+    -e) [[ $# -ge 2 ]] || die "-e needs a pattern"
+        names+=("$2"); patterns+=("$2"); shift 2 ;;
+    -f) [[ $# -ge 2 ]] || die "-f needs a file"
+        [[ -r "$2" ]] || die "cannot read pattern file: $2"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+          add_pattern_line "$line"
+        done < "$2"
+        shift 2 ;;
+    --) shift; break ;;
+    -*) die "unknown option: $1 (try --help)" ;;
+    *) break ;;
+  esac
+done
+
+[[ ${#patterns[@]} -gt 0 ]] || { usage >&2; exit 2; }
+[[ $# -gt 0 ]] || die "no PDF files given"
+for tool in pdftotext flex cc perl; do
+  command -v "$tool" >/dev/null || die "missing required tool: $tool"
+done
+
+# Flex pattern: make space, ", / and tab literal (they are syntax in flex),
+# leaving existing backslash escapes alone.
+flex_pattern() {
+  perl -pe 's{(\\.)|([ "/\t])}{ defined $1 ? $1 : sprintf("\\x%02x", ord $2) }ge' <<<"$1"
+}
+
+# C string literal body.
+c_string() {
+  perl -pe 's/([\\"])/\\$1/g' <<<"$1"
+}
+
+lex_source() {
+  local opts="noyywrap nounput noinput 8bit"
+  [[ $case_insensitive -eq 1 ]] && opts+=" case-insensitive"
+  cat <<EOF
+%option $opts
+%{
+#include <stdio.h>
+static const char *fname = "-";
+static int page = 1;
+static int hits = 0;
+static void hit(const char *rule) { hits++; printf("%s:%d:%s:%s\n", fname, page, rule, yytext); }
+%}
+%%
+EOF
+  local i
+  for i in "${!patterns[@]}"; do
+    printf '%s\thit("%s");\n' "$(flex_pattern "${patterns[$i]}")" "$(c_string "${names[$i]}")"
+  done
+  cat <<'EOF'
+\f	page++;
+.|\n	;
+%%
+int main(int argc, char **argv) { if (argc > 1) fname = argv[1]; yylex(); return hits ? 0 : 1; }
+EOF
+}
+
+src=$(lex_source)
+key=$(shasum -a 256 <<<"$src" | cut -c1-16)
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/pdfmultigrep"
+matcher="$cache_dir/$key"
+
+if [[ ! -x "$matcher" ]]; then
+  mkdir -p "$cache_dir"
+  build=$(mktemp -d "${TMPDIR:-/tmp}/pdfmultigrep.XXXXXX")
+  trap 'rm -rf "$build"' EXIT
+  printf '%s\n' "$src" > "$build/m.l"
+  flex -o "$build/m.c" "$build/m.l" || die "flex rejected the patterns (generated source: $build/m.l)"
+  cc -O2 -o "$build/m" "$build/m.c" 2>"$build/cc.err" || { cat "$build/cc.err" >&2; die "compile failed"; }
+  mv "$build/m" "$matcher"
+fi
+
+status=1
+for pdf in "$@"; do
+  if [[ ! -r "$pdf" ]]; then
+    echo "pdfmultigrep: cannot read: $pdf" >&2
+    status=2
+    continue
+  fi
+  set +e
+  pdftotext ${layout[@]+"${layout[@]}"} -q "$pdf" - | "$matcher" "$pdf"
+  rc=("${PIPESTATUS[@]}")
+  set -e
+  if [[ ${rc[0]} -ne 0 ]]; then
+    echo "pdfmultigrep: pdftotext failed: $pdf" >&2
+    status=2
+  elif [[ ${rc[1]} -eq 0 && $status -eq 1 ]]; then
+    status=0
+  fi
+done
+exit $status
