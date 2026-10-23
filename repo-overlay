@@ -225,16 +225,36 @@ def _move_hint(repo: str, keys: list[str]) -> str:
     )
 
 
+def main_worktree_toplevel() -> str:
+    """Absolute path of the repo's MAIN working tree.
+
+    In a linked worktree, `rev-parse --show-toplevel` is the worktree dir, which is not a
+    registry key — the registry keys the main checkout. `git worktree list --porcelain` lists
+    the main worktree first (its documented contract), so its first `worktree ` line is the
+    path to match the registry against. In an ordinary clone this equals --show-toplevel."""
+    for line in git_out("worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            return line[len("worktree "):]
+    # Fallback (should not happen for a real repo): the current working tree.
+    return git_out("rev-parse", "--show-toplevel")
+
+
 def resolve_repo() -> str:
     """cd into the git repo containing the cwd, match it against the registry, and set the module
     globals CFG / BRANCH / OVERLAY_MSG from the matched entry. Dies (with a move/rename hint when
-    the path looks like a relocated configured repo) if the repo isn't registered."""
+    the path looks like a relocated configured repo) if the repo isn't registered.
+
+    Worktree-aware: the registry is matched on the MAIN working tree (so one entry covers a repo
+    and all its linked worktrees), but the cwd stays in the current worktree — every overlay
+    operation (skip-worktree index flags, working-tree file writes) acts on THIS worktree."""
     global CFG, BRANCH, OVERLAY_MSG, BACKUP_BRANCH, BACKUP_REMOTE
-    repo = git_out("rev-parse", "--show-toplevel")
-    if not repo:
+    worktree = git_out("rev-parse", "--show-toplevel")
+    if not worktree:
         die(f"not inside a git repository (cwd: {os.getcwd()}).")
-    os.chdir(repo)
-    repo = os.path.realpath(repo)
+    os.chdir(worktree)
+    worktree = os.path.realpath(worktree)
+    # Registry key is the MAIN checkout; equals `worktree` in an ordinary clone.
+    repo = os.path.realpath(main_worktree_toplevel())
 
     registry = load_registry()
     # Compare on realpath'd keys so a '~'-written or symlinked registry key still matches.
@@ -256,8 +276,9 @@ def resolve_repo() -> str:
 
     configured = sorted(by_real.keys())
     listing = "\n".join(f"         {k}" for k in configured) if configured else "         (none)"
+    via_worktree = f" (worktree: {worktree})" if worktree != repo else ""
     die(
-        f"this repo is not in the overlay registry: {repo}\n"
+        f"this repo is not in the overlay registry: {repo}{via_worktree}\n"
         f"       Configured repos ({REGISTRY_PATH}):\n{listing}"
         f"{_move_hint(repo, configured)}"
     )
@@ -386,12 +407,43 @@ def current_branch() -> str:
 # a later `git add` stages it anyway — exclude suppresses untracked listing, not an explicit add.)
 # The block is rewritten wholesale each time.
 
-EXCLUDE_BEGIN = "# >>> repo-overlay excludes >>>"
-EXCLUDE_END = "# <<< repo-overlay excludes <<<"
-# Pre-rename spellings, recognized on read/rewrite so an existing lims block is seen and then
-# collapsed under the current markers on the next write.
-LEGACY_EXCLUDE_BEGINS = {EXCLUDE_BEGIN, "# >>> lims-overlay excludes >>>"}
-LEGACY_EXCLUDE_ENDS = {EXCLUDE_END, "# <<< lims-overlay excludes <<<"}
+# .git/info/exclude is SHARED across all of a repo's worktrees (git does not honor a
+# per-worktree $GIT_DIR/info/exclude), so each worktree's overlay block is tagged with a
+# worktree id and only its own block is read/rewritten — concurrent worktrees don't clobber
+# each other's hidden-added-file lists. Untagged/legacy blocks belong to the main checkout.
+def _worktree_id() -> str:
+    """Stable, filesystem-safe id for the current worktree, used to namespace its exclude block.
+
+    git-dir is `<repo>/.git` for the main worktree (id 'main') and `<common>/worktrees/<id>`
+    for a linked worktree (id = that dir's basename). Stable across branch switches."""
+    gitdir = os.path.basename(git_out("rev-parse", "--git-dir").rstrip("/"))
+    return "main" if gitdir == ".git" else gitdir
+
+
+def _exclude_markers() -> "tuple[str, str]":
+    """(begin, end) exclude-block markers for the current worktree."""
+    wt = _worktree_id()
+    return (f"# >>> repo-overlay excludes [wt:{wt}] >>>",
+            f"# <<< repo-overlay excludes [wt:{wt}] <<<")
+
+
+# Pre-namespacing spellings (and the older lims-overlay spelling), recognized ONLY for the main
+# worktree so its legacy un-tagged block migrates into the tagged form on the next write; a
+# linked worktree must not claim the main checkout's legacy block.
+LEGACY_EXCLUDE_BEGINS = {"# >>> repo-overlay excludes >>>", "# >>> lims-overlay excludes >>>"}
+LEGACY_EXCLUDE_ENDS = {"# <<< repo-overlay excludes <<<", "# <<< lims-overlay excludes <<<"}
+
+
+def _begin_markers() -> set:
+    """Begin markers to recognize on read for the current worktree (its tagged marker, plus the
+    legacy un-tagged markers when this IS the main worktree)."""
+    begin, _ = _exclude_markers()
+    return {begin} | (LEGACY_EXCLUDE_BEGINS if _worktree_id() == "main" else set())
+
+
+def _end_markers() -> set:
+    _, end = _exclude_markers()
+    return {end} | (LEGACY_EXCLUDE_ENDS if _worktree_id() == "main" else set())
 
 
 def _exclude_path() -> str:
@@ -407,18 +459,19 @@ def _read_exclude_lines() -> list[str]:
 
 
 def overlay_excluded_set() -> set[str]:
-    """Repo-relative paths currently listed in the repo-overlay block of .git/info/exclude
-    (legacy lims-overlay block recognized too).
+    """Repo-relative paths currently listed in THIS worktree's repo-overlay block of the shared
+    .git/info/exclude (the main worktree also recognizes the legacy un-tagged block).
 
     Entries are written root-anchored (leading '/'); the slash is stripped here so the paths
     compare equal to the repo-relative entries in the overlay `files` list."""
+    begins, ends = _begin_markers(), _end_markers()
     inside = False
     found = set()
     for line in _read_exclude_lines():
-        if line.strip() in LEGACY_EXCLUDE_BEGINS:
+        if line.strip() in begins:
             inside = True
             continue
-        if line.strip() in LEGACY_EXCLUDE_ENDS:
+        if line.strip() in ends:
             inside = False
             continue
         if inside and line.strip():
@@ -427,18 +480,21 @@ def overlay_excluded_set() -> set[str]:
 
 
 def _write_exclude_block(paths: set[str]) -> None:
-    """Rewrite .git/info/exclude so the repo-overlay block lists exactly `paths` (block omitted
-    entirely when empty). A legacy-marker block is dropped and re-emitted under current markers.
-    Lines outside the block are preserved verbatim."""
+    """Rewrite the shared .git/info/exclude so THIS worktree's overlay block lists exactly
+    `paths` (block omitted entirely when empty). Any other worktree's block — and every line
+    outside this worktree's block — is preserved verbatim. For the main worktree a legacy
+    un-tagged block is dropped and re-emitted under the current tagged markers."""
     path = _exclude_path()
     if not path:
         die("cannot locate .git/info/exclude")
+    begin, end = _exclude_markers()
+    begins, ends = _begin_markers(), _end_markers()
     kept, inside = [], False
     for line in _read_exclude_lines():
-        if line.strip() in LEGACY_EXCLUDE_BEGINS:
+        if line.strip() in begins:
             inside = True
             continue
-        if line.strip() in LEGACY_EXCLUDE_ENDS:
+        if line.strip() in ends:
             inside = False
             continue
         if not inside:
@@ -449,9 +505,9 @@ def _write_exclude_block(paths: set[str]) -> None:
     if paths:
         if out:
             out.append("")
-        out.append(EXCLUDE_BEGIN)
+        out.append(begin)
         out.extend(f"/{p}" for p in sorted(paths))
-        out.append(EXCLUDE_END)
+        out.append(end)
     text = "\n".join(out)
     if text:
         text += "\n"
@@ -1243,7 +1299,9 @@ HELP_TEXT = f"""\
 kept as a commit on a local-only branch (default '{BRANCH}') and applied to the working tree.
 
 Run from inside a repo listed in the registry ({REGISTRY_PATH});
-it operates on the current directory's checkout.
+it operates on the current directory's checkout. Git worktrees are supported: a linked
+worktree matches its main checkout's registry entry, and the overlay applies/hides per
+worktree (each worktree's hidden-file state is namespaced in the shared .git/info/exclude).
 
 Usage: {{prog}} <command>
 
