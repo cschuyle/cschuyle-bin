@@ -83,8 +83,17 @@ fi
 # Passing PATH as a df argument yields exactly one data row for the filesystem
 # containing it, so no grep is needed. Columns $2/$4/$5 (Size/Avail/Capacity)
 # sit in identical positions on macOS `df -H` and GNU `df -H`.
+#
+# macOS caveat: querying "/" lands on the read-only System snapshot volume,
+# whose Capacity (Used/Size) is a near-zero 3% unrelated to how full the disk
+# actually is; the real user data lives on the sibling Data volume. When asked
+# about "/" on mac, query the Data volume instead so Capacity matches what
+# Finder / "About This Mac" report, while still labeling the row "/".
 report_dir() {
     local label="$1" path="$2" row total avail percent
+    if [[ "$path" == "/" && "$(detect_platform)" == "mac" && -d /System/Volumes/Data ]]; then
+        path=/System/Volumes/Data
+    fi
     row="$(df -H "$path" 2>/dev/null | awk 'NR==2')" || true
     if [[ -z "$row" ]]; then
         echo "WARNING: No match for $label" 1>&2
