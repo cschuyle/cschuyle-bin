@@ -1,7 +1,19 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# dependencies = ["ruaccent", "truststore", "huggingface_hub<2"]
+# requires-python = ">=3.10,<3.13"
+# dependencies = [
+#     "ruaccent",
+#     "numpy",
+#     "onnxruntime",
+#     "transformers",
+#     "truststore",
+#     "huggingface_hub<2",
+# ]
 # ///
+# ruaccent declares no runtime deps of its own, so numpy/onnxruntime/transformers
+# (which it imports) must be listed here or the import fails with ModuleNotFoundError.
+# requires-python: onnxruntime/transformers wheels lag new CPython releases, so pin
+# to an interpreter they publish wheels for rather than whatever (e.g. 3.15) is default.
 # huggingface_hub<2: every modern transformers caps hub <2, so without this uv
 # backtracks to transformers 4.12.2 -> tokenizers 0.10.3, which has no wheels and
 # fails trying to build from source with Rust.
